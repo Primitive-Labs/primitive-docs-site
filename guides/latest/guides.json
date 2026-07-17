@@ -1,0 +1,1147 @@
+{
+  "defaults": {
+    "language": "ts",
+    "platform": "web"
+  },
+  "platforms": {
+    "web": {
+      "language": "ts"
+    },
+    "ios": {
+      "language": "swift"
+    },
+    "macos": {
+      "language": "swift"
+    }
+  },
+  "builtAgainst": {
+    "stampedAt": "2026-07-17",
+    "channel": "alpha",
+    "packages": {
+      "js-bao-wss-client": "2.0.5",
+      "js-bao": "0.5.1",
+      "primitive-admin": "1.0.54",
+      "primitive-app": "3.0.5"
+    }
+  },
+  "guides": [
+    {
+      "topic": "authentication",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.ts.md",
+      "description": "Implementing user authentication with OAuth, Magic Link, OTP, and Passkeys",
+      "keywords": [
+        "authentication",
+        "auth",
+        "OAuth",
+        "Google",
+        "Magic Link",
+        "OTP",
+        "Passkey",
+        "WebAuthn",
+        "login",
+        "sign-in",
+        "JWT"
+      ],
+      "useCases": [
+        "Implementing Google OAuth sign-in",
+        "Adding passwordless Magic Link authentication",
+        "Using OTP email codes for verification",
+        "Adding Passkey/WebAuthn support",
+        "Handling auth state changes and events",
+        "Managing JWT persistence"
+      ],
+      "concepts": [
+        "OAuth",
+        "magicLinkRequest",
+        "magicLinkVerify",
+        "otpRequest",
+        "otpVerify",
+        "passkeyAuthStart",
+        "passkeyAuthFinish",
+        "auth events",
+        "getAuthConfig"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "documents"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "blobs",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOBS.ts.md",
+      "description": "Document-scoped blob storage — upload, download, offline queue, caching, and permissions",
+      "keywords": [
+        "blobs",
+        "files",
+        "upload",
+        "download",
+        "images",
+        "PDFs",
+        "storage",
+        "offline",
+        "cache",
+        "prefetch",
+        "avatars"
+      ],
+      "useCases": [
+        "Uploading files and images scoped to a document",
+        "Downloading and displaying blobs",
+        "Caching blobs for offline access",
+        "Managing upload queues",
+        "Prefetching blobs for offline use",
+        "Using blobs in img/video tags",
+        "Creating general-purpose blob buckets (avatars, public assets, workflow outputs)",
+        "Configuring access policies and TTL tiers for buckets",
+        "Generating time-limited signed URLs",
+        "Applying CEL-based access rules to buckets"
+      ],
+      "concepts": [
+        "blobs.upload",
+        "blobs.read",
+        "blobs.list",
+        "blobs.delete",
+        "blobs.prefetch",
+        "downloadUrl",
+        "proxyUrl",
+        "upload queue",
+        "service worker",
+        "blobBuckets.bucket",
+        "bucket.upload",
+        "bucket.signedUrl",
+        "accessPolicy",
+        "ttlTier",
+        "BlobBucket"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "documents",
+        "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOBS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOBS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "data-modeling",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md",
+      "description": "Choosing between documents and databases, and designing your app's data architecture",
+      "keywords": [
+        "data modeling",
+        "storage",
+        "architecture",
+        "documents vs databases",
+        "when to use",
+        "design patterns",
+        "data architecture"
+      ],
+      "useCases": [
+        "Deciding between documents and databases for a feature",
+        "Designing data architecture for a new app",
+        "Splitting data across documents and databases",
+        "Choosing access control patterns",
+        "Planning for scale and performance"
+      ],
+      "concepts": [
+        "documents",
+        "databases",
+        "local-first",
+        "server-side storage",
+        "access control",
+        "CEL",
+        "sharing",
+        "collaboration"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "documents",
+        "databases",
+        "users-and-groups"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "users-and-groups",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.ts.md",
+      "description": "Built-in user model, groups, memberships, and CEL-based access control patterns",
+      "keywords": [
+        "users",
+        "groups",
+        "memberships",
+        "access control",
+        "roles",
+        "permissions",
+        "CEL",
+        "rule sets",
+        "isMemberOf",
+        "memberGroups",
+        "teams",
+        "user model",
+        "profile",
+        "email-based add"
+      ],
+      "useCases": [
+        "Accessing built-in user profile info (name, email, avatar)",
+        "Creating and managing groups for team-based access",
+        "Adding group members by userId or email",
+        "Removing group members",
+        "Granting group-based document and database permissions",
+        "Using groups in database CEL access expressions",
+        "Configuring rule sets for group management",
+        "Modeling user relationships (parent-child, mentor-mentee)",
+        "Supplementing platform user data without replacing it"
+      ],
+      "concepts": [
+        "users.getBasic",
+        "groups.create",
+        "groups.addMember",
+        "groups.removeMember",
+        "groups.listMembers",
+        "groupTypeConfigs",
+        "ruleSets",
+        "isMemberOf",
+        "memberGroups",
+        "hasRole",
+        "grantGroupPermission",
+        "appRole",
+        "autoAddCreator"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "databases",
+        "documents",
+        "data-modeling",
+        "authentication",
+        "invitations",
+        "resource-metadata"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "databases",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.ts.md",
+      "description": "Server-side databases — CEL access rules, registered operations, triggers, realtime subscriptions",
+      "keywords": [
+        "databases",
+        "database",
+        "server-side",
+        "CEL",
+        "access control",
+        "operations",
+        "triggers",
+        "autoPopulatedFields",
+        "defaultAccess",
+        "query",
+        "mutation",
+        "aggregate",
+        "pipeline",
+        "permissions",
+        "groups",
+        "subscription",
+        "subscriptions",
+        "real-time",
+        "applyToQuery",
+        "DatabaseTypeSubscription",
+        "DatabaseGroupPermission",
+        "subscribe",
+        "db.change",
+        "live updates"
+      ],
+      "useCases": [
+        "Creating and managing server-side databases",
+        "Defining registered operations with access control",
+        "Configuring triggers for computed fields",
+        "Setting up group-based access with CEL expressions",
+        "Querying and filtering database records",
+        "Executing mutations and batch operations",
+        "Running query-and-mutate operations with applyToQuery",
+        "Building multi-step pipeline operations",
+        "Configuring autoPopulatedFields and defaultAccess on a type",
+        "Subscribing to real-time database changes over WebSocket",
+        "Granting database access to a group via DatabaseGroupPermission",
+        "Importing CSV data into databases",
+        "Managing database permissions",
+        "Subscribing to real-time database changes",
+        "Building live dashboards and notification badges"
+      ],
+      "concepts": [
+        "databases.create",
+        "databases.connect",
+        "databases.executeOperation",
+        "DatabaseTypeConfig",
+        "registered operations",
+        "autoPopulatedFields",
+        "defaultAccess",
+        "CEL expressions",
+        "isMemberOf",
+        "hasRole",
+        "triggers",
+        "pipeline",
+        "aggregate",
+        "bulk import",
+        "DoDb",
+        "syncIndexes",
+        "applyToQuery",
+        "itemAccess",
+        "databases.subscribe",
+        "DatabaseTypeSubscription",
+        "select projection",
+        "originConnectionId",
+        "DatabaseGroupPermission",
+        "grantGroupPermission"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "documents",
+        "data-modeling",
+        "users-and-groups",
+        "workflows",
+        "resource-metadata"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "documents",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md",
+      "description": "Local-first collaborative documents — models, CRUD, sharing, collections, access requests",
+      "keywords": [
+        "documents",
+        "models",
+        "schema",
+        "query",
+        "save",
+        "CRUD",
+        "sharing",
+        "permissions",
+        "js-bao",
+        "data modeling",
+        "local-first",
+        "collaboration",
+        "share",
+        "collections",
+        "access request",
+        "members",
+        "pending invitations"
+      ],
+      "useCases": [
+        "Creating and defining data models",
+        "Querying and filtering data",
+        "Saving and updating records",
+        "Sharing documents with other users",
+        "Understanding document permissions",
+        "Using useJsBaoDataLoader for reactive data",
+        "Sharing a document with a user, email, or group",
+        "Building a members + pending sharing UI",
+        "Handling document access requests",
+        "Bundling documents into collections"
+      ],
+      "concepts": [
+        "BaseModel",
+        "models.toml",
+        "js-bao-codegen-v2",
+        "query",
+        "save",
+        "documents.open",
+        "me.ownedDocuments",
+        "me.sharedDocuments",
+        "useJsBaoDataLoader",
+        "documentReady",
+        "initialDataLoaded",
+        "upsertByUnique",
+        "aliases"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "workflows",
+        "devtools",
+        "databases",
+        "data-modeling"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "workflows",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.ts.md",
+      "description": "Multi-step automation pipelines — LLM calls, integrations, cron, sync runs, database steps",
+      "keywords": [
+        "workflows",
+        "automation",
+        "pipelines",
+        "steps",
+        "LLM",
+        "AI",
+        "OpenAI",
+        "Gemini",
+        "TOML",
+        "templates",
+        "email.send",
+        "switch step",
+        "forEach",
+        "zip",
+        "successWhen",
+        "runSync",
+        "syncCallable",
+        "analytics.query",
+        "applyToQuery",
+        "cron",
+        "scheduled",
+        "include fragments",
+        "$params validator",
+        "cron-triggers",
+        "overlap policy",
+        "timezone",
+        "schedule"
+      ],
+      "useCases": [
+        "Building multi-step automation pipelines",
+        "Chaining LLM calls together",
+        "Calling external APIs from workflows",
+        "Using managed prompts in workflows",
+        "Sending emails from workflows (template or inline mode)",
+        "Writing blobs from workflows",
+        "Running analytics queries from workflows",
+        "Running query+mutate database operations",
+        "Branching with switch steps and runIf predicates",
+        "Fanning out work with forEach (concurrent or zip) and successWhen",
+        "Scheduling workflows with cron triggers",
+        "Invoking short workflows synchronously via runSync",
+        "Sharing common step blocks via include fragments",
+        "Inspecting workflow run steps for debugging"
+      ],
+      "concepts": [
+        "workflow",
+        "steps",
+        "llm.chat",
+        "gemini.generate",
+        "integration.call",
+        "prompt.execute",
+        "transform",
+        "switch",
+        "runIf",
+        "saveAs",
+        "templates",
+        "now",
+        "today",
+        "uuid",
+        "ulid",
+        "CEL safe navigation",
+        "syncCallable",
+        "workflows.runSync",
+        "forEach zip",
+        "successWhen",
+        "include fragments",
+        "email.send",
+        "blob.upload",
+        "analytics.query",
+        "database.applyToQuery",
+        "cron trigger",
+        "overlapPolicy",
+        "workflow run steps"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "prompts",
+        "scripts",
+        "integrations",
+        "databases",
+        "blobs",
+        "analytics",
+        "app-secrets",
+        "resource-metadata"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "notifications",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.md",
+      "description": "Multi-channel notifications (in-app inbox, push) — client SDK, notification.send step, dedupe",
+      "keywords": [
+        "notifications",
+        "push notifications",
+        "in-app inbox",
+        "APNs",
+        "FCM",
+        "device token",
+        "notification.send",
+        "idempotency",
+        "rate limit",
+        "unreadCount",
+        "registerDevice"
+      ],
+      "useCases": [
+        "Sending an in-app notification to a user",
+        "Reading and marking a user's notification inbox",
+        "Registering a device for push notifications",
+        "Sending a notification from a workflow step",
+        "Listening for live notification events over the WebSocket",
+        "Making a notification send safe to retry with idempotencyKey",
+        "Handling notification rate limits"
+      ],
+      "concepts": [
+        "notification",
+        "in-app inbox",
+        "push channel",
+        "client.notifications.send",
+        "client.notifications.list",
+        "registerDevice",
+        "tokenSuffix",
+        "notification.send step",
+        "idempotencyKey",
+        "deduplicatedChannels",
+        "NotificationRateLimitError"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "workflows"
+      ]
+    },
+    {
+      "topic": "scripts",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md",
+      "description": "Sandboxed Rhai scripts for workflow transforms — input/output contract, parse_json gotcha, limits",
+      "keywords": [
+        "scripts",
+        "Rhai",
+        "transforms",
+        "script step",
+        "parse_json",
+        "JSON transform",
+        "ScriptConfig",
+        "sandbox",
+        "deterministic",
+        "limits",
+        "transforms/*.rhai"
+      ],
+      "useCases": [
+        "Reshaping nested JSON in a workflow",
+        "Computing derived fields from step output",
+        "Mapping, filtering, and reducing arrays in a script step",
+        "Parsing JSON-string database/document fields",
+        "Working around the parse_json top-level-array error",
+        "Bounding a script step with per-run limits",
+        "Testing a script via workflow test cases"
+      ],
+      "concepts": [
+        "script",
+        "Rhai",
+        "ScriptConfig",
+        "activeConfigId",
+        "ref",
+        "configId",
+        "input",
+        "ctx",
+        "with",
+        "parse_json",
+        "limits",
+        "scriptMetrics",
+        "non-retryable error"
+      ],
+      "prerequisites": [
+        "workflows"
+      ],
+      "relatedGuides": [
+        "workflows",
+        "configuration"
+      ]
+    },
+    {
+      "topic": "prompts",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.ts.md",
+      "description": "Managing LLM prompts with templates, configurations, and testing",
+      "keywords": [
+        "prompts",
+        "LLM",
+        "templates",
+        "variables",
+        "configs",
+        "testing",
+        "Gemini",
+        "OpenRouter",
+        "TOML"
+      ],
+      "useCases": [
+        "Creating managed prompt templates",
+        "Using variable substitution in prompts",
+        "Testing prompts with test cases",
+        "Managing multiple prompt configurations",
+        "Setting up LLM-based evaluation",
+        "Syncing prompts from TOML files"
+      ],
+      "concepts": [
+        "prompt",
+        "configs",
+        "userPromptTemplate",
+        "systemPrompt",
+        "variables",
+        "execute",
+        "preview",
+        "test cases",
+        "evaluator",
+        "provider",
+        "model"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "integrations",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.ts.md",
+      "description": "Connecting to third-party APIs with secure credential storage",
+      "keywords": [
+        "integrations",
+        "API",
+        "REST",
+        "HTTP",
+        "credentials",
+        "secrets",
+        "proxy",
+        "external services",
+        "TOML"
+      ],
+      "useCases": [
+        "Connecting to external REST APIs",
+        "Storing API credentials securely",
+        "Configuring allowed methods and paths",
+        "Testing integration endpoints",
+        "Managing API secrets and rotation"
+      ],
+      "concepts": [
+        "integration",
+        "requestConfig",
+        "baseUrl",
+        "allowedMethods",
+        "allowedPaths",
+        "secrets",
+        "proxy",
+        "forwardHeaders",
+        "staticQuery"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "workflows",
+        "app-secrets"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "app-secrets",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md",
+      "description": "Server-side credential store — manage secrets via the CLI, reference as {{ secrets.KEY }}",
+      "keywords": [
+        "secrets",
+        "app secrets",
+        "credentials",
+        "API keys",
+        "tokens",
+        "secrets.KEY",
+        "rotation",
+        "write-only",
+        "environment secrets"
+      ],
+      "useCases": [
+        "Storing API keys and tokens for external services",
+        "Referencing credentials from integration headers",
+        "Using secrets in workflow templates and CEL",
+        "Reading secrets in database access rules and trigger stamps",
+        "Rotating a credential without a config push",
+        "Keeping per-environment secret values"
+      ],
+      "concepts": [
+        "primitive secrets set",
+        "primitive secrets list",
+        "secrets.KEY",
+        "write-only store",
+        "per-app scope",
+        "defaultHeaders",
+        "step output snapshots"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "integrations",
+        "workflows",
+        "databases",
+        "configuration"
+      ]
+    },
+    {
+      "topic": "analytics",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.ts.md",
+      "description": "Tracking user behavior with automatic lifecycle events and custom event logging",
+      "keywords": [
+        "analytics",
+        "events",
+        "tracking",
+        "metrics",
+        "DAU",
+        "WAU",
+        "MAU",
+        "logEvent",
+        "auto events",
+        "usage",
+        "user activity",
+        "session",
+        "offline"
+      ],
+      "useCases": [
+        "Logging custom analytics events",
+        "Configuring automatic lifecycle event tracking",
+        "Querying app-wide analytics (DAU, WAU, MAU)",
+        "Viewing top users and user timelines",
+        "Tracking integration and workflow metrics",
+        "Overriding plan or app version for analytics",
+        "Handling pre-auth event logging",
+        "Flushing events before navigation"
+      ],
+      "concepts": [
+        "client.analytics.logEvent",
+        "client.analytics.flush",
+        "client.analytics.logSnapshot",
+        "analyticsAutoEvents",
+        "ANALYTICS_UNAUTHENTICATED_USER",
+        "auto events",
+        "offline persistence",
+        "rate limiting"
+      ],
+      "prerequisites": [
+        "authentication"
+      ],
+      "relatedGuides": [
+        "workflows",
+        "integrations",
+        "blobs"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "performance",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.ts.md",
+      "description": "Patterns and anti-patterns for cutting cold-load time and round-trip count in Primitive apps",
+      "keywords": [
+        "performance",
+        "perf",
+        "slow",
+        "latency",
+        "round trips",
+        "N+1",
+        "pipeline op",
+        "Promise.all",
+        "cold path",
+        "first paint",
+        "bulk op",
+        "subscribe",
+        "cron cache",
+        "stale-while-revalidate",
+        "Pinia",
+        "measure"
+      ],
+      "useCases": [
+        "Diagnosing why a page is slow on cold load",
+        "Replacing N+1 executeOperation loops with a single bulk call",
+        "Bundling related queries into a pipeline operation",
+        "Parallelizing independent awaits with Promise.all",
+        "Moving third-party API calls to a server-side cron",
+        "Rendering with cached values and refreshing reactively",
+        "Caching source data with DB-subscribe invalidation",
+        "Deferring non-critical init off the cold path",
+        "Auditing an existing Primitive app for common slow patterns",
+        "Instrumenting first-paint time to verify a perf win"
+      ],
+      "concepts": [
+        "pipeline operation",
+        "bulk op",
+        "Promise.all",
+        "cold path vs background",
+        "re-block trap",
+        "stale-while-revalidate",
+        "client.databases.subscribe",
+        "fromWorkflow",
+        "server-side cron",
+        "pure compute",
+        "Pinia store"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "databases",
+        "integrations",
+        "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "devtools",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md",
+      "description": "Using Document Explorer and Test Harness for debugging and testing",
+      "keywords": [
+        "devtools",
+        "debugging",
+        "testing",
+        "Document Explorer",
+        "Test Harness",
+        "browser",
+        "validation",
+        "inspection"
+      ],
+      "useCases": [
+        "Inspecting document data in the browser",
+        "Validating CRUD operations worked correctly",
+        "Running browser-based tests",
+        "Filtering and sorting records for inspection",
+        "Writing test cases for js-bao models"
+      ],
+      "concepts": [
+        "DevTools",
+        "Document Explorer",
+        "Test Harness",
+        "TestGroup",
+        "test cases",
+        "model inspection",
+        "data validation"
+      ],
+      "prerequisites": [
+        "documents"
+      ],
+      "relatedGuides": [
+        "documents"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "configuration",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md",
+      "description": "Backend configuration as code — TOML sync loop, directory map, environments, headless CI auth",
+      "keywords": [
+        "configuration",
+        "config",
+        "sync",
+        "TOML",
+        "primitive sync",
+        "push",
+        "pull",
+        "diff",
+        "environments",
+        "env",
+        "secrets",
+        "tokens",
+        "CI",
+        "config as code"
+      ],
+      "useCases": [
+        "Setting up the config directory for an app",
+        "Pushing workflow/prompt/integration/database-type changes to the server",
+        "Managing dev/staging/prod environments from one repo",
+        "Storing app secrets referenced as {{ secrets.KEY }}",
+        "Authenticating the CLI in CI pipelines"
+      ],
+      "relatedGuides": [
+        "app-secrets"
+      ]
+    },
+    {
+      "topic": "access-control",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md",
+      "description": "CEL access rules — identity context, per-surface rule contexts, management rule sets",
+      "keywords": [
+        "access control",
+        "CEL",
+        "permissions",
+        "authorization",
+        "isMemberOf",
+        "hasRole",
+        "memberGroups",
+        "accessRule",
+        "rule sets",
+        "rule-sets",
+        "defaultAccess",
+        "fromWorkflow",
+        "subscription",
+        "entitlement",
+        "billing",
+        "paywall"
+      ],
+      "useCases": [
+        "Writing access rules for database operations",
+        "Gating who can subscribe to database changes",
+        "Restricting who can start a workflow",
+        "Governing who can create groups or manage members",
+        "Testing and debugging CEL rules",
+        "Building a subscription-entitlement (Stripe billing) gate end to end"
+      ],
+      "relatedGuides": [
+        "resource-metadata"
+      ]
+    },
+    {
+      "topic": "resource-metadata",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.ts.md",
+      "description": "Typed metadata on any resource — categories, md.self/md.caller in CEL, batch reads, workflow steps",
+      "keywords": [
+        "resource metadata",
+        "metadata category",
+        "md.self",
+        "md.caller",
+        "metadataManifest",
+        "MetadataCategoryConfig",
+        "readRule",
+        "writeRule",
+        "resourceMetadata",
+        "getBatch",
+        "metadata.write",
+        "metadata.read",
+        "attrs",
+        "fromWorkflow"
+      ],
+      "useCases": [
+        "Attaching schema'd, access-controlled data to a user, group, collection, database, or workflow subject",
+        "Reading and writing a metadata category from the client or CLI, including a batch read",
+        "Referencing declared metadata in a group, collection, or database access rule",
+        "Reading the calling user's own metadata (md.caller) in an access rule",
+        "Writing metadata from a workflow step, restricted to that workflow with fromWorkflow()",
+        "Substituting a metadata value into a database operation's filter or data"
+      ],
+      "concepts": [
+        "metadata category config (schema + readRule/writeRule)",
+        "declared-access manifest ([metadata.self]/[metadata.paths])",
+        "md.self.<category>.<key>",
+        "md.self.attrs (projected category)",
+        "md.caller (user.userId root)",
+        "metadata.write / metadata.read workflow steps",
+        "trusted-author model"
+      ],
+      "relatedGuides": [
+        "access-control",
+        "users-and-groups",
+        "databases",
+        "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "invitations",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.ts.md",
+      "description": "App membership — access modes, waitlist, invitations and quotas, custom emails, deferred grants",
+      "keywords": [
+        "invitations",
+        "invite",
+        "app membership",
+        "access mode",
+        "invite-only",
+        "domain",
+        "waitlist",
+        "inviteToken",
+        "deferred grant",
+        "pending signup",
+        "quota",
+        "accept"
+      ],
+      "useCases": [
+        "Inviting users to an app",
+        "Letting members invite teammates with quotas",
+        "Sending custom invitation emails",
+        "Handling invite-accept landing pages and tokens",
+        "Sharing with people who haven't signed up yet",
+        "Managing a waitlist for an invite-only app"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "blob-buckets",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.ts.md",
+      "description": "Blob buckets — configuration, access policies, TTL tiers, signed URLs, workflow integration",
+      "keywords": [
+        "blob bucket",
+        "buckets",
+        "bucket",
+        "signed url",
+        "ttl",
+        "access policy",
+        "public-read",
+        "owner-only",
+        "avatars",
+        "workflow outputs"
+      ],
+      "useCases": [
+        "Storing files outside any document (avatars, generated assets)",
+        "Serving public assets via signed URLs",
+        "Time-boxed download links",
+        "Writing workflow outputs to storage"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "deploying",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.ts.md",
+      "description": "Ship to production — web deploys (cf-deploy) and iOS distribution (TestFlight, App Store)",
+      "keywords": [
+        "deploy",
+        "deploying",
+        "production",
+        "ship",
+        "release",
+        "cf-deploy",
+        "wrangler",
+        "environments",
+        "ios",
+        "signing",
+        "provisioning",
+        "TestFlight",
+        "App Store",
+        "Fastlane",
+        "xcodegen",
+        "run-ios.sh"
+      ],
+      "useCases": [
+        "Deploying the web template to production",
+        "Adding staging/test environments",
+        "Running on a physical iPhone",
+        "Shipping a TestFlight build",
+        "Submitting to the App Store"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.swift.md"
+        }
+      ]
+    }
+  ]
+}
