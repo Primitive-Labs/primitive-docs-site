@@ -105,7 +105,10 @@ limit = 1
 Then execute it in one round trip and read each step's `data`:
 
 ```typescript
-  const bundle = await client.databases.executeOperation(databaseId, "dashboardBundle");
+  // Type the pipeline's per-step map (or pass the codegen'd <Op>Result alias).
+  const bundle = await client.databases.executeOperation<{
+    steps?: Record<string, { data?: unknown[] }>;
+  }>(databaseId, "dashboardBundle");
   const groups = bundle.steps?.groups?.data ?? [];
   const accounts = bundle.steps?.accounts?.data ?? [];
   const holdings = bundle.steps?.holdings?.data ?? [];
@@ -159,9 +162,12 @@ limit = 1000
 Call it once, then group client-side:
 
 ```typescript
-  const all = await client.databases.executeOperation(databaseId, "listAllTasks");
+  const all = await client.databases.executeOperation<{ data: TaskAttrs[] }>(
+    databaseId,
+    "listAllTasks",
+  );
   const byCategory = new Map<string, TaskAttrs[]>();
-  for (const task of all.data as TaskAttrs[]) {
+  for (const task of all.data) {
     const key = task.category ?? "uncategorized";
     const list = byCategory.get(key) ?? [];
     list.push(task);

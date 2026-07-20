@@ -114,14 +114,24 @@ Uploading the same `blobId` twice with **identical** `sha256` and `size` returns
 See **List / metadata / delete** above for the basic call. Each item carries `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, and `createdAt`. `cursor` is an opaque pagination token; only present when more results exist — follow it to page through results. `limit` accepts `1`–`100`; a larger value is clamped to `100`, and a zero, negative, or non-integer `limit` is rejected with a `400`. Page through the `cursor` for more than 100 blobs rather than asking for a bigger page.
 
 ```typescript
-  const page1 = await blobs.list({ limit: 50 });
+  // `list<T>` types each item — declare the fields your app reads.
+  interface BlobItem {
+    blobId: string;
+    filename: string;
+    contentType: string;
+    numBytes: number;
+    sha256: string;
+    createdAt: string;
+  }
+
+  const page1 = await blobs.list<BlobItem>({ limit: 50 });
   for (const b of page1.items) {
     console.log(b.blobId, b.filename, b.contentType, b.numBytes, b.sha256, b.createdAt);
   }
 
   // `cursor` is an opaque token; only present when more results remain.
   if (page1.cursor) {
-    const page2 = await blobs.list({ cursor: page1.cursor });
+    const page2 = await blobs.list<BlobItem>({ cursor: page1.cursor });
     return page2.items;
   }
 ```

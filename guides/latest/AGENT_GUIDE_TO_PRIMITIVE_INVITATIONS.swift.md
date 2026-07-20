@@ -107,8 +107,8 @@ primitive waitlist remove <waitlist-id>                  # drop an entry
 
 ```swift
 client.invitations.create(params: CreateInvitationParams) async throws -> AppInvitationInfo   // email, role?, expiresAt?, source?, note?, sendEmail?
-client.invitations.list(limit:cursor:) async throws -> InvitationListResult                   // .items / .cursor   (admin/owner only)
-client.invitations.delete(invitationId:) async throws -> InvitationDeleteResult               // CASCADES to deferred grants
+client.invitations.list(limit:cursor:) async throws -> InvitationListResult                   // .items / .cursor   (admin/owner: whole app; member: own only)
+client.invitations.delete(invitationId:) async throws -> InvitationDeleteResult               // CASCADES to deferred grants (admin/owner: any; member: own only, else 403)
 client.invitations.quota() async throws -> InvitationQuota                                    // .used / .limit / .remaining / .unlimited
 client.invitations.get(invitationId:) async throws -> AppInvitationInfo                       // includes inviteToken + status
 client.invitations.accept(inviteToken:) async throws -> AcceptInviteResult                    // authenticated cross-identity acceptance

@@ -108,8 +108,8 @@ primitive waitlist remove <waitlist-id>                  # drop an entry
 
 ```typescript
 client.invitations.create({ email, role?, expiresAt?, source?, note?, sendEmail? }); // -> AppInvitationInfo
-client.invitations.list({ limit?, cursor? });          // -> { items: AppInvitationInfo[], cursor? }   (admin/owner only)
-client.invitations.delete(invitationId);               // CASCADES to deferred grants
+client.invitations.list({ limit?, cursor? });          // -> { items: AppInvitationInfo[], cursor? }   (admin/owner: whole app; member: own only)
+client.invitations.delete(invitationId);               // CASCADES to deferred grants (admin/owner: any; member: own only, else 403)
 client.invitations.quota();                            // -> { used, limit, remaining, unlimited }
 client.invitations.get(invitationId);                  // -> AppInvitationInfo (includes inviteToken + status)
 client.invitations.accept(inviteToken);                // authenticated cross-identity acceptance

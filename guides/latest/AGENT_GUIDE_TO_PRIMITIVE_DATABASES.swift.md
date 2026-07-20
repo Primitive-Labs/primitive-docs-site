@@ -286,11 +286,11 @@ access = "isMemberOf('team', database.metadata.teamId)"
 [operations.definition]
 groupBy = ["status"]
 filter = { projectId = "$params.projectId" }
-sort = { field = "total", direction = -1 }
+sort = { field = "count", direction = -1 }
 limit = 10
 operations = [
-  { type = "count", outputField = "total" },
-  { type = "sum", field = "estimatedHours", outputField = "totalHours" },
+  { type = "count" },
+  { type = "sum", field = "estimatedHours" },
 ]
 
 [[operations.params]]
@@ -320,7 +320,7 @@ type = "aggregate"
 modelName = "tasks"
 filter = { projectId = "$params.projectId" }
 groupBy = ["status"]
-operations = [{ type = "count", outputField = "total" }]
+operations = [{ type = "count" }]
 
 [[operations.definition.steps]]
 name = "openBugs"
@@ -398,13 +398,44 @@ primitive databases import-csv <database-id> <file.csv> --model <name> \
 `database-types delete <type>` refuses with a 409 when live database instances of that type still exist — delete the instances first (`primitive databases delete <id>`) or pass `--force` to delete the type anyway (this orphans the instances). `-y`/`--yes` only skips the confirmation prompt; it does not bypass the guard. Once the 409 guard passes, the delete cascades: the type's operations and subscriptions are removed first, then the type config row is removed as the commit point — a failure removing a child leaves the whole type intact and the delete is retryable. The response reports the cascade counts: `{ success: true, deletedOperations: number, deletedSubscriptions: number }`.
 
 
+Generate Swift record structs and op param/result types from the database-type TOML:
+
+```bash
+primitive databases codegen --lang swift -o ./Generated/Databases
+```
+
+Codegen reads the database-type TOML from the auto-resolved sync directory (`.primitive/sync/<env>/<appId>/`); pass `--sync-dir <path>` only when overriding it. With no `-o`, generated files land in `<sync-dir>/database-types/generated/`. It emits one `<type>.generated.swift` per database type. Every symbol for a type is nested under a caseless `public enum <Type>` namespace — one record `struct` per model, a per-op `<Op>Params` struct, a per-op `<Op>Result` typealias, and an `Ops` factory struct plus a static `<Type>.ops(client, databaseId:)`. Because a Swift package compiles all `<type>.generated.swift` files into one module, the namespace is what keeps two database types that each define an op named `list` from colliding: they emit `Orders.ListParams` and `Invoices.ListParams`, never a bare `ListParams`. Each generated file is `import JsBaoClient`. (This nesting is a breaking change from the earlier flat symbols — `SaveAccountParams` → `Portfolio.SaveAccountParams`, `portfolioOps(...)` → `Portfolio.ops(...)`; regenerate and update call sites after upgrading.)
+
+**Codegen enum / required typing.** A field or op param restricted to a fixed set of string values becomes a nested `String`-backed enum on the struct (e.g. `Portfolio.Account.StatusValue` with cases `active` / `closed` / `pending_review` raw-valued to `"pending-review"`), so invalid values fail to compile (enum params are also validated server-side). Params an operation marks `required` are emitted as non-optional stored properties; the rest are optional with a `nil` default. A wire key that isn't a valid Swift identifier (`display-name`, `record-id`) is mapped through a generated `CodingKeys` enum, so JSON decoding stays correct.
+
+**Codegen array-param typing.** A param declared `type = "array"` (or one a filter binds to `$in`/`$nin` against a known model field) emits a Swift array of the element type — `items = "string"` → `[String]`, `items = "integer"` → `[Int]`; an unresolvable element widens to `[JSONValue]`.
+
+**Codegen result typing.** Each `<Op>Result` typealias is derived from the operation's `definition`, using the generic envelopes that ship in the Swift client (`DBQueryResult<T>`, `DBMutationResult`, `DBCountResult`, `DBAggregateResult`, `DBApplyToQueryResult`, `DBPipelineResult`):
+
+- `query` with a full projection over a known model → `DBQueryResult<Record>`. A narrowing, exclusion, or dynamic projection — or any query with no `[models.*]` schema — types its rows as the open `JSONValue` → `DBQueryResult<JSONValue>` (there is no partial-record row type).
+- `mutation` → `DBMutationResult` — a `results` array of `DBMutationStepResult` (`op`, `success`, `id`, optional `values`, optional `error`), whatever mix of step kinds the op contains.
+- `count` → `DBCountResult`, `aggregate` → `DBAggregateResult`, `applyToQuery` → `DBApplyToQueryResult`.
+- `pipeline` with `return = "<step>"` → that step's envelope (a query step's `DBQueryResult<…>`, a count step's `DBCountResult`, an aggregate step's `DBAggregateResult`). `return = "all"` (or no `return`) stays `DBPipelineResult`.
+
+After a CLI upgrade, `primitive databases codegen --lang swift --check` flags previously generated files as out of date — regenerate rather than hand-editing.
+
+**Typed operation calls.** Each type's namespace exposes a static factory `<Type>.ops(client, databaseId:)` (`portfolio` → `Portfolio.ops`, `catalog` → `Catalog.ops`) that binds a client and database id and returns the nested `<Type>.Ops` struct with one method per operation: params typed as `<Type>.<Op>Params`, results as `<Type>.<Op>Result`. No-param ops take only the paging options (`limit`, `cursor`, `direction: SortDirection?`, `timing`); a param op takes its `<Op>Params` struct as the first argument. Every method delegates to the published `databases.executeOperation<Params, Output>` overload, which encodes the typed params and decodes the typed result:
+
+```swift
+let ops = Portfolio.ops(client, databaseId: databaseId)
+let accounts = try await ops.listAccounts()              // Portfolio.ListAccountsResult
+try await ops.saveAccount(Portfolio.SaveAccountParams(accountNumber: "AC-1"))
+```
+
+Outside the factory, call the same overload directly with explicit type parameters: `try await client.databases.executeOperation(databaseId: databaseId, name: "listAccounts", params: Portfolio.ListAccountsParams()) as DBQueryResult<Portfolio.Account>`.
+
 ## Database Types
 
 A **database type** is a named configuration shared across many databases. It provides:
 
 - **Registered operations** (`type` is one of `query`, `mutation`, `count`, `aggregate`, `pipeline`, `applyToQuery`) with per-operation CEL `access`
 - **Triggers** — computed fields evaluated server-side before each save
-- **`celContextAccess`** — CEL expression that lets non-owner/manager users read and update the database's CEL context (defaults to deny when unset; owner/manager always have access)
+- **`celContextAccess`** — one CEL expression gating whether non-owner/manager users may read **and** update the database's CEL context (defaults to deny when unset; owner/manager always have access). A single rule covers both endpoints, so granting read necessarily grants update. Prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category, which carries separate `readRule` and `writeRule` — see [Migrating the CEL context to metadata categories](#migrating-the-cel-context-to-metadata-categories)
 - **`autoPopulatedFields`** — declarative server-side field stamping on writes (see below)
 - **`defaultAccess`** — fallback CEL access rule applied to operations that omit their own `access`
 - **`[models.*]` schema** — optional server-enforced model declaration. When present, every op edit (and the schema edit itself) is checked against it; see [Schema gate](#schema-gate)
@@ -444,7 +475,7 @@ Triggers are computed fields that run server-side before a record is saved. Conf
 
 **Don't confuse trigger CEL with operation substitutions.** Triggers use bare CEL — `user.userId`, `now()`. Operation `definition` and `params` use `$user.userId`, `$now`, `$params.x`, `$database.celContext.x` substitutions, which are deep string-replacement on the JSON template, NOT CEL. (`$database.metadata.x` is accepted as an alternate alias for the same value.)
 
-A declared [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category value is also substitutable this way: `$md.self.<category>.<key>` in `filter`/`data`, resolving to `null` (not the literal string) when the category isn't declared on the database type's manifest or the key is missing. Access rules (`access`, `defaultAccess`) can likewise reference `md.self.<category>.<key>` and, where declared, `md.caller.<category>.<key>` (the caller's own metadata, rooted at `user.userId`) — see the Resource Metadata guide for declaring the manifest.
+A [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category value is also substitutable this way: `$md.self.<category>.<key>` in `filter`/`data`, resolving to `null` (not the literal string) when the category isn't declared on the database type's manifest or the key is missing — substitution tokens are not scanned, so they read only what the manifest declares. CEL access rules (`access`, `defaultAccess`) work the other way: they can reference `md.self.<category>.<key>` with **no declaration** — the category is inferred from the rule and loaded automatically, binding `null` when the subject lacks it. `md.caller.<category>.<key>` (the caller's own metadata, rooted at `user.userId`) is the exception — a caller path must still be declared. See the Resource Metadata guide for declaring paths.
 
 ### Timestamps
 
@@ -577,9 +608,9 @@ Each operation has an `access` field — a CEL expression evaluated at call time
 "user.userId == params.userId"                     // only your own data
 ```
 
-The shared identity context (`user.*`, `hasRole`, `isMemberOf`, `memberGroups`, `fromWorkflow`) is documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md). **Database-specific CEL context:** `database.id`, `database.celContext`, `database.metadata`, `params.*`.
+The shared identity context (`user.*`, `hasRole`, `isMemberOf`, `memberGroups`, `fromWorkflow`) is documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md). **Database-specific CEL context:** `database.id`, `database.celContext`, `database.metadata`, `params.*`, `secrets.*` (the secret keys declared in the operation's manifest, loaded when the rule references them), and `workflow` (the workflow context object when the call comes from a workflow step, `null` otherwise).
 
-Only `database.id` and the CEL context object are available in CEL — other database fields like `createdBy` are not exposed. `database.celContext` and `database.metadata` are aliases for the same object; prefer `database.celContext` in new code. To check ownership, store the creator's ID in metadata at creation time or use group membership.
+Only `database.id` and the CEL context object are available in CEL — other database fields like `createdBy` are not exposed. `database.celContext` and `database.metadata` are aliases for the same object (`database.celContext` is the current spelling). For new per-database configuration and state, prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category over the CEL context: a category schema-validates its values and gives them separate `readRule`/`writeRule` instead of the single `celContextAccess` gate — see [Migrating the CEL context to metadata categories](#migrating-the-cel-context-to-metadata-categories). To check ownership, store the creator's ID in a category (or the CEL context) at creation time, or use group membership.
 
 `fromWorkflow()` is true when the call originated from a workflow step (any workflow); `fromWorkflow("key")` restricts to a specific workflow. Use it to lock down ops that should only be invoked by an internal workflow:
 
@@ -914,12 +945,12 @@ access = "true"
 [operations.definition]
 groupBy = ["status"]
 filter = { projectId = "$params.projectId" }
-sort = { field = "total", direction = -1 }
+sort = { field = "count", direction = -1 }
 limit = 10
 operations = [
-  { type = "count", outputField = "total" },
-  { type = "sum", field = "estimatedHours", outputField = "totalHours" },
-  { type = "avg", field = "estimatedHours", outputField = "avgHours" },
+  { type = "count" },
+  { type = "sum", field = "estimatedHours" },
+  { type = "avg", field = "estimatedHours" },
 ]
 
 [[operations.params]]
@@ -928,9 +959,9 @@ type = "string"
 required = true
 ```
 
-Aggregate types: `count`, `sum`, `avg`, `min`, `max`.
+Aggregate types: `count`, `sum`, `avg`, `min`, `max`. Each operation's result key is fixed: `count` for a count, and `<type>_<field>` for the rest — `sum_estimatedHours`, `avg_estimatedHours`, `min_estimatedHours`, `max_estimatedHours`. There is no way to rename an output; a `sort.field` on an aggregate must name one of these keys (or a `groupBy` field).
 
-**Response:** `{ result: { "open": { total: 15, totalHours: 120 }, ... } }`
+**Response:** `{ result: { "open": { count: 15, sum_estimatedHours: 120, avg_estimatedHours: 8 }, ... } }`
 
 #### Pipeline — multi-step read operations
 
@@ -961,7 +992,7 @@ type = "aggregate"
 modelName = "tasks"
 filter = { projectId = "$params.projectId" }
 groupBy = ["status"]
-operations = [{ type = "count", outputField = "total" }]
+operations = [{ type = "count" }]
 
 [[operations.definition.steps]]
 name = "openBugs"
@@ -1151,6 +1182,44 @@ Via CLI:
 primitive databases cel-context update <database-id> --data '{"teamId":"team-alpha"}'
 primitive databases cel-context get <database-id>
 ```
+
+### Migrating the CEL context to metadata categories
+
+For new per-database configuration and state, prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category over the CEL context. A category schema-validates its values and, unlike `celContextAccess` (one expression gating both read and update), gives reads and writes **separate** rules. Move a value in three steps.
+
+**1. Define a category with separate read/write rules** (`readRule`/`writeRule` both default-deny):
+
+```toml
+# config/metadata-category-configs/database.settings.toml
+[metadataCategoryConfig]
+resourceType = "database"
+category = "settings"
+readRule = "true"                                     # who may read the values
+writeRule = "user.userId == resource.attrs.createdBy" # who may change them — now a separate rule
+
+[metadataCategoryConfig.schema.fields.teamId]
+type = "string"
+required = true
+```
+
+**2. Declare the category on the database type's manifest.** An access rule or operation `definition` can read `md.self.<category>.<key>` only for a category the type config names. This declaration is the prerequisite, and it's independent of the category's own `readRule`:
+
+```toml
+# config/database-types/project.toml
+[type]
+databaseType = "project"
+
+[metadata.self]
+categories = ["settings"]
+```
+
+**3. Reference `md.self.<category>.<key>` in place of `database.celContext.<key>`:**
+
+```toml novalidate
+access = "isMemberOf('team', md.self.settings.teamId)"
+```
+
+Stamp create-time values with `initialMetadata` on `databases.create()`; write them afterward with the resource-metadata write API or a `metadata.write` workflow step (both gated by `writeRule`).
 
 ## Direct Record Operations
 
@@ -1912,7 +1981,7 @@ let result = try await client.databases.importCsv(
 
 - **Create multiple databases for isolation.** Each database is a separate isolated instance. Use separate databases for separate tenants, projects, or data domains to leverage per-database scaling.
 - **Use database types** to share operation definitions and triggers across databases of the same kind.
-- **Keep CEL context minimal — use groups for access control.** The CEL context is meant for a few identifying fields (e.g. a `teamId`) used as lookup keys in CEL — `isMemberOf('team', database.celContext.teamId)`. Group membership controls access; the CEL context just provides the key. Don't replicate data into metadata for field-by-field CEL checks — model that with groups. For runtime-toggleable settings, store them as records and read them in a pipeline (see [Settings record pattern](#settings-record-pattern)).
+- **Keep CEL context minimal — use groups for access control.** The CEL context is meant for a few identifying fields (e.g. a `teamId`) used as lookup keys in CEL — `isMemberOf('team', database.celContext.teamId)`. Group membership controls access; the CEL context just provides the key. Don't replicate data into metadata for field-by-field CEL checks — model that with groups. For per-database configuration or state that needs access control, prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category — with its separate `readRule`/`writeRule` — over the CEL context and its single `celContextAccess` gate (see [Migrating the CEL context to metadata categories](#migrating-the-cel-context-to-metadata-categories)). For runtime-toggleable settings, store them as records and read them in a pipeline (see [Settings record pattern](#settings-record-pattern)).
 - **Use triggers** to enforce server-side invariants (created timestamps, audit fields) — don't trust client-provided values.
 
 ### Operations design

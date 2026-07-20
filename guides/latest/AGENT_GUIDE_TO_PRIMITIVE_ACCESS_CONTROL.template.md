@@ -26,9 +26,9 @@ A rule reads caller identity and operation params only — it cannot read a data
 | Workflow | `accessRule` on `[workflow]` | identity context only | Evaluated on `workflows.start()` and `workflow.call`; NOT on webhook triggers. admin/owner bypass. No rule → any authenticated member can start. |
 | Server-stamped fields / triggers | trigger `when` conditions; `autoPopulatedFields` values | `record.*`, `database.*`, `now()` | CEL produces values (`user.userId`, `now()`) as well as conditions. |
 | Rule sets | per-op rules on a named rule set | resource objects (e.g. `group.groupType`, `group.groupId`, `group.createdBy`) | Governs **management operations** (create/edit/delete groups & collections, member management) — see below. |
-| Metadata category | `readRule` (read API) / `writeRule` (write API) on the category config | `user.userId`, `user.role`, `resource.resourceType`/`resourceId`/`category`; `workflow.workflowKey` when called from a `metadata.write`/`read` step | Gates the metadata read/write API only — a *different* rule's `md.self`/`md.caller` use is authorized by declaration, not this rule. App-level owner/admin bypass both rules (a resource-level permission never bypasses). See the Resource Metadata guide. |
+| Metadata category | `readRule` (read API) / `writeRule` (write API) on the category config | `user.userId`, `user.role`, `resource.resourceType`/`resourceId`/`category`; `workflow.workflowKey` when called from a `metadata.write`/`read` step | Gates the metadata read/write API only — it doesn't govern a *different* rule's `md.self`/`md.caller` use (`md.self` is inferred; `md.caller`/paths are declared). App-level owner/admin bypass both rules (a resource-level permission never bypasses). See the Resource Metadata guide. |
 
-Any eval site with a declared metadata manifest also gains `md.self.*` (and, where declared, `md.<path>.*` / `md.caller.*`) in its CEL context — see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-category reads are inferred, no declaration needed (and, where declared, `md.<path>.*` / `md.caller.*`) — see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
 
 ## Rule sets (management operations)
 
@@ -49,6 +49,14 @@ Semantics:
 - **App owners/admins bypass rule sets entirely**; rules apply to regular members.
 - Group types with no config row get permissive defaults: any member can `create`; the creator can `edit`/`delete` and manage members; creator + direct members can read.
 - To deny an op for everyone except admins/owners, set that op's rule to `"false"`.
+
+**Subject-form membership** — a group rule can ask which groups the *managed group* belongs to, not just the caller: `memberGroupsOf(group.groupId, '<groupType>')` returns that group's list of groupIds of the type. Compose with `.exists()`/`.all()` to follow a relationship graph, e.g. grant a teacher of any class the group is enrolled in:
+
+```toml novalidate
+get = "memberGroupsOf(group.groupId, 'class-students').exists(c, isMemberOf('class-teachers', c))"
+```
+
+Both arguments are validated at save time: argument 1 must be the literal path `group.groupId` (a non-literal/computed arg is rejected, same class as a dynamic `md[expr]` access), argument 2 a string literal. It is allowed only on existing-group operations (`get`/`edit`/`delete`, `member.*`) — **not** `group.create`, where `group.groupId` is caller-supplied — and `target.userId` is never a valid subject. Metadata category rules get the same function rooted at a loaded `md.self.*` value.
 
 ## Testing and debugging
 

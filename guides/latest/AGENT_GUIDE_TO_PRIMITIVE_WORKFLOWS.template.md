@@ -518,11 +518,11 @@ databaseType = "classroom"
 
 | Kind | Params | Output |
 |---|---|---|
-| `database.create` | `title` (req), `databaseType` (req), `metadata` (opt object, validated against the type's declared metadata) | The created database: `{ databaseId, title, databaseType, permission: "owner", createdBy, createdAt, ... }` |
+| `database.create` | `title` (req), `databaseType` (req), `metadata` (opt object, validated against the type's declared metadata), `initialMetadata` (opt `{ category: { field: value } }`) | The created database: `{ databaseId, title, databaseType, permission: "owner", createdBy, createdAt, ... }` |
 | `database.delete` | `databaseId` (req) | `{ databaseId, deleted: true, ... }`; 404 → `{ databaseId, deleted: false, alreadyAbsent: true }` |
 | `group.create` | `groupType` (req), `name` (req), `groupId` (opt — caller-supplied id), `description` (opt) | `{ created: true, appId, groupType, groupId, name, ... }`; already exists → `{ groupType, groupId, created: false, alreadyExists: true }` |
 | `group.delete` | `groupType` (req), `groupId` (req) | `{ groupType, groupId, deleted: true, ... }`; 404 → `{ deleted: false, alreadyAbsent: true }` |
-| `collection.create` | `name` (req), `description`/`collectionType`/`contextId` (opt) | The created collection: `{ collectionId, name, collectionType, contextId, ... }`. A duplicate *name* is a 409 error (not a no-op) |
+| `collection.create` | `name` (req), `description`/`collectionType`/`contextId` (opt), `initialMetadata` (opt `{ category: { field: value } }`) | The created collection: `{ collectionId, name, collectionType, contextId, ... }`. A duplicate *name* is a 409 error (not a no-op) |
 | `collection.delete` | `collectionId` (req) | `{ collectionId, deleted: true, ... }`; 404 → `{ deleted: false, alreadyAbsent: true }`. Cascades memberships and group grants like the client delete |
 | `collection.grantGroupPermission` | `collectionId`, `groupType`, `groupId`, `permission` (all req; `permission` is exactly `"reader"` or `"read-write"` — `"read"` fails non-retryably) | `{ collectionId, groupType, groupId, permission, grantedAt, grantedBy }` (re-grant succeeds) |
 
@@ -555,9 +555,11 @@ groupId = "{{ steps.teachers.groupId }}"
 permission = "read-write"
 ```
 
+`initialMetadata` on `database.create` / `collection.create` stamps resource-metadata categories atomically as the resource is created — identical to the client create call: every category is validated before the resource row is created (an invalid category fails the whole step non-retryably, leaving nothing behind), the category's write rule is waived for the create-time stamp, and at most 10 categories may be stamped. Stamp at create when a later step or an `md.self.*` rule on the new resource must see the value immediately — it closes the fail-closed window a post-create `metadata.write` would leave open. In `runAs:"system"` mode this needs no capability beyond `resource-provision` (create authority covers the stamp).
+
 Idempotency: the `*.delete` kinds map 404 to a no-op success, so an ordered teardown workflow re-run over a partially torn-down constellation converges. `group.create` with a caller-supplied `groupId` is likewise re-runnable. `database.create` and `collection.create` mint server-side ids — a whole-run retry can create a duplicate; sequence creates early and keep the fallible steps after them. Errors: 4xx (except 429) non-retryable, 429/5xx retryable.
 
-### `metadata.write` / `metadata.read`
+### `metadata.write` / `metadata.read` / `metadata.delete` / `metadata.resolve`
 
 ```toml
 [[steps]]
@@ -580,9 +582,32 @@ resourceId = "{{ input.userId }}"
 category = "billing"
 saveAs = "output"
 # Output: { ok, resourceType, resourceId, category, data, schemaVersion, exists }
+
+[[steps]]
+id = "clear-billing"
+kind = "metadata.delete"
+resourceType = "user"
+resourceId = "{{ input.userId }}"
+category = "billing"
+saveAs = "output"
+# Output: { ok, resourceType, resourceId, category, deleted }
 ```
 
-Both route through the same read/write path (and the same category `readRule`/`writeRule` gate) as the client and CLI — `resourceType`/`resourceId`/`category`/`data` are all templated. `metadata.write` is a full replace, not a merge. Gate a category to exactly this workflow with `fromWorkflow('workflowKey')` in its `writeRule`/`readRule`; the workflow identity is a privileged, call-local value the step runner passes in-process, never derived from a request header. A `runAs:"system"` run gets no app-level owner/admin bypass here — only `fromWorkflow('key')` authorizes it; a `runAs:"caller"` run keeps the bypass (the caller's app role — a resource-level permission never bypasses). Errors follow the `database.*` step convention: 4xx (validation, rule denial, reserved category) is non-retryable, 429/5xx is retryable. See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+All three route through the same read/write/delete path (and the same category `readRule`/`writeRule` gate) as the client and CLI — `resourceType`/`resourceId`/`category`/`data` are all templated. `metadata.write` is a full replace, not a merge. `metadata.delete` is gated by the `writeRule` (deletion is a write) and is idempotent — an already-absent category returns `deleted: false`, not a 404, and never fails the step; it's the surface a teardown workflow uses to clear categories (including ones whose schema has `required` fields, which a `set` of `{}` can't clear). Gate a category to exactly this workflow with `fromWorkflow('workflowKey')` in its `writeRule`/`readRule`; the workflow identity is a privileged, call-local value the step runner passes in-process, never derived from a request header. A `runAs:"system"` run gets no app-level owner/admin bypass here — only `fromWorkflow('key')` authorizes it; a `runAs:"caller"` run keeps the bypass (the caller's app role — a resource-level permission never bypasses). Errors follow the `database.*` step convention: 4xx (validation, rule denial, reserved category) is non-retryable, 429/5xx is retryable. See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+
+`metadata.resolve` reverse-resolves a resource by a category's `unique` field value (metadata value → resource). System-only (`runAs:"system"`, like `user.resolve`), bypasses `readRule`. Returns `{ resourceId, resourceType }` on a hit and `{ resourceId: null }` on a miss (a miss never throws); a `key` that is not the category's declared `unique` field is a non-retryable error. One exact lookup, no scan.
+
+```toml
+[[steps]]
+id = "find-user"
+kind = "metadata.resolve"
+resourceType = "user"
+category = "billing"
+key = "stripeCustomerId"
+value = "{{ input.customerId }}"
+saveAs = "output"
+# Output: { resourceId, resourceType } on a hit; { resourceId: null } on a miss
+```
 
 ### `collect`
 
@@ -874,11 +899,12 @@ reason = "preferences backfill"
 | `selected` | Result of `selector` (or current `forEach` item if no `as`) |
 | `steps` | `steps[stepId]` for every prior step |
 | `outputs` | `outputs[saveAs]` for every prior `saveAs` |
-| `meta` | The `meta` you passed to `start()` — **NOT auto-populated.** No `meta.startedAt`/`meta.userId` unless you set them. |
+| `meta` | The `meta` you passed to `start()`, plus `meta.startedAt` — the run's stable start timestamp (ISO 8601), auto-populated and identical across every step and retry (equals `getStatus().startedAt`; an inline `workflow.call` child inherits the parent's). Everything else in `meta` is only what you set. |
 | `secrets` | App secrets (read-only) |
+| `vars` | App [config vars](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md#config-vars) (read-only) — `{{ vars.KEY }}` |
 | `<asVar>` | Current item inside a `forEach` step |
 | `loop`, `iteration` | `{ index, count, first, last }` inside `forEach` (use `iteration` in CEL `runIf` since `loop` is reserved) |
-| `user` | The iterated user's row (`user.userId`, `user.role`) — only inside an `iterate-users` step's `perUser.input` block |
+| `user` | In a `runAs: "caller"` run, the invoking user (`user.userId`) — bound in step params, `forEach` source expressions, and `forEach` bodies. Inside an `iterate-users` step's `perUser.input`, `user` is instead the iterated user's row (`user.userId`, `user.role`). Unbound in a `runAs: "system"` run (except the `iterate-users` case). |
 | `now`, `today`, `uuid`, `ulid` | Built-in zero-arg helpers (see below) |
 
 ### Built-in template helpers
@@ -933,7 +959,7 @@ Available filters (see `src/workflows/runner/templates.ts` for full list):
 
 Templates have **no arithmetic** (`{{ a + b }}` won't work). Move math into a step or filter chain.
 
-**Missing path sentinel.** In interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`), an unresolved path renders as `<missing: steps.x.y>` so it's visible in step output and logs. In single-expression mode (`"{{ steps.x.y }}"` alone) the raw value is `null` so downstream `runIf`/comparisons work naturally. A resolved `null` interpolates as `"null"`; a resolved empty string interpolates as `""`. A filter chain that **begins with `default`** (or `now`) rescues a missing path instead: `{{ steps.x.output.result | default: '' }}` renders `''` when the path is unresolved — including when step `x` was skipped and recorded no `output` at all. That makes `default` the idiom for skipped-step collapse in an output table: a field built from an optionally-skipped step yields the fallback value rather than `<missing: …>`. Set `strict = true` on the step to throw on any unresolved path instead, or `strictParams = ["userId", ...]` to make only the named top-level params strict-on-missing (a resolved `null` is still tolerated); `strict = true` covers everything and wins when both are set. When a template references a root outside the five valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`), the strict-mode error lists them — catching typos like `{{ inputs.userId }}`.
+**Missing path sentinel.** In interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`), an unresolved path renders as `<missing: steps.x.y>` so it's visible in step output and logs. In single-expression mode (`"{{ steps.x.y }}"` alone) the raw value is `null` so downstream `runIf`/comparisons work naturally. A resolved `null` interpolates as `"null"`; a resolved empty string interpolates as `""`. A filter chain that **begins with `default`** (or `now`) rescues a missing path instead: `{{ steps.x.output.result | default: '' }}` renders `''` when the path is unresolved — including when step `x` was skipped and recorded no `output` at all. That makes `default` the idiom for skipped-step collapse in an output table: a field built from an optionally-skipped step yields the fallback value rather than `<missing: …>`. Set `strict = true` on the step to throw on any unresolved path instead, or `strictParams = ["userId", ...]` to make only the named top-level params strict-on-missing (a resolved `null` is still tolerated); `strict = true` covers everything and wins when both are set. When a template references a root outside the six valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`, `vars`), the strict-mode error lists them — catching typos like `{{ inputs.userId }}`.
 
 ## `runIf` (CEL, not templates)
 
@@ -945,7 +971,28 @@ runIf = "steps.previous.ok"                      # uniform verdict on every obje
 runIf = "!steps.fetch.skipped"
 ```
 
-CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, plus `iteration` (and `as`-var) inside `forEach`. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+
+### Named guards (`expr.*`)
+
+Declare reusable CEL guards in a top-level `[expr.cel]` table — one entry per name, `<name> = "<CEL expression>"` — then reference them as `expr.<name>` (bracket form `expr['name']` / `expr["name"]` also works) in any step guard: `runIf`, a `forEach` step's `successWhen`, and a `switch` case's `when`.
+
+```toml novalidate
+[expr.cel]
+isPremium   = "input.plan == 'premium' && steps.account.ok"
+withinQuota = "steps.usage.count < input.limit"
+eligible    = "expr.isPremium && expr.withinQuota"   # definitions may reference each other
+
+[[steps]]
+id = "charge"
+kind = "database.mutate"
+runIf = "expr.eligible"
+```
+
+- **Definition scope is fixed and stripped.** Every named guard evaluates against the run-state scope only — `input`, `steps`, `outputs`, `meta`, `secrets`, `vars`, plus `user` in a `runAs: "caller"` run — *never* the reference site's `selected`, `iteration`, or `as`-var bindings. So `expr.isPremium` resolves identically at every reference site; a guard that needs a per-iteration value can't be a named guard.
+- **Resolution is by name, not textual expansion.** A referenced guard evaluates as its own expression against that fixed scope, and each guard is memoized per evaluation so wide reuse or a fan-out DAG stays cheap. A guard that throws (or fails to parse) fails the referencing `runIf` or switch `when` with a `RunIfError` named `expr.<name>` — the author's name, not the reference-site expression. At a `successWhen` site the classifier's error fallback applies instead: the error is logged and the iteration is classified `succeeded` (see [`successWhen`](#successwhen-functional-success-vs-empty)).
+- **References must form a DAG.** Cross-definition references are allowed; a reference cycle (`a` → `b` → `a`) is rejected at save time.
+- **Validation is developer-facing.** `primitive sync push` fails fast — and the server 400s — on an `expr.<name>` reference (in a definition body *or* a step guard) that names no declared definition, on a reference cycle, or on an empty definition body. `primitive sync pull` writes the `[expr.cel]` table back out, so definitions round-trip.
 
 ### Safe navigation
 
@@ -955,8 +1002,8 @@ CEL optional types are enabled in every workflow context (`runIf`, `accessRule`,
 |---|---|
 | `steps.foo.?bar` | Optional field access — returns an optional, never throws on missing |
 | `steps.foo[?"bar"]` | Optional index access (same, for map/list lookups) |
-| `expr.orValue(default)` | Unwrap optional, falling back to `default` |
-| `expr.hasValue()` | True if the optional is set |
+| `opt.orValue(default)` | Unwrap optional `opt`, falling back to `default` |
+| `opt.hasValue()` | True if the optional `opt` is set |
 | `optional.of(x)` / `optional.none()` | Construct optionals explicitly |
 
 Common operations work directly on optional values — no `.orValue()` unwrap needed:
@@ -1496,6 +1543,10 @@ An optional `signal` (`AbortSignal`) is accepted as well.
 Both invocation methods are generic: `start<I>(options)` types the `input`, and `runSync<I, O>(options)` additionally types the result envelope's `output` as `O` (`RunSyncWorkflowResult<O>`). `getStatus<O>(options)` and `terminate<O>(options)` are generic the same way, typing `WorkflowStatusResult<O>`'s `output` — useful for a terminated run that still carries partial output. Defaults (`Record<string, any>` / `any`) preserve untyped call sites. Rather than hand-writing `I`/`O`, generate them from the workflow's `inputSchema`/`outputSchema` with `primitive workflows codegen` — see [Typed invocation (codegen)](#typed-invocation-codegen).
 {{/lang}}
 
+{{#lang swift}}
+Both invocation methods are generic: `start<Input>(...)` types the `input`, and `runSync<Input, Output>(...)` additionally types the result envelope's `output` as `Output` (`RunSyncResult<Output>`). `getStatus<Output>(...)` is generic the same way, typing `WorkflowStatus<Output>`'s `output`. Each is `async throws`. Rather than hand-writing `Input`/`Output`, generate them from the workflow's `inputSchema`/`outputSchema` with `primitive workflows codegen --lang swift` — see [Typed invocation (codegen)](#typed-invocation-codegen).
+{{/lang}}
+
 ## Workflow lifecycle
 
 A workflow needs `status = "active"` AND one of (active configuration | published revision) before clients can run it.
@@ -1599,6 +1650,13 @@ primitive workflows codegen [workflow-key] [-o <dir>] [--check] [--json]
 ```
 {{/lang}}
 
+{{#lang swift}}
+```bash
+# Typed invocation wrappers from inputSchema/outputSchema (see Typed invocation below)
+primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
+```
+{{/lang}}
+
 A run that aborts during **setup** — before any step executes (resolving its config/revision, loading steps, or validating `input` against `inputSchema`) — is still marked `failed` with the real error message, and records one synthetic step with id `__setup__` and kind `setup`. So `runs steps` is never empty and `runs error` always names the failure, even when no author-defined step ran.
 
 ### Reusable step fragments
@@ -1665,11 +1723,21 @@ const res = await wf.runSync({ input: { priceId: "price_123" } }); // input: Cre
 res.output?.checkoutUrl;                                           // output: CreateCheckoutSessionOutput
 
 const status = await wf.getStatus({ runKey: "run-1" });            // status.output: CreateCheckoutSessionOutput | undefined
+const ended = await wf.terminate({ runKey: "run-1" });             // ended.output: CreateCheckoutSessionOutput | undefined
+
+await wf.cronTriggers.create({                                     // params.rootInput: Partial<CreateCheckoutSessionInput>
+  triggerKey: "nightly-checkout",
+  displayName: "Nightly Checkout",
+  cron: "0 3 * * *",
+  rootInput: { priceId: "price_123" },
+});
 ```
 
-Rules the generated code follows:
+Generated factory members:
 
-- `.start` and `.getStatus` are emitted for every non-internal workflow — `.getStatus`'s `output` is bound to `<Key>Output`, so an async-only workflow with no `.runSync` still gets a typed status fetch; `.runSync` **only** when the workflow has `syncCallable = true` (the server rejects run-sync otherwise). No `.terminate` member is generated — the factory stays a start/status helper; type termination manually with `client.workflows.terminate<Output>(...)`.
+- `.start`, `.getStatus`, and `.terminate` are emitted for **every** non-internal workflow. `.getStatus` and `.terminate` bind `output` to `<Key>Output` (schema-less → `unknown`), so an async-only workflow with no `.runSync` still gets a typed status fetch and a typed termination result. `.runSync` is emitted **only** when the workflow has `syncCallable = true` (the server rejects run-sync otherwise).
+- `.cronTriggers.create(params)` and `.cronTriggers.update(triggerId, params)` are emitted for every non-internal workflow. They pin `workflowKey` and type the trigger's `rootInput` from the workflow's input schema: `Partial<<Key>Input>` for an object-shaped schema (an `inputMapping` may supply the rest), the full `<Key>Input` otherwise. `update` also accepts `rootInput: null` to clear a stored root input; `create` does not.
+- `.define(options)` is emitted **only** for an apply-mode workflow (`requiresClientApply !== false`, the server's default — see [Apply pattern](#apply-pattern)). It binds `<Key>Output` so the `onApply` handler's `output` is the workflow's real output type instead of `any`. A workflow with `requiresClientApply = false` has no apply handler and gets no `.define`.
 - `input` is a **required** option when the schema rejects `{}` (i.e. has required properties), optional otherwise. `workflowKey` is pinned after the options spread, so callers can't override it.
 - Type mapping mirrors the server's schema validator exactly: scalar `type` → TS scalar, scalar-only type unions → TS unions, `enum` → literal union, `object` + `properties`/`required` → interface (open objects get `[key: string]: unknown`; `additionalProperties: false` omits it), `array` + `items` → `T[]`. A qualifying discriminated-union `oneOf` (see below) → a `type` union alias. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `unknown`. A schema-less workflow gets `Input`/`Output` of `unknown`.
 - After a CLI upgrade, `primitive workflows codegen --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
@@ -1711,6 +1779,81 @@ Rules and failure modes:
 - A `oneOf` that looks like a tagged union but is defective — a single member, no discriminator, or an ambiguous one (more than one candidate property) — **throws a codegen error** rather than silently falling back to `unknown`. Fix the schema (add/remove a candidate property, or give every member a distinct literal) rather than working around the error.
 - A tagged union must carry `oneOf` as its **only** top-level constraint — combining it with sibling `type`/`properties`/`required`/`additionalProperties`/`items`/`enum` is rejected; put shared constraints inside each member instead.
 - A `oneOf` with any non-object member (a scalar/mixed union) is not interpreted as a tagged union at all — it falls through to the `unknown` rendering like any other unsupported keyword, no error.
+{{/lang}}
+
+{{#lang swift}}
+### Typed invocation (codegen)
+
+Generate typed invocation wrappers from each workflow's `inputSchema`/`outputSchema`:
+
+```bash
+primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
+```
+
+The command reads `workflows/*.toml` from the auto-resolved sync directory (`--sync-dir <path>` overrides; `--app <app-id>` disambiguates when several apps are synced — with more than one match and neither flag, it errors rather than guessing) and emits **one `<key>.generated.swift` per workflow** (default output `<sync-dir>/workflows/generated/`; stale generated files for removed workflows are cleaned up on full runs). Reserved `__internal.*` workflows are skipped; malformed schema JSON fails the command. A single `[workflow-key]` argument matches the TOML file stem and generates just that file.
+
+Each generated file declares `<Key>Input` / `<Key>Output` `Codable` types plus a factory function (camelCase of the key; a leading digit gets a `_` prefix, a Swift keyword is backtick-escaped) returning a `<Key>Workflow` struct that pins the workflow key so it can't drift from its types:
+
+```swift
+import JsBaoClient
+
+let wf = createCheckoutSession(client)
+let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123")) // input: CreateCheckoutSessionInput
+res.output?.checkoutUrl                                                                 // output: CreateCheckoutSessionOutput?
+
+let status = try await wf.getStatus(runKey: "run-1")   // status.output: CreateCheckoutSessionOutput?
+```
+
+Generated factory members:
+
+- `start` and `getStatus` are emitted for **every** non-reserved workflow, each `async throws`. `getStatus` binds `output` to `<Key>Output?` (schema-less → `JSONValue`), so an async-only workflow with no `runSync` still gets a typed status fetch. `runSync` is emitted **only** when the workflow has `syncCallable = true` (the server rejects run-sync otherwise) and returns `RunSyncResult<<Key>Output>`.
+- `input` is a **required** argument when the schema rejects `{}` (i.e. has required properties), optional (`= nil`, sending `{}`) otherwise. The workflow key is pinned inside the wrapper, so callers can't override it.
+- The wrappers delegate to the additive generic overloads on the client — `client.workflows.runSync<Input, Output>(...)`, `start<Input>(...)`, and `getStatus<Output>(...)` accept the same type parameters if you prefer to bind them by hand.
+- Type mapping mirrors the server's schema validator: scalar `type` → Swift scalar, `enum` → a nested `String`-raw `enum`, `object` + `properties`/`required` → a `struct` (open objects gain an `extra: [String: JSONValue]` catch-all; `additionalProperties: false` omits it), `array` + `items` → `[T]`. A qualifying discriminated-union `oneOf` (see below) → an `enum` with associated values. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `JSONValue`. A schema-less workflow gets `Input`/`Output` of `JSONValue`.
+- After a CLI upgrade, `primitive workflows codegen --lang swift --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
+
+### Discriminated-union (`oneOf`) schema outputs
+
+`inputSchema`/`outputSchema` support an opt-in tagged-union mode: a `oneOf` array whose members are **all** `type: "object"`, sharing exactly one property declared as a distinct single-literal scalar `enum` in every member — that property is auto-detected as the discriminant (there is no way to name it explicitly). The server validates a value by branch-selecting on the discriminant and checking only the matched member; an unmatched or non-object value is a validation error.
+
+```toml
+[[workflow.outputSchema.oneOf]]
+type = "object"
+required = [ "status", "checkoutUrl" ]
+[workflow.outputSchema.oneOf.properties.status]
+type = "string"
+enum = [ "ok" ]
+[workflow.outputSchema.oneOf.properties.checkoutUrl]
+type = "string"
+
+[[workflow.outputSchema.oneOf]]
+type = "object"
+required = [ "status", "message" ]
+[workflow.outputSchema.oneOf.properties.status]
+type = "string"
+enum = [ "error" ]
+[workflow.outputSchema.oneOf.properties.message]
+type = "string"
+```
+
+Codegen renders a qualifying `oneOf` as an `enum` with one case per member (named after the member's discriminant value), each carrying that member's branch `struct`; decode is keyed on the discriminant. The caller narrows with a `switch`:
+
+```swift
+let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123"))
+if let output = res.output {
+  switch output {
+  case .ok(let ok): ok.checkoutUrl       // narrowed to the "ok" member
+  case .error(let err): err.message      // narrowed to the "error" member
+  }
+}
+```
+
+Rules and failure modes:
+
+- `anyOf` is **not** supported for tagged unions — an all-object `anyOf` throws a codegen error suggesting `oneOf`; an `anyOf` with any non-object member renders `JSONValue` as before.
+- A `oneOf` that looks like a tagged union but is defective — a single member, no discriminator, or an ambiguous one (more than one candidate property) — **throws a codegen error** rather than silently falling back to `JSONValue`. Fix the schema (add/remove a candidate property, or give every member a distinct literal) rather than working around the error.
+- A tagged union must carry `oneOf` as its **only** top-level constraint — combining it with sibling `type`/`properties`/`required`/`additionalProperties`/`items`/`enum` is rejected; put shared constraints inside each member instead.
+- A `oneOf` with any non-object member (a scalar/mixed union) is not interpreted as a tagged union at all — it falls through to the `JSONValue` rendering like any other unsupported keyword, no error.
 {{/lang}}
 
 ## WebSocket events
@@ -1786,14 +1929,16 @@ Authorization = "Bearer {{ secrets.API_KEY }}"
 # (configured once on the integration, never appears in step output)
 ```
 
-### Wrong: assuming `meta.startedAt` exists
+### Wrong: using `{{ now }}` for a value that must stay stable across a run
+
+`now` re-evaluates on every reference, so two steps that each read `{{ now }}` get different timestamps. For one run-wide timestamp — a filename, a batch id, a "generated at" stamp shared across steps — use `{{ meta.startedAt }}`, the run's stable start time (identical across every step and retry). Reserve `now` for a genuinely per-reference clock read.
 
 ```toml novalidate
-# WRONG — meta only has whatever you passed to start()
-filename = "{{ meta.startedAt }}.pdf"
-
-# RIGHT — use a built-in helper, or pass timestamps in via meta
+# WRONG — each step reads a different clock value
 filename = "{{ now }}.pdf"
+
+# RIGHT — one stable timestamp for the whole run
+filename = "{{ meta.startedAt }}.pdf"
 ```
 
 ### Wrong: re-running an idempotent step inside a retry loop
