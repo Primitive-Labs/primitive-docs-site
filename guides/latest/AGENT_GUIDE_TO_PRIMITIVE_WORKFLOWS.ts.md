@@ -451,6 +451,36 @@ Rules and edge cases:
 - **Operations apply in listed order** within the one transaction.
 - **Caller-mode ACL is checked once** at write level: the caller needs `read-write` on the document; denial is non-retryable and nothing commits. An empty `operations` array is a clean no-op.
 
+### `document.create` — mint a new document mid-run
+
+Creates a brand-new document (no alias) and returns `{ documentId, created: true }`. Built for the mint-then-write pattern: the run decides a document is needed (e.g. after a diff shows real changes), creates it, then targets the returned `documentId` with `document.bulkUpdate` / `document.save`. Works in **both** execution modes.
+
+```toml
+[[steps]]
+id = "make-doc"
+kind = "document.create"
+title = "Holdings — {{ input.importDate }}"   # required, 1–255 chars
+tags = ["import"]                              # optional, ≤10 tags
+saveAs = "doc"
+[steps.metadata]                               # optional provenance
+source = "csv"
+accountId = "{{ input.accountId }}"
+
+[[steps]]
+id = "apply"
+kind = "document.bulkUpdate"
+documentId = "{{ steps.make-doc.documentId }}"
+operations = [
+  { model = "Holding", action = "create", id = "{{ ulid }}", fields = { symbol = "VTI", shares = 10 } },
+]
+```
+
+- **Caller mode** (`runAs:"caller"`, default): delegates to the same path as the client `documents.create` — the **starting user becomes the document `owner`**. `userId` / `permission` params are ignored (a caller can't mint a document owned by someone else or attributed to the system).
+- **System mode** (`runAs:"system"`): requires the `resource-provision` capability (deny-by-default — intentionally stricter than the alias-keyed `document.getOrCreateWithAliasForUser`, which gates on system-run only) **and** an explicit subject `userId` (`step.userId ?? input.userId`, same as the other subject-user steps). The document is created `createdBy: "sys:<appId>"` and the subject is granted **`owner`** by default; override with `permission = "read" | "write" | "owner"`. (The system principal also holds an owner grant from the create — it owns and grants; it does not retain zero access.)
+- `tags` and `metadata` are set at creation so an import's provenance rides on the document and a collection listing serves as the history index without opening old documents. `metadata` is validated + size-checked (4 KB) exactly as the REST create.
+- **Per-run cap**: a single run is capped at about **1000** documents; a create past the cap fails non-retryably (documents minted before the cap persist). Lower the cap for a run with `input.maxDocumentCreates` (clamped ≤ 1000 — it can only tighten, never raise). The cap is a durable per-run counter keyed on the run id, shared across `forEach`, inline `workflow.call`, and compensation in the same run — so it holds across concurrency and a durable replay. It runs on a fixed wall-clock window, so it is an abuse guardrail, not an exact quota: a long run that straddles a window boundary can mint up to twice the cap.
+- Errors: validation failures (missing title, >10 tags, oversized/invalid metadata, missing subject, missing capability) are non-retryable; transient model/controller errors stay retryable (429/5xx). `created` is always `true` (this step always creates — it never gets).
+
 ### `group.addMember` / `removeMember` / `removeAll` / `checkMembership` / `listMembers` / `listUserMemberships`
 
 ```toml
@@ -1232,11 +1262,11 @@ capabilities = ["membership"]
 
 `membership` gates the `group.addMember` / `group.removeMember` / `group.removeAll` steps in a **system** run — without the grant they reject (`group.addMember requires the 'membership' capability`). Read-only group steps (`checkMembership`, `listMembers`, `listUserMemberships`) are never gated, and caller runs are governed by access rules, not capabilities, so the gate never applies to them. When the group type carries no explicit rule set (no group type config, or one with `ruleSetId` unset), a system run holding `membership` is allowed through anyway — the granted capability stands in for a CEL rule the app never configured. A group type with an explicit rule set is still governed by that rule set, never overridden by the capability.
 
-Four more capabilities gate the nine resource-lifecycle / collection-membership step kinds in a system run (deny-by-default, checked in `resolveLifecyclePrincipal`/`authorizeSystemLifecycle`):
+Four more capabilities gate the resource-lifecycle, collection-membership, and `document.create` step kinds in a system run (deny-by-default, checked in `resolveLifecyclePrincipal`/`authorizeSystemLifecycle`):
 
 | Capability | Gates |
 |---|---|
-| `resource-provision` | `database.create`, `group.create`, `collection.create` |
+| `resource-provision` | `database.create`, `group.create`, `collection.create`, `document.create` |
 | `resource-teardown` | `database.delete`, `group.delete`, `collection.delete` |
 | `resource-grant` | `collection.grantGroupPermission`, `collection.addDocument`, `collection.removeDocument` |
 | `resource-teardown:any` | Escalation: without it, a system-mode `*.delete` may only target a resource whose `createdBy` is `sys:<appId>`; with it, teardown also reaches resources a member created |

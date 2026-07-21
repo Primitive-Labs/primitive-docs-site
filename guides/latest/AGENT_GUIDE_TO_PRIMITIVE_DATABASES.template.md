@@ -899,6 +899,8 @@ required = true
 
 **Response:** `{ results: [{ op, success, id, values? }] }` — one entry per definition step, in definition order, so a multi-step op (save + increment, two increments, …) reports every step. `op` names the step's kind (`"save"` | `"patch"` | `"delete"` | `"increment"` | `"addToSet"` | `"removeFromSet"`); `values` carries an increment step's post-increment counters.
 
+**Atomicity:** a mutation op runs all its steps in ONE transaction — it either fully succeeds (HTTP 200 with the `results` array above) or fully rolls back. On any step's failure the op returns an HTTP error and applies **nothing**; the `results` array is a success-path contract only. The failing step keeps its natural status — increment / addToSet / removeFromSet / patch on a missing record → **404**, unique / `ifNotExists` / condition conflict → **409**, hook denial → **403** — and the error body names the failed step (`{ error, failedIndex, op, code }`). There is no partial-commit state to reconcile. (`executeBatch` bulk imports are the deliberate exception — each item commits or fails independently; see below.)
+
 **`upsertOn`** — pass the **field name** (`"upsertOn": "email"`, NOT a `$params.*` substitution) in a `save` op to create-or-update by a unique field instead of requiring an explicit `id`. The match **value** comes from `data` — the server looks up a record where that field equals `data.<field>`; if found, it patches it; if not, it inserts a new record. Useful for "ensure this user exists with these attributes" patterns:
 
 ```toml
@@ -976,7 +978,7 @@ type = "string"
 required = true
 ```
 
-Aggregate types: `count`, `sum`, `avg`, `min`, `max`. Each operation's result key is fixed: `count` for a count, and `<type>_<field>` for the rest — `sum_estimatedHours`, `avg_estimatedHours`, `min_estimatedHours`, `max_estimatedHours`. There is no way to rename an output; a `sort.field` on an aggregate must name one of these keys (or a `groupBy` field).
+Aggregate types: `count`, `sum`, `avg`, `min`, `max`. Each operation's result key is fixed: `count` for a count, and `<type>_<field>` for the rest — `sum_estimatedHours`, `avg_estimatedHours`, `min_estimatedHours`, `max_estimatedHours`. There is no way to rename an output; a `sort.field` on an aggregate must name one of these keys (or a `groupBy` field). Including `outputField` (or any key other than `type` and `field`) on a nested aggregate op is rejected when the operation is registered.
 
 **Response:** `{ result: { "open": { count: 15, sum_estimatedHours: 120, avg_estimatedHours: 8 }, ... } }`
 
@@ -1102,7 +1104,7 @@ Callers can override `limit`, `cursor`, and `direction` at call time:
 | Operation Type | Response Shape |
 |----------------|---------------|
 | `query` | `{ data: [...records], hasMore: boolean, nextCursor?: string, prevCursor?: string }` |
-| `mutation` | `{ results: [{ op, success, id, values? }] }` — one entry per definition step, in definition order; `values` on increments (entire request returns 409 if any sub-op fails) |
+| `mutation` | `{ results: [{ op, success, id, values? }] }` — one entry per definition step, in definition order; `values` on increments. Atomic: any step's failure rolls the whole op back and returns that step's natural status (404 / 409 / 403), applying nothing |
 | `count` | `{ count: number }` |
 | `aggregate` | `{ result: { [groupValue]: { ...computedFields } } }` |
 | `pipeline` | When `return = "all"`: `{ steps: { [stepName]: { type, data \| count \| result } } }`. When `return = "<step>"`: that step's payload at top level — a returned query step paginates like a bare query (`hasMore`/`nextCursor`/`prevCursor`, caller cursor/limit honored) |

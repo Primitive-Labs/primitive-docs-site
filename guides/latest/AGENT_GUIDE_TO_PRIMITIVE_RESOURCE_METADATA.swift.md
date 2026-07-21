@@ -225,6 +225,22 @@ primitive collections create "Class 42" --initial-metadata '{"settings":{"visibi
 - Capped at 10 categories per create.
 
 
+### Gating a collection's creation on its staged metadata
+
+> **Hold adoption until [#1881](https://github.com/Primitive-Labs/js-bao-wss/issues/1881) closes.** Do not gate a live collection type on an `md.self`-backed `collection.create` rule yet: on the alpha environment the `collection.create` workflow step has been observed dropping its `initialMetadata` even though the deployed step forwards it (under investigation in #1881), so a create that a direct API call would authorize becomes a 403 on the workflow path — the staged metadata the rule reads never arrives. The mechanism below is described for reference; wait for #1881 to close before relying on it.
+
+A collection type's `collection.create` rule is evaluated against the `initialMetadata` staged in the same create call — **before** the collection is persisted. The staged values bind to `md.self.<category>.<key>`, so a create rule can gate creation on the exact linkage the create is about to stamp:
+
+```toml
+# the collection type's create rule
+create = "isMemberOf('class-teachers', md.self.classLink.classId)"
+```
+
+- The `md.self.attrs.*` projected columns (`collectionType`, `contextId`, `name`, `createdBy`) are also bound in the create rule; `collectionId` is `null` (unassigned).
+- **Fail-closed:** once a create rule reads `md.self.<category>`, a create omitting that category is denied (the value binds `null`). Create-then-stamp-in-a-second-write stops working for that type — the linkage must be staged in the create call (atomic create-with-linkage).
+- **No traversal from the staged subject.** A create rule may read the staged value directly (`md.self.<category>.<key>`) but may not follow a declared path off it (`md.<pathName>.*`) — such a rule is rejected when the rule set is saved, since the subject does not exist yet to traverse from. (Traversal from a *persisted* subject in a non-create rule is unaffected.)
+- Scope: collections. `database.create` has no caller create rule to gate; `group.create` takes no `initialMetadata`.
+
 ## Metadata lifecycle
 
 A write never checks that the target resource exists — a write for a not-yet-created or already-deleted resource succeeds silently, and deleting a resource does not delete its metadata (no cascade). This is deliberate: it keeps a write to a single cheap put, and doesn't race provisioning flows that write metadata immediately after — or interleaved with — creating the resource itself.
