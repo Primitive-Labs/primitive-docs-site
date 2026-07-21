@@ -122,7 +122,7 @@ Swift can't inherit a struct, so each row from `sharedDocuments` is a `SharedDoc
 
 Every example below is compiled against the real client as part of the docs build. The [Querying Data](#querying-data) and [Saving Data](#saving-data) sections below go deeper on projections, includes, and save options.
 
-The generated model statics route through the process-wide default client — call `JsBaoClient.configureDefault(client)` once at startup, before the first read or write. `query`, `queryOne`, `count`, and `aggregate` are synchronous against the local document store; `find` and `findAll` are `async throws` (use `try await`). All reads span every open document by default (scope with `QueryOptions(documents: [docId])`); writes target one document — `save(in:)` inserts or updates in place and throws (it validates the write and requires the document to be open), `delete(in:)` throws only if the document isn't open.
+The generated model statics route through the process-wide default client — call `JsBaoClient.configureDefault(client)` once at startup, before the first read or write. `query`, `queryOne`, `count`, `aggregate`, `find`, and `findAll` are synchronous `throws` against the local document store. All reads span every open document by default (scope with `QueryOptions(documents: [docId])`); writes target one document — `save(in:)` inserts or updates in place and throws (it validates the write and requires the document to be open), `delete(in:)` throws only if the document isn't open.
 
 ### Create
 
@@ -139,10 +139,10 @@ The generated model statics route through the process-wide default client — ca
 ### Read (find / query / first / count)
 
 ```swift
-  // Find one by id (async throws — find/findAll require await)
-  let task = try await Task.find("task-id")
+  // Find one by id
+  let task = try Task.find("task-id")
 
-  // Query with filters (synchronous — query/count/queryOne are synchronous)
+  // Query with filters
   let urgent = try Task.query(["priority": ["$gte": 2], "completed": false])
 
   // First match (with a sort)
@@ -158,7 +158,7 @@ The generated model statics route through the process-wide default client — ca
 ### Update
 
 ```swift
-  if var task = try await Task.find(taskId) {
+  if var task = try Task.find(taskId) {
     task.completed = true
     try task.save(in: documentId)
   }
@@ -167,7 +167,7 @@ The generated model statics route through the process-wide default client — ca
 ### Delete
 
 ```swift
-  if let task = try await Task.find(taskId) {
+  if let task = try Task.find(taskId) {
     try task.delete(in: documentId)
   }
 ```
@@ -303,6 +303,29 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
     params: GrantGroupPermissionParams(groupType: "team", groupId: "engineering", permission: "read-write")
   )
 ```
+
+### Link access ("anyone with the link")
+
+```swift
+  // Any signed-in app user who has the document ID can now read it, with no
+  // explicit grant. The level is a floor: a user who already has a higher
+  // grant keeps it.
+  _ = try await client.documents.setLinkAccess(documentId: documentId, level: .reader)
+
+  // Read the current state — the level, plus who last changed it and when.
+  let state = try await client.documents.getLinkAccess(documentId: documentId)
+  print(state.linkAccess as Any) // .reader | .readWrite | nil
+
+  // Turn it off. Anyone relying on the link loses access immediately;
+  // explicit grants are untouched.
+  _ = try await client.documents.clearLinkAccess(documentId: documentId)
+```
+
+`setLinkAccess(documentId, level)` sets a permission **floor**: any signed-in app user who has the document ID resolves to at least `level` (`"reader"` | `"read-write"`) with no explicit grant. Effective access is `max(direct grant, group grants, link floor)` — the floor only ever raises a caller's level, never lowers an explicit grant. It counts for reading/writing document data but NOT for sharing or management: a link-only caller can't reshare, change permissions, or delete. Requires document owner, app owner, or read-write editor; root documents can't be link-shared (throws).
+
+- A document reached only through the floor reports `accessSource: "link"` on `documents.get(documentId)` and does NOT appear in `me.sharedDocuments()` — track it client-side if you want a "recently opened" affordance.
+- `getLinkAccess(documentId)` returns `{ documentId, linkAccess, linkAccessUpdatedBy?, linkAccessUpdatedAt? }` (`linkAccess` is `null`/`nil` when off) and is authorized for any caller who can read OR manage the document, so an app owner can inspect it without a content grant.
+- `clearLinkAccess(documentId)` — or lowering the level — evicts connected link-only viewers immediately; explicit grants are untouched.
 
 ### Update thumbnail / metadata
 
@@ -565,7 +588,7 @@ public extension TodoItem {
 - **IDs are `String`** — supply `UUID().uuidString` (or a ULID) when not provided.
 - Register models with `client.registerModels([TodoItem.self])` at connect time (or rely on the facade's lazy registration on first read) — registered models are mirrored into the client's shared store and listed in the in-app debug inspector automatically.
 
-CRUD through the facade is local-first (applied to the document store immediately, synced in the background). Writes throw — `try record.save(in: documentId)` inserts or updates in place; `save(in:upsertOn:)` matches on a single-field unique constraint instead of `id` and returns the resolved record; `try record.delete(in: documentId)`; all three throw if the target document isn't open. Reads: `query(...)`, `queryOne`, `count`, and `aggregate` are **synchronous** local reads against the document store and span every open document by default (scope with `QueryOptions(documents: [...])`). The generated facade methods are not annotated `@MainActor` — they're commonly called from MainActor-bound SwiftUI glue (`BaoDataLoader` / your `PrimitiveAppState` subclass), but the methods themselves carry no actor isolation. `find(_ id:)` and `findAll()` are **`async throws`** — use `try await TodoItem.find(id)`. Predicate operators: equality, `$gt`/`$gte`/`$lt`/`$lte`, `$containsText`, `$or`/`$and`/`$not`.
+CRUD through the facade is local-first (applied to the document store immediately, synced in the background). Writes throw — `try record.save(in: documentId)` inserts or updates in place; `save(in:upsertOn:)` matches on a single-field unique constraint instead of `id` and returns the resolved record; `try record.delete(in: documentId)`; all three throw if the target document isn't open. Reads: `query(...)`, `queryOne`, `count`, `aggregate`, `find(_ id:)`, and `findAll()` are **synchronous** local reads against the document store and span every open document by default (scope with `QueryOptions(documents: [...])`). The generated facade methods are not annotated `@MainActor` — they're commonly called from MainActor-bound SwiftUI glue (`BaoDataLoader` / your `PrimitiveAppState` subclass), but the methods themselves carry no actor isolation. Predicate operators: equality, `$gt`/`$gte`/`$lt`/`$lte`, `$containsText`, `$or`/`$and`/`$not`.
 
 > **SourceKit footgun, first time only.** Editing the companion before codegen has ever run shows a red `No such module 'PrimitiveApp'` underline. The real cause is that the generated type doesn't exist yet — run `swift build` once (or the `run-ios.sh` codegen step) and it clears. Only the very first scaffold hits this.
 
@@ -632,25 +655,66 @@ After running codegen, the generated model types include typed traversal methods
 
 ```swift
 // Author.generated.swift — hasMany resolves a plain array, ordered per the TOML
-public func posts() async throws -> [Post]
+public func posts() throws -> [Post]
 
 // Post.generated.swift — refersTo resolves the parent record (or nil)
-public func author() async throws -> Author?
+public func author() throws -> Author?
 ```
 
 Use these at runtime:
 
 ```swift
-  guard let author = try await Author.find(authorId) else { return }
+  guard let author = try Author.find(authorId) else { return }
 
   // hasMany: author.posts() returns a plain array, ordered per the relationship
-  let posts = try await author.posts()
+  let posts = try author.posts()
   guard let firstPost = posts.first else { return }
 
   // refersTo: post.author() returns the parent record (or nil)
-  let backRef = try await firstPost.author()
+  let backRef = try firstPost.author()
 ```
 
+
+For many-to-many links, declare a `hasManyThrough` relationship over a **join model** — a record that carries one field pointing at each side. `join_model_local_field` points back at the source; `join_model_related_field` points at the target. Optional `join_model_order_by_field` / `join_model_order_direction` order the join leg (default `id` ascending):
+
+```toml
+# Post hasManyThrough Tags (via the postTags join model)
+[models.posts.relationships.tags]
+type = "hasManyThrough"
+model = "tags"
+join_model = "postTags"
+join_model_local_field = "postId"
+join_model_related_field = "tagId"
+```
+
+```swift
+// Post.generated.swift — hasManyThrough resolves the linked rows; the paginated
+// overload returns a PagedQueryResult, paging the join leg by its declared order
+public func tags() throws -> [Tag]
+public func tags(
+  limit: Int,
+  afterCursor: String? = nil,
+  beforeCursor: String? = nil,
+  direction: CursorDirection = .forward
+) throws -> PagedQueryResult<Tag>
+```
+
+Traversal accepts an optional page size and cursor, paging the join leg the same way a query pages rows:
+
+```swift
+  guard let post = try Post.find(postId) else { return }
+
+  // Every tag linked to this post, ordered by the join model.
+  let allTags = try post.tags()
+
+  // Or page the join leg with a cursor.
+  let page1 = try post.tags(limit: 20)
+  let firstTag = page1.data.first
+  if let cursor = page1.nextCursor {
+    let page2 = try post.tags(limit: 20, afterCursor: cursor)
+    _ = page2
+  }
+```
 
 ### Unique Constraints
 
@@ -690,7 +754,7 @@ unique_constraints = [["name", "parentId"]]
 ### Working with StringSets
 
 ```swift
-  if var task = try await Task.find(taskId) {
+  if var task = try Task.find(taskId) {
     // Add/remove tags
     task.tags?.insert("urgent")
     task.tags?.remove("low-priority")
@@ -712,7 +776,7 @@ Dates are stored as ISO-8601 strings. Convert for comparisons:
   let now = ISO8601DateFormatter().string(from: Date())
 
   // Store
-  if var task = try await Task.find(taskId) {
+  if var task = try Task.find(taskId) {
     task.dueDate = now
     try task.save(in: documentId)
 
@@ -795,6 +859,8 @@ struct TodoListView: View {
 `.onModel(subscribe: TodoItem.subscribe)` fires on **any** add/update/delete recorded in that model's shared store — local writes and remote writes both — so `reloadNow()` after a write is unneeded; call it only when the `load` closure reads something the loader can't subscribe to (a REST resource). Other triggers (`LoaderTrigger`): `.onSync`, `.onDocumentSyncStateChanged`, `.onDocumentEvents`, `.onConnect`, `.onModelChange(_:)` for a hand-built runtime-schema `DynamicModel`, and `.custom((client, reload) -> EventSubscription?)`.
 
 `loader.phase` is a trinary: `.loading` (first load not complete), `.empty` (first load complete, data conforms to `LoaderEmptiness` and is empty), `.loaded(Data)`. `[T]`, `String`, and `Optional` get `LoaderEmptiness` out of the box.
+
+`loader.showSkeleton` is a separate anti-flash flag for gating skeleton/placeholder UI: it is `true` immediately while the document is opening (`documentReady == false`), then during an in-flight first load only once the load has run longer than `skeletonDelay` (default 100 ms) — so a warm reload that resolves from local CRDT state in a few milliseconds never flashes a skeleton. It returns to `false` once the first load completes. Gate loading UI on `showSkeleton` rather than `phase == .loading` when you want to suppress that flash.
 
 > **Empty-vs-pending when a local index is hydrated by an async server fetch.** If the loader reads a local document mirror that a `reconcile()` fills from the server *after* the view binds, the first load completes against an empty store → `.empty` → the placeholder flashes before the server data arrives. `loader.phase` can't tell "genuinely empty" from "fetch still pending" — gate the empty state on a "first reconcile attempted" flag (set on attempt, success or failure, so an offline brand-new user still reaches the empty state instead of spinning forever):
 >

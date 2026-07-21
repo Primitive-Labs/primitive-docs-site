@@ -12,7 +12,7 @@ A script converges on the same shape as managed prompts:
 - Versioned **`ScriptConfig`** rows each hold a Rhai body plus that config's `limits`.
 - The active body is the `ScriptConfig` that `activeConfigId` points at.
 
-You never edit these records directly. A script body lives in your sync directory as `transforms/<name>.rhai`, where `<name>` (the filename without `.rhai`) is the script's unique name. `primitive sync push` mirrors the file to the server — creating a new `ScriptConfig` and activating it — and `primitive sync pull` writes it back. Authoring is sync-only: no CLI command writes a script body. The `primitive scripts` command is read/inspect plus test-case management on top of that — list scripts, inspect a script's versions, and create or run its test cases (see [Testing](#testing)).
+You never edit these records directly. A script body lives in your sync directory as `transforms/<name>.rhai`, where `<name>` (the filename without `.rhai`) is the script's unique name. `primitive sync push` mirrors the file to the server — creating a new `ScriptConfig` and activating it — and `primitive sync pull` writes it back. Authoring is sync-only: no CLI command writes a script body. The `primitive scripts` command is read/inspect, test-case management, and deletion on top of that — list scripts, inspect a script's versions, create or run its test cases (see [Testing](#testing)), and delete a script and its versions (see [Deleting a script](#deleting-a-script)).
 
 ### Live resolution at run time
 
@@ -27,6 +27,17 @@ kind = "script"
 ref = "normalize-order"     # required — the Script name (unique per app)
 # configId = "..."          # optional — pin a specific ScriptConfig
 saveAs = "order"
+```
+
+### Deleting a script
+
+`primitive scripts delete <script>` removes a script header and cascade-deletes all its `ScriptConfig` versions. It takes a script id or name, prompts for confirmation (`-y`/`--yes` skips it), and accepts `--app` to target an app other than the current one.
+
+Because workflows resolve a script by **name** at run time, deleting one that a live workflow still names would break those steps on their next run. The command guards against this: if an **active** workflow references the script by name, the delete is refused with a 409 whose body names the referencing workflows, and nothing is removed. Pass `--force` to override the guard and delete anyway — leaving those steps to fail their `ref` lookup at run time.
+
+```bash
+primitive scripts delete normalize-order            # refused if an active workflow names it
+primitive scripts delete normalize-order --force    # delete regardless
 ```
 
 ## Input and output

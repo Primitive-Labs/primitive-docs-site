@@ -388,11 +388,12 @@ ruleSetName = "team-rules"     # optional — name of an attached rule set
 autoAddCreator = true          # auto-add creator as member when the config exists (default: true)
 
 [metadata.self]
-categories = ["config"]        # optional — declares which metadata categories this
-                                # group type's rule set may read as md.self.config.*
+categories = ["config"]        # optional — self-reads like md.self.config.* are
+                                # inferred from the rule set; declare here only to
+                                # load a category no rule names directly
 ```
 
-A group type config can also declare a metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`), making `md.self.<category>.<key>` — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`) — available in that type's rule set. Collection type configs take the identical `[metadata]` block (collection `attrs` adds `contextId`). See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block (collection `attrs` adds `contextId`). See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
 
 Push to the server:
 
@@ -442,29 +443,7 @@ Databases support a coarse-grained group grant that gives every member of the gr
 
 For everything else — gating individual queries and mutations — group memberships are checked in **CEL access expressions** on registered operations. See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for how to register operations.
 
-**CEL functions available in every context:**
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `isMemberOf(groupType, groupId)` | bool | True if the caller has a membership matching exactly that `(groupType, groupId)` pair |
-| `memberGroups(groupType)` | string[] | All `groupId`s the caller belongs to for the given type. Empty array if none. |
-| `hasRole(role)` | bool | True if `user.role` equals the argument (`"owner"`, `"admin"`, or `"member"`) |
-| `now()` | string | Current ISO-8601 timestamp |
-| `fromWorkflow()` | bool | True if the call originates inside a workflow step |
-| `fromWorkflow(key)` | bool | True if inside a workflow whose `workflowKey` matches |
-
-**Database operation `access` CEL context:**
-
-| Variable | Notes |
-|----------|-------|
-| `user.userId` | Caller's userId |
-| `user.role` | `"owner"` / `"admin"` / `"member"` — NOT `user.appRole` |
-| `database.id` | The database ID |
-| `database.metadata.*` | The database's `metadata` JSON object |
-| `params.*` | The operation's caller-supplied params |
-| `secrets.*` | App secrets (only loaded if expression references `secrets.`) |
-| `now` | ISO-8601 timestamp |
-| `workflow` | Workflow context object when called from a workflow step (else `null`) |
+The shared identity context every rule can use (`user.*`, `isMemberOf`, `memberGroups`, `hasRole`, `isAnonymous`) is documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere); the database-operation `access` context (`database.celContext`, `params.*`, `secrets.*`, `workflow`) is documented in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#cel-access-expressions). This section covers only how group membership factors into those rules.
 
 **Common CEL patterns for database operations:**
 
@@ -709,7 +688,7 @@ Per-op fallback applies — configured ops always win, missing ops resolve again
 | `user.role` | yes | App role (`"owner"` / `"admin"` / `"member"`) |
 | `collection.collectionType` | yes | Collection's type (matches the `CollectionTypeConfig` this rule set is bound to) |
 | `collection.collectionId` | yes (after create) | Collection's ID |
-| `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Use it to express "caller belongs to the group this collection represents." |
+| `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Expresses "caller belongs to the group this collection represents." Prefer storing that external id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it as `md.self.<category>.<key>` — see [Migrating `contextId` to a metadata category](#migrating-contextid-to-a-metadata-category). |
 | `collection.name` | yes | Display name |
 | `collection.createdBy` | yes (after create) | userId of the collection's creator |
 | `target.userId` | only `category: "member"`, ops `add` / `remove` | The user being added or removed. Absent for `member.list`. |
@@ -749,6 +728,50 @@ ruleSetName    = "class-reports-rules"
 ```
 
 Then push with `primitive sync push`. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
+
+### Migrating `contextId` to a metadata category
+
+Prefer storing a collection's external-entity id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it in the rule set as `md.self.<category>.<key>`, rather than in the built-in `collection.contextId` field. **The move is not 1:1** — a rule can read `md.self.<category>.<key>` only for a category the collection type's manifest declares, and only after a value has been stored, so migrating means declaring a manifest and stamping the value, not just renaming a field.
+
+**1. Define a category** for the link, with separate read/write rules:
+
+```toml
+# config/metadata-category-configs/collection.classLink.toml
+[metadataCategoryConfig]
+resourceType = "collection"
+category = "classLink"
+readRule = "true"
+writeRule = "user.userId == resource.attrs.createdBy"
+
+[metadataCategoryConfig.schema.fields.classId]
+type = "string"
+required = true
+```
+
+**2. Declare the category on the collection type's manifest** — the prerequisite for the rule set to read it:
+
+```toml
+# config/collection-type-configs/class-reports.toml
+[collectionTypeConfig]
+collectionType = "class-reports"
+ruleSetName    = "class-reports-rules"
+
+[metadata.self]
+categories = ["classLink"]
+```
+
+**3. Replace `collection.contextId` with `md.self.classLink.classId`** in the rule set, and stamp `classId` when the collection is created (via `initialMetadata` on `collections.create()`) so the value exists when these ops evaluate:
+
+```toml
+[rules.collection]
+get    = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
+
+[rules.document]
+add    = "isMemberOf('class', md.self.classLink.classId)"
+list   = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
+```
+
+The `collection.create` rule is the exception: the collection and its metadata don't exist yet when it evaluates, so `md.self.classLink.classId` reads `null` there. Gate `create` on caller identity or membership another way (for example a group the caller must already belong to), and let the post-create ops above carry the `md.self` check.
 
 ## Common Patterns
 

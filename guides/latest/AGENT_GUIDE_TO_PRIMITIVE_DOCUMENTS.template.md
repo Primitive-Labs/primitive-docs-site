@@ -150,7 +150,7 @@ const collections = await jsBaoClient.collections.list();
 Every example below is compiled against the real client as part of the docs build. The [Querying Data](#querying-data) and [Saving Data](#saving-data) sections below go deeper on projections, includes, and save options.
 
 {{#lang swift}}
-The generated model statics route through the process-wide default client — call `JsBaoClient.configureDefault(client)` once at startup, before the first read or write. `query`, `queryOne`, `count`, and `aggregate` are synchronous against the local document store; `find` and `findAll` are `async throws` (use `try await`). All reads span every open document by default (scope with `QueryOptions(documents: [docId])`); writes target one document — `save(in:)` inserts or updates in place and throws (it validates the write and requires the document to be open), `delete(in:)` throws only if the document isn't open.
+The generated model statics route through the process-wide default client — call `JsBaoClient.configureDefault(client)` once at startup, before the first read or write. `query`, `queryOne`, `count`, `aggregate`, `find`, and `findAll` are synchronous `throws` against the local document store. All reads span every open document by default (scope with `QueryOptions(documents: [docId])`); writes target one document — `save(in:)` inserts or updates in place and throws (it validates the write and requires the document to be open), `delete(in:)` throws only if the document isn't open.
 {{/lang}}
 
 ### Create
@@ -202,6 +202,16 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
 ### Share a document (user / email / group)
 
 {{ example: documents/share-document }}
+
+### Link access ("anyone with the link")
+
+{{ example: documents/link-access }}
+
+`setLinkAccess(documentId, level)` sets a permission **floor**: any signed-in app user who has the document ID resolves to at least `level` (`"reader"` | `"read-write"`) with no explicit grant. Effective access is `max(direct grant, group grants, link floor)` — the floor only ever raises a caller's level, never lowers an explicit grant. It counts for reading/writing document data but NOT for sharing or management: a link-only caller can't reshare, change permissions, or delete. Requires document owner, app owner, or read-write editor; root documents can't be link-shared (throws).
+
+- A document reached only through the floor reports `accessSource: "link"` on `documents.get(documentId)` and does NOT appear in `me.sharedDocuments()` — track it client-side if you want a "recently opened" affordance.
+- `getLinkAccess(documentId)` returns `{ documentId, linkAccess, linkAccessUpdatedBy?, linkAccessUpdatedAt? }` (`linkAccess` is `null`/`nil` when off) and is authorized for any caller who can read OR manage the document, so an app owner can inspect it without a content grant.
+- `clearLinkAccess(documentId)` — or lowering the level — evicts connected link-only viewers immediately; explicit grants are untouched.
 
 ### Update thumbnail / metadata
 
@@ -472,7 +482,7 @@ public extension TodoItem {
 - **IDs are `String`** — supply `UUID().uuidString` (or a ULID) when not provided.
 - Register models with `client.registerModels([TodoItem.self])` at connect time (or rely on the facade's lazy registration on first read) — registered models are mirrored into the client's shared store and listed in the in-app debug inspector automatically.
 
-CRUD through the facade is local-first (applied to the document store immediately, synced in the background). Writes throw — `try record.save(in: documentId)` inserts or updates in place; `save(in:upsertOn:)` matches on a single-field unique constraint instead of `id` and returns the resolved record; `try record.delete(in: documentId)`; all three throw if the target document isn't open. Reads: `query(...)`, `queryOne`, `count`, and `aggregate` are **synchronous** local reads against the document store and span every open document by default (scope with `QueryOptions(documents: [...])`). The generated facade methods are not annotated `@MainActor` — they're commonly called from MainActor-bound SwiftUI glue (`BaoDataLoader` / your `PrimitiveAppState` subclass), but the methods themselves carry no actor isolation. `find(_ id:)` and `findAll()` are **`async throws`** — use `try await TodoItem.find(id)`. Predicate operators: equality, `$gt`/`$gte`/`$lt`/`$lte`, `$containsText`, `$or`/`$and`/`$not`.
+CRUD through the facade is local-first (applied to the document store immediately, synced in the background). Writes throw — `try record.save(in: documentId)` inserts or updates in place; `save(in:upsertOn:)` matches on a single-field unique constraint instead of `id` and returns the resolved record; `try record.delete(in: documentId)`; all three throw if the target document isn't open. Reads: `query(...)`, `queryOne`, `count`, `aggregate`, `find(_ id:)`, and `findAll()` are **synchronous** local reads against the document store and span every open document by default (scope with `QueryOptions(documents: [...])`). The generated facade methods are not annotated `@MainActor` — they're commonly called from MainActor-bound SwiftUI glue (`BaoDataLoader` / your `PrimitiveAppState` subclass), but the methods themselves carry no actor isolation. Predicate operators: equality, `$gt`/`$gte`/`$lt`/`$lte`, `$containsText`, `$or`/`$and`/`$not`.
 
 > **SourceKit footgun, first time only.** Editing the companion before codegen has ever run shows a red `No such module 'PrimitiveApp'` underline. The real cause is that the generated type doesn't exist yet — run `swift build` once (or the `run-ios.sh` codegen step) and it clears. Only the very first scaffold hits this.
 {{/lang}}
@@ -554,10 +564,10 @@ export interface Post extends PostAttrs, BaseModel {
 {{#lang swift}}
 ```swift
 // Author.generated.swift — hasMany resolves a plain array, ordered per the TOML
-public func posts() async throws -> [Post]
+public func posts() throws -> [Post]
 
 // Post.generated.swift — refersTo resolves the parent record (or nil)
-public func author() async throws -> Author?
+public func author() throws -> Author?
 ```
 {{/lang}}
 
@@ -568,6 +578,44 @@ Use these at runtime:
 {{#lang ts}}
 Relationship traversal uses the same engine as `Model.query(...)` with `include` specs — see [Loading Related Data](#loading-related-data-includes) for the lower-level query-level include syntax.
 {{/lang}}
+
+For many-to-many links, declare a `hasManyThrough` relationship over a **join model** — a record that carries one field pointing at each side. `join_model_local_field` points back at the source; `join_model_related_field` points at the target. Optional `join_model_order_by_field` / `join_model_order_direction` order the join leg (default `id` ascending):
+
+```toml
+# Post hasManyThrough Tags (via the postTags join model)
+[models.posts.relationships.tags]
+type = "hasManyThrough"
+model = "tags"
+join_model = "postTags"
+join_model_local_field = "postId"
+join_model_related_field = "tagId"
+```
+
+{{#lang ts}}
+```typescript
+// Post.generated.ts — hasManyThrough resolves a PaginatedResult, paging the join leg
+export interface Post extends PostAttrs, BaseModel {
+  tags(options?: PaginationOptions): Promise<PaginatedResult<Tag>>;
+}
+```
+{{/lang}}
+{{#lang swift}}
+```swift
+// Post.generated.swift — hasManyThrough resolves the linked rows; the paginated
+// overload returns a PagedQueryResult, paging the join leg by its declared order
+public func tags() throws -> [Tag]
+public func tags(
+  limit: Int,
+  afterCursor: String? = nil,
+  beforeCursor: String? = nil,
+  direction: CursorDirection = .forward
+) throws -> PagedQueryResult<Tag>
+```
+{{/lang}}
+
+Traversal accepts an optional page size and cursor, paging the join leg the same way a query pages rows:
+
+{{ example: documents/relationships-through }}
 
 ### Unique Constraints
 
@@ -860,6 +908,8 @@ The view below is framework glue; the only Primitive calls in it are the `findAl
 
 `loader.phase` is a trinary: `.loading` (first load not complete), `.empty` (first load complete, data conforms to `LoaderEmptiness` and is empty), `.loaded(Data)`. `[T]`, `String`, and `Optional` get `LoaderEmptiness` out of the box.
 
+`loader.showSkeleton` is a separate anti-flash flag for gating skeleton/placeholder UI: it is `true` immediately while the document is opening (`documentReady == false`), then during an in-flight first load only once the load has run longer than `skeletonDelay` (default 100 ms) — so a warm reload that resolves from local CRDT state in a few milliseconds never flashes a skeleton. It returns to `false` once the first load completes. Gate loading UI on `showSkeleton` rather than `phase == .loading` when you want to suppress that flash.
+
 > **Empty-vs-pending when a local index is hydrated by an async server fetch.** If the loader reads a local document mirror that a `reconcile()` fills from the server *after* the view binds, the first load completes against an empty store → `.empty` → the placeholder flashes before the server data arrives. `loader.phase` can't tell "genuinely empty" from "fetch still pending" — gate the empty state on a "first reconcile attempted" flag (set on attempt, success or failure, so an offline brand-new user still reaches the empty state instead of spinning forever):
 >
 > ```swift
@@ -940,6 +990,8 @@ await task.save();
 Note the direction: constructors (`new Task({...})`), `save()`, and `query`/`find` filters all accept plain objects, so spreading a *plain object* into them is fine. Spread only fails when the **source** of the spread is a model instance.
 
 ### Choosing How to Target Documents for Saves
+
+These mechanisms govern **where saves route** — they have no effect on what queries see. A query always spans every open document (see [Querying Data](#querying-data)); setting a default document or a model-document mapping narrows writes, never reads. To scope a read, pass `{ documents }` on the query itself.
 
 When saving new objects, you need to specify which document they go into. There are three ways to do this:
 
@@ -1711,7 +1763,7 @@ The permission / collection reads — `documents.getPermissions(_:)`, `collectio
 **Sharing error codes** (server-emitted body codes):
 
 {{#lang ts}}
-The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed.
+The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed. `JsBaoApiError` means the server responded (non-2xx); when the request never reaches the server at all (offline, DNS failure, connection refused or aborted), the client throws `JsBaoNetworkError` instead — no `.status`, just `.cause` carrying the underlying fetch error. A network failure is retryable: branch with `isJsBaoNetworkError(err)` or `instanceof JsBaoNetworkError`, never by parsing the message.
 {{/lang}}
 {{#lang swift}}
 The client throws a typed `JsBaoError` with `.code` and `.details` — read the code and details straight off the caught error, no manual message-parsing needed.

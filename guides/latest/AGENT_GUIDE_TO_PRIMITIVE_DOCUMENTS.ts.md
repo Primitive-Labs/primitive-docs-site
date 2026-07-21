@@ -339,6 +339,29 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
   });
 ```
 
+### Link access ("anyone with the link")
+
+```typescript
+  // Any signed-in app user who has the document ID can now read it, with no
+  // explicit grant. The level is a floor: a user who already has a higher
+  // grant keeps it.
+  await client.documents.setLinkAccess(documentId, "reader");
+
+  // Read the current state — the level, plus who last changed it and when.
+  const state = await client.documents.getLinkAccess(documentId);
+  console.log(state.linkAccess); // "reader" | "read-write" | null
+
+  // Turn it off. Anyone relying on the link loses access immediately;
+  // explicit grants are untouched.
+  await client.documents.clearLinkAccess(documentId);
+```
+
+`setLinkAccess(documentId, level)` sets a permission **floor**: any signed-in app user who has the document ID resolves to at least `level` (`"reader"` | `"read-write"`) with no explicit grant. Effective access is `max(direct grant, group grants, link floor)` — the floor only ever raises a caller's level, never lowers an explicit grant. It counts for reading/writing document data but NOT for sharing or management: a link-only caller can't reshare, change permissions, or delete. Requires document owner, app owner, or read-write editor; root documents can't be link-shared (throws).
+
+- A document reached only through the floor reports `accessSource: "link"` on `documents.get(documentId)` and does NOT appear in `me.sharedDocuments()` — track it client-side if you want a "recently opened" affordance.
+- `getLinkAccess(documentId)` returns `{ documentId, linkAccess, linkAccessUpdatedBy?, linkAccessUpdatedAt? }` (`linkAccess` is `null`/`nil` when off) and is authorized for any caller who can read OR manage the document, so an app owner can inspect it without a content grant.
+- `clearLinkAccess(documentId)` — or lowering the level — evicts connected link-only viewers immediately; explicit grants are untouched.
+
 ### Update thumbnail / metadata
 
 ```typescript
@@ -625,6 +648,43 @@ Use these at runtime:
 ```
 
 Relationship traversal uses the same engine as `Model.query(...)` with `include` specs — see [Loading Related Data](#loading-related-data-includes) for the lower-level query-level include syntax.
+
+For many-to-many links, declare a `hasManyThrough` relationship over a **join model** — a record that carries one field pointing at each side. `join_model_local_field` points back at the source; `join_model_related_field` points at the target. Optional `join_model_order_by_field` / `join_model_order_direction` order the join leg (default `id` ascending):
+
+```toml
+# Post hasManyThrough Tags (via the postTags join model)
+[models.posts.relationships.tags]
+type = "hasManyThrough"
+model = "tags"
+join_model = "postTags"
+join_model_local_field = "postId"
+join_model_related_field = "tagId"
+```
+
+```typescript
+// Post.generated.ts — hasManyThrough resolves a PaginatedResult, paging the join leg
+export interface Post extends PostAttrs, BaseModel {
+  tags(options?: PaginationOptions): Promise<PaginatedResult<Tag>>;
+}
+```
+
+Traversal accepts an optional page size and cursor, paging the join leg the same way a query pages rows:
+
+```typescript
+  const post = await Post.find(postId);
+  if (!post) return;
+
+  // First page of this post's tags, ordered by the join model.
+  const page1 = await post.tags({ limit: 20 });
+  const firstTag = page1.data[0];
+
+  // Carry the cursor forward for the next page.
+  let rows = page1.data;
+  if (page1.nextCursor) {
+    const page2 = await post.tags({ limit: 20, afterCursor: page1.nextCursor });
+    rows = page2.data;
+  }
+```
 
 ### Unique Constraints
 
@@ -1053,6 +1113,8 @@ await task.save();
 Note the direction: constructors (`new Task({...})`), `save()`, and `query`/`find` filters all accept plain objects, so spreading a *plain object* into them is fine. Spread only fails when the **source** of the spread is a model instance.
 
 ### Choosing How to Target Documents for Saves
+
+These mechanisms govern **where saves route** — they have no effect on what queries see. A query always spans every open document (see [Querying Data](#querying-data)); setting a default document or a model-document mapping narrows writes, never reads. To scope a read, pass `{ documents }` on the query itself.
 
 When saving new objects, you need to specify which document they go into. There are three ways to do this:
 
@@ -1794,7 +1856,7 @@ Pick the call that answers the question you're actually asking:
 
 **Sharing error codes** (server-emitted body codes):
 
-The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed.
+The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed. `JsBaoApiError` means the server responded (non-2xx); when the request never reaches the server at all (offline, DNS failure, connection refused or aborted), the client throws `JsBaoNetworkError` instead — no `.status`, just `.cause` carrying the underlying fetch error. A network failure is retryable: branch with `isJsBaoNetworkError(err)` or `instanceof JsBaoNetworkError`, never by parsing the message.
 
 | Code | Endpoint | Meaning |
 |------|----------|---------|

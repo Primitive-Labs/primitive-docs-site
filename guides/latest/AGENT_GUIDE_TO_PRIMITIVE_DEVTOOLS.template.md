@@ -252,13 +252,20 @@ invariants (both contexts unless noted):
    (`documents.delete(id, { forceCloseIfOpen: true })`) so test docs don't
    accumulate. Always call it in a `finally` block.
 4. **Scope queries to the test document.** `createTestDocument()` sets its
-   document as the default, but a model query spans every open document — an
-   unscoped `Task.query({ ... })` can pick up records from other documents
-   open in the session. Pass `{ documents: doc.docId }` (a single id or an
-   array) so the assertion sees only its own data:
+   document as the default, but that default only routes **writes** — a model
+   query spans every open document regardless of the default. An unscoped
+   `Task.query({ ... })` can pick up records from other documents open in the
+   session. Pass `{ documents: doc.docId }` (a single id or an array) so the
+   assertion sees only its own data:
    ```ts
    const highPriority = await Task.query({ priority: 2 }, { documents: doc.docId });
    ```
+   When a test can't scope by document (it checks an aggregate that legitimately
+   spans documents), give each row a run-unique field value, filter on that
+   value, assert only on the rows it created, and delete them in the `finally`.
+   Never assert on absolute totals like `(await Task.query({})).data.length`
+   — another open document's rows inflate the count, and the test fails only once
+   that document is non-empty.
 5. **Host-app docs are quiesced.** `beginTestRun()` closes every currently
    open host document; `endTestRun()` re-opens them after the run.
 6. **Leftover cleanup.** `deleteAllTestDocuments()` runs on app start, when
