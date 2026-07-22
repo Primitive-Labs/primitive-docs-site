@@ -891,15 +891,57 @@ required = true
 | Op | Description | Key fields |
 |----|-------------|------------|
 | `save` | Create or replace a record | `data`, optional `ifNotExists`, `condition`, `stringSets`, `upsertOn` |
-| `patch` | Partial update | `id`, `data` |
-| `delete` | Remove a record | `id` |
-| `increment` | Atomic numeric increment/decrement | `id`, `fields` |
-| `addToSet` | Add values to StringSet fields | `id`, `stringSets` |
-| `removeFromSet` | Remove values from StringSet fields | `id`, `stringSets` |
+| `patch` | Partial update | `id`, `data`, optional `condition` |
+| `delete` | Remove a record | `id`, optional `condition` |
+| `increment` | Atomic numeric increment/decrement | `id`, `fields`, optional `condition` |
+| `addToSet` | Add values to StringSet fields | `id`, `stringSets`, optional `condition` |
+| `removeFromSet` | Remove values from StringSet fields | `id`, `stringSets`, optional `condition` |
 
 **Response:** `{ results: [{ op, success, id, values? }] }` — one entry per definition step, in definition order, so a multi-step op (save + increment, two increments, …) reports every step. `op` names the step's kind (`"save"` | `"patch"` | `"delete"` | `"increment"` | `"addToSet"` | `"removeFromSet"`); `values` carries an increment step's post-increment counters.
 
 **Atomicity:** a mutation op runs all its steps in ONE transaction — it either fully succeeds (HTTP 200 with the `results` array above) or fully rolls back. On any step's failure the op returns an HTTP error and applies **nothing**; the `results` array is a success-path contract only. The failing step keeps its natural status — increment / addToSet / removeFromSet / patch on a missing record → **404**, unique / `ifNotExists` / condition conflict → **409**, hook denial → **403** — and the error body names the failed step (`{ error, failedIndex, op, code }`). There is no partial-commit state to reconcile. (`executeBatch` bulk imports are the deliberate exception — each item commits or fails independently; see below.)
+
+**`condition` — compare-and-swap.** Any op kind accepts a `condition`: a `DocumentFilter` OBJECT the target record must match for the write to apply, checked inside the write's transaction (a true CAS, no lock). Its values take `$params` substitution, so a caller supplies the value compared against but never the condition itself — a `condition` can only make a write MORE restrictive, never bypass the op's `access`. On a match the write applies (200); on a mismatch the whole op rolls back and returns **409** `{ code: "CONDITION_NOT_MET" }`. Concurrent CAS writers converge — exactly one holds the version, the rest 409 and re-read/re-CAS. A workflow `database.mutate` surfaces `CONDITION_NOT_MET` as a **non-retryable** step failure (write your own retry loop). A referenced `$param` the caller omits **fails closed** (rejected), never match-all.
+
+```toml
+[[operations]]
+name = "advanceStatus"
+type = "mutation"
+modelName = "tasks"
+access = "true"
+[[operations.definition.operations]]
+op = "patch"
+id = "$params.id"
+
+[operations.definition.operations.data]
+status = "$params.status"
+version = "$params.newVersion"
+
+[operations.definition.operations.condition]
+version = "$params.expectedVersion"
+
+[[operations.params]]
+name = "id"
+type = "string"
+required = true
+
+[[operations.params]]
+name = "status"
+type = "string"
+required = true
+
+[[operations.params]]
+name = "expectedVersion"
+type = "number"
+required = true
+
+[[operations.params]]
+name = "newVersion"
+type = "number"
+required = true
+```
+
+> `condition` must be a `DocumentFilter` object (like a query `filter`), NOT a CEL string — the old `condition = "record.status == 'draft'"` string form is rejected at registration.
 
 **`upsertOn`** — pass the **field name** (`"upsertOn": "email"`, NOT a `$params.*` substitution) in a `save` op to create-or-update by a unique field instead of requiring an explicit `id`. The match **value** comes from `data` — the server looks up a record where that field equals `data.<field>`; if found, it patches it; if not, it inserts a new record. Useful for "ensure this user exists with these attributes" patterns:
 
