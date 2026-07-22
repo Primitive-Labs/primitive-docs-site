@@ -15,13 +15,13 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-07-21",
+    "stampedAt": "2026-07-22",
     "channel": "alpha",
     "packages": {
-      "js-bao-wss-client": "2.0.6",
+      "js-bao-wss-client": "2.0.10",
       "js-bao": "0.5.1",
-      "primitive-admin": "1.0.55",
-      "primitive-app": "3.0.5"
+      "primitive-admin": "1.0.59",
+      "primitive-app": "3.0.9"
     }
   },
   "guides": [
@@ -550,6 +550,51 @@
         "idempotencyKey",
         "deduplicatedChannels",
         "NotificationRateLimitError"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "workflows"
+      ]
+    },
+    {
+      "topic": "locks",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.md",
+      "description": "Named locks: mutual exclusion by key across client, CLI, and workflows; leases, LockTimeoutError",
+      "keywords": [
+        "lock",
+        "named lock",
+        "mutual exclusion",
+        "lease",
+        "ttl",
+        "acquire",
+        "release",
+        "renew",
+        "status",
+        "LockTimeoutError",
+        "lock.acquire",
+        "serialize",
+        "concurrency"
+      ],
+      "useCases": [
+        "Serializing an operation so it never runs twice at once for the same key",
+        "Acquiring a lock with a timeout and handling contention",
+        "Releasing or renewing a held lock by handle",
+        "Checking who holds a key without acquiring it",
+        "Coordinating overlapping workflow runs with lock.* steps",
+        "Holding a lock for an entire workflow run",
+        "Sizing a lock lease so it covers the work"
+      ],
+      "concepts": [
+        "named lock",
+        "lease",
+        "ttlMs",
+        "LockHandle",
+        "client.locks.acquire",
+        "client.locks.tryAcquire",
+        "lock.acquire step",
+        "run-scoped lock",
+        "LockTimeoutError",
+        "lock rate limit"
       ],
       "prerequisites": [],
       "relatedGuides": [
