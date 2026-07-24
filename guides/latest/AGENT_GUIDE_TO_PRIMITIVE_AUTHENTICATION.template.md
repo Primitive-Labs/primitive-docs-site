@@ -179,6 +179,31 @@ Gate the buttons on the auth config: `hasOAuth` for Google, `hasApple` for Apple
 
 ---
 
+## One Account Across Providers
+
+Google and Apple identities are linked to an account, not stored as a single
+current provider. Consequences to code against:
+
+- **Same email, second provider → same account.** A user who signed in with
+  Google and later signs in with Apple under the same email resolves to the
+  existing account. `isNewUser` is `false` on that second sign-in; documents,
+  memberships, and permissions carry over. Don't build "merge my accounts" UI.
+- **A linked identity survives an email change.** The identity is matched
+  before the email is, so a provider-side email change still resolves to the
+  original account rather than provisioning a new one.
+- **Links never move.** A provider identity already linked to one account is
+  never re-pointed at another by a later sign-in — the original owner keeps it.
+- **Only Google and Apple link this way.** Magic link and OTP resolve by the
+  submitted email; passkeys are registered against an already-signed-in
+  account.
+
+Practical effect on sign-in handling: treat `isNewUser` as "first time in this
+app", not "first time with this provider" — a first-ever Apple sign-in by an
+existing Google user reports `isNewUser == false`, so onboarding gated on it is
+correctly skipped.
+
+---
+
 ## Magic Link
 
 ### Request + verify

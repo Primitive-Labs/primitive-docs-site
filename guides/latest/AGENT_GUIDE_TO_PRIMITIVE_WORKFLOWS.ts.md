@@ -451,6 +451,33 @@ Rules and edge cases:
 - **Operations apply in listed order** within the one transaction.
 - **Caller-mode ACL is checked once** at write level: the caller needs `read-write` on the document; denial is non-retryable and nothing commits. An empty `operations` array is a clean no-op.
 
+### `writeOptions` — conditional (compare-and-set) writes
+
+A single-record `document.save`/`patch`/`delete` accepts a `writeOptions` block that guards the write against the record's current state. It's the workflow-side compare-and-set: two runs racing on the same record converge without a queue, because the guard is evaluated against the live record inside the write transaction — exactly one write applies, the loser fails cleanly.
+
+```toml
+[[steps]]
+id = "cas-balance"
+kind = "document.patch"
+documentId = "{{ input.docId }}"
+modelName = "Account"
+recordId = "{{ input.accountId }}"
+data = { balance = "{{ steps.calc.output.next }}" }
+saveAs = "updated"
+[steps.writeOptions.precondition]
+version = "{{ steps.read.output.record.version }}"   # apply only if version still matches
+```
+
+- **`precondition`** — a **field-equality** map `{ field: scalar, … }`. The write applies only when every field on the live record equals the given value; a mismatch, or a record that doesn't exist, fails closed. `precondition` on `document.delete` is a conditional delete (delete only if it still matches).
+- **`ifNotExists`** (save) — create-only: fails if a record already exists at `recordId`.
+- **`upsertOn`** (save) — resolve an existing record by a unique field's value and update it in place instead of creating a new record at the supplied `recordId` (no match → creates at `recordId`).
+
+Failure semantics:
+
+- A failed `precondition`/`ifNotExists` throws `CONDITION_NOT_MET` — a **non-retryable** classified failure. Nothing is written (the transaction rolls back). It is not auto-retried, so a step that must retry until it wins writes an explicit read → compute → conditional-write loop (e.g. `forEach` over a small range, or `runIf` on the prior attempt's `code`), not a bare retry.
+- **Field-equality only.** Operators (`$gt`, `$in`, …) and combinators (`$and`/`$or`) in a `precondition` are rejected non-retryably at validation with a clear error — they are not silently ignored. Express richer conditions by reading first and comparing in a `transform`/`script`, then gating the write on a scalar field.
+- **`document.bulkUpdate`** takes a per-operation `precondition` too (`{ model, action, id, fields?, precondition? }`); a failed precondition on any operation is fail-fast for the **whole blob** — nothing commits, matching the step's all-or-nothing semantics.
+
 ### `document.create` — mint a new document mid-run
 
 Creates a brand-new document (no alias) and returns `{ documentId, created: true }`. Built for the mint-then-write pattern: the run decides a document is needed (e.g. after a diff shows real changes), creates it, then targets the returned `documentId` with `document.bulkUpdate` / `document.save`. Works in **both** execution modes.
