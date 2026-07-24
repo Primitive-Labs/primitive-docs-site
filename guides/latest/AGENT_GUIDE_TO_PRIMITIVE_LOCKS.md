@@ -108,7 +108,17 @@ The lease-sizing rule applies to the acquire/release span exactly as it does on 
 
 ## Run-Scoped Declarative Lock
 
-A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — or `"fail"` — fail fast).
+A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — or `"fail"` — fail fast). Declare it as a `[workflow.lock]` block; only `key` is required:
+
+```toml
+[workflow.lock]
+key = "portfolio-bulk:{{ input.documentId }}"
+ttlMs = 600000
+timeoutMs = 30000
+onContention = "fail"
+```
+
+The block is TOML-owned config that round-trips through `primitive sync pull`/`push`; removing it clears the lock.
 
 **Size `ttlMs` to cover the worst-case duration of the whole run.** The run holds the lease for its full lifetime with no periodic renewal; ownership is re-verified only when the durable engine replays. A run that executes continuously longer than `ttlMs` — many back-to-back compute or LLM steps with no durable pause to force a replay — can let its lease lapse while still running, at which point a second run can take the key over and both critical sections run concurrently. This is a deliberate tradeoff (the lease, not a heartbeat, is the safety bound), so the lease must be sized generously enough that a run never outlives it.
 

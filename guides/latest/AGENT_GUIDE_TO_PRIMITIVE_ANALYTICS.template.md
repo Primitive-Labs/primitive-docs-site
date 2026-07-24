@@ -275,6 +275,11 @@ primitive analytics events --window-days 7 --page 0
 # Group by: action | feature | route | country | deviceType | plan | day
 primitive analytics events-grouped --group-by feature --window-days 14
 
+# Error groups: failures grouped by fingerprint with per-day counts
+# (default --window-days 7, --limit 50). Filter: --status-class 4xx|5xx|transport,
+# --source workflow_run|workflow_step|integration
+primitive analytics errors-groups --window-days 7 --status-class 5xx
+
 # Integration / workflow / prompt analytics (default --window-days 30)
 primitive analytics integrations
 primitive analytics workflows --limit 5
@@ -309,6 +314,9 @@ GET /app/{appId}/api/analytics/users/{userUlid}/snapshot
 GET /app/{appId}/api/analytics/events?windowDays=7&page=0
 GET /app/{appId}/api/analytics/events/grouped?windowDays=7&groupBy=action
 
+# Error groups — failures grouped by fingerprint, per-day count buckets
+GET /app/{appId}/api/analytics/errors/groups?windowDays=7&limit=50
+
 # Integrations / workflows / prompts (admin-only top lists)
 GET /app/{appId}/api/analytics/integrations?windowDays=30
 GET /app/{appId}/api/analytics/workflows/top?windowDays=30&limit=10
@@ -339,6 +347,22 @@ Supported `FIELD`s and the `OPERATOR`s each accepts:
 | `appVersion` | `is`, `is not`, `contains` |
 
 Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upgrade`. Unknown fields, unsupported operators, or rejected values are silently dropped.
+
+### Error groups
+
+`/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted literals, or timestamps normalize to the same title and share a fingerprint.
+
+Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, and `daily` — an ordered per-day `{ day, count }` series (sampling-weighted). The per-day buckets carry the whole window, so "today versus the trailing baseline" needs a single call, no rolling store.
+
+Only a bounded set of dimensions is filterable (the exact error code is inside the fingerprint, never a filter):
+
+| Field | Operators | Values |
+| --- | --- | --- |
+| `fingerprint` | `is`, `contains`, `starts with` | any |
+| `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration` |
+| `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
+
+Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the workflow query type `errors.groups` and the CLI `primitive analytics errors-groups`.
 
 ### Event row shape
 

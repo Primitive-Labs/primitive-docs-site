@@ -313,6 +313,8 @@ const { data: messages } = useJsBaoDataLoader({
 ```
 
 The same pattern adapts to "the K most recent" or "channels the user belongs to" — change the `me.ownedDocuments` / `me.sharedDocuments` calls and the readiness condition; everything else stays.
+
+**Create-then-requery is safe for a just-created owned doc.** `me.ownedDocuments` reads a server index that is only eventually consistent, so for a short window after `documents.create()` a raw server read can omit the doc you just made. The JavaScript client bridges that window: it merges a just-created owned document into the `me.ownedDocuments` result from its local cache, so a store that rebuilds its list on navigation (`load()` above re-running after `create()` + `documents.open(...)`) will still include the new document. You can still append the new entry optimistically after `create()` for an instant UI, but you no longer have to avoid the destructive re-query to keep the new doc from disappearing.
 {{/lang}}
 
 {{#lang swift}}
