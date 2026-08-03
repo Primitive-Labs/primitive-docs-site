@@ -30,17 +30,65 @@ primitive sync push
 ```
 
 - **Field types:** `string`, `number`, `boolean`, `date`, `id`, `stringset`. `enum` (string array) is valid only on a `string` field; other supported constraints are `required`, `maxLength`, `maxCount`.
-- **`unique`:** set `unique = true` on one `string`/`id` field (at most one per category) to enforce that no two resources of that type share the value AND make the value reverse-resolvable (`metadata.resolve` step, below). The indexed value is capped at 512 UTF-8 bytes. Writing a value another resource already owns is rejected `409` (atomic — the write rolls back); rewriting the same value on the same resource is idempotent; clearing the field or deleting the row frees the value in the same write. Enabling `unique` on a category that already has rows is refused (they'd be unindexed) — declare it at category-creation time, or recreate the category.
+- **`unique`:** set `unique = true` on one `string`/`id` field (at most one per category) to enforce that no two resources of that type share the value AND make the value reverse-resolvable (`resourceMetadata.resolve` / `primitive metadata resolve` / the `metadata.resolve` step, all below). The indexed value is capped at 512 UTF-8 bytes. Writing a value another resource already owns is rejected `409` (atomic — the write rolls back); rewriting the same value on the same resource is idempotent; clearing the field or deleting the row frees the value in the same write. Enabling `unique` on a category that already has rows is refused (they'd be unindexed) — declare it at category-creation time, or recreate the category.
 - **Category name `attrs` is reserved** — it's the read-only projected category (see **`md.self.attrs`** below), not a category you define.
 - **Limits:** up to 100 keys per category, 16 KB per category item.
 - **`readRule`/`writeRule` context:** `user.userId`, `user.role` (the caller), `resource.resourceType`, `resource.resourceId` (also bound as `resource.id`), `resource.category` — plus `workflow.workflowKey` when the call originates from a `metadata.write`/`metadata.read` step (so `fromWorkflow('key')` works). When the subject is a `database`, `workflow`, or `collection`, the rule can also read the resource's own columns via **`resource.attrs.<column>`** — `database`: `databaseId`, `databaseType`, `createdBy`; `workflow`: `workflowId`, `workflowKey`, `runAs`, `createdBy`; `collection`: `collectionId`, `collectionType`, `contextId`, `name`, `createdBy`. The canonical use is creator bootstrap: `writeRule = "user.userId == resource.attrs.createdBy"`. The subject row loads lazily (a rule that never references `resource.attrs` issues no extra read) and the binding fails closed: any other resource type, an unmapped column, or a missing row denies. The membership helpers `isMemberOf`/`memberGroups`/`hasRole` are also wired, so a rule can be group-scoped (`isMemberOf('class-teachers', resource.id)`) instead of only self-scoped; memberships load once, only when the rule references a membership helper (`hasRole` needs no load — it reads only `user.role`). `hasCollectionAccess` is rejected at save time in a category rule (collection-scoped only; it can never resolve here). An **app-level** owner or admin always bypasses both rules; a resource-level permission (e.g. a database's `owner`/`manager` grant) never bypasses — the rule itself is what authorizes resource-scoped callers. Omitting either rule defaults to deny.
-- **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`); the CLI's `primitive metadata categories list`/`get` inspect the definitions read-only, and `primitive metadata categories delete <resource-type> <category>` (admin-gated) removes a definition. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
+- **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`/`resolve`); the CLI's `primitive metadata categories list`/`get` inspect the definitions read-only, and `primitive metadata categories delete <resource-type> <category>` (admin-gated) removes a definition. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
 - **A category rule can declare its own `metadataManifest`** (same `self`/`paths`/`secrets` shape as any other owning config) so it can reach declared secrets or a traversal path's source category — see "A category rule's own manifest" below. Without one, the rule still gets inferred `md.self` reads but binds no `secrets`/`vars`.
 
-## Values: read, write, batch read, list, delete
+## Values: read, write, batch read, list, delete, resolve
 
-`get`/`set`/`delete` take `(resourceType, resourceId, category)` positionally, `list` takes `(resourceType, resourceId)`; `set` is a **full replace**, not a merge.
+`get`/`set`/`delete` identify the value by resource type, resource id, and category; `list` takes just the resource type and id. `set` is a **full replace**, not a merge.
 
+```swift
+_ = try await client.resourceMetadata.set(
+    resourceType: "user", resourceId: userId, category: "profile",
+    data: ["tier": "pro", "displayName": "Ada"]
+)
+// -> ResourceMetadataWriteResult { resourceType, resourceId, category, data, schemaVersion, size }
+
+let profile = try await client.resourceMetadata.get(
+    resourceType: "user", resourceId: userId, category: "profile"
+)
+// -> ResourceMetadataReadResult { resourceType, resourceId, category, data, schemaVersion, exists }
+// `data` is [String: JSONValue]; check `exists` before reading it. Nothing stored is
+// exists == false + empty data + schemaVersion == nil, NOT an error.
+
+let batch = try await client.resourceMetadata.getBatch(requests: [
+    .init(resourceType: "user", resourceId: userA, categories: ["profile", "billing"]),
+    .init(resourceType: "user", resourceId: userB, categories: ["profile"]),
+])
+// batch.results[i] = { resourceType, resourceId, ok,
+//   categories: [<category>: { ok, data, schemaVersion, exists, status, code, message }] }
+// The unions decode as flag-carrying structs: branch on `ok`, or read the `error`
+// accessor (nil when the entry succeeded) for the status/code/message triple. A
+// whole-resource failure has ok == false, an `error`, and no `categories`.
+
+let listed = try await client.resourceMetadata.list(resourceType: "user", resourceId: userId)
+// -> { resourceType, resourceId, categories: [{ category, data, schemaVersion }] }
+// Only categories whose readRule permits the caller are returned (owner/admin sees all);
+// a resource with no stored metadata returns an empty array, not an error.
+
+let removed = try await client.resourceMetadata.delete(
+    resourceType: "user", resourceId: userId, category: "profile"
+)
+// -> { resourceType, resourceId, category, deleted } — idempotent: absent item → deleted == false, not a 404.
+
+let hit = try await client.resourceMetadata.resolve(
+    resourceType: "user", category: "billing", key: "stripeCustomerId", value: "cus_ABC"
+)
+// -> ResourceMetadataResolveResult { resourceId, resourceType } — both nil on a miss.
+// Read `hit.resolved` for the hit arm as one value (nil on a miss). A miss is a 200,
+// never an error. The category readRule is evaluated against the RESOLVED resource and a
+// denied read returns the same nil resourceId — the response BODY carries no
+// distinguisher. Not constant-time, though: a denied resolve does the rule evaluation and
+// its lookups a miss skips, so latency can still separate the two. A key that is not the
+// category's active unique field throws HttpError with status == 400 and
+// serverCode == "NOT_UNIQUE_FIELD" (a config error, distinct from a miss).
+```
+
+A `readRule`/`writeRule` denial on the single read/write calls (`get`/`set`/`list`/`delete`) throws `HttpError` with `status == 403`; inside `getBatch` the same denial is a per-entry `ok: false` and the call still succeeds. `resolve` is the exception: a denial there is reported as a miss (see above), never a 403.
 
 ```bash
 primitive metadata set user 01HXY... profile --data '{"tier":"pro","displayName":"Ada"}'
@@ -50,6 +98,7 @@ primitive metadata get-batch --resource user:01HXY...:profile,billing --resource
 primitive metadata get-batch --requests '[{"resourceType":"user","resourceId":"01HXY...","categories":["profile"]}]'
 primitive metadata list user 01HXY...                # all stored categories (CLI reads as admin → shows everything)
 primitive metadata delete user 01HXY... profile      # idempotent
+primitive metadata resolve user billing stripeCustomerId cus_ABC   # reverse lookup; miss prints "Not found" and exits 0
 primitive metadata categories list                   # read-only inspection of category definitions
 primitive metadata categories get user profile      # adds the full schema JSON
 primitive metadata categories delete user profile --yes   # admin-gated; deletes the definition, NOT its values (--yes required in non-interactive/agent contexts; prompts otherwise)
@@ -156,60 +205,9 @@ filter = { tier = "$md.self.profile.tier" }
 
 ## Workflow steps: `metadata.write` / `metadata.read` / `metadata.delete` / `metadata.resolve`
 
-`metadata.write`, `metadata.read`, and `metadata.delete` route through the exact same read/write/delete path (and the same `readRule`/`writeRule` gate) as the client and CLI — no parallel authorization logic. `metadata.resolve` (covered below) is a separate system-only reverse-index lookup.
+A workflow reads, writes, deletes, and reverse-resolves metadata with the `metadata.write` / `metadata.read` / `metadata.delete` / `metadata.resolve` steps. They route through the same read/write/delete path (and the same `readRule`/`writeRule` gate) as the client and CLI — no parallel authorization logic; `metadata.resolve` is a system-only reverse-index lookup that bypasses `readRule`. The full step contract — params, return shapes, `saveAs`, retry behavior, and the `runAs:"system"` bypass rules — lives in the [Workflows guide](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md).
 
-```toml
-[[steps]]
-id = "record-billing"
-kind = "metadata.write"
-resourceType = "user"
-resourceId = "{{ input.userId }}"
-category = "billing"
-saveAs = "output"
-[steps.data]
-stripeCustomerId = "{{ input.customerId }}"
-status = "active"
-# Output: { ok, resourceType, resourceId, category, data, schemaVersion, size }
-
-[[steps]]
-id = "load-billing"
-kind = "metadata.read"
-resourceType = "user"
-resourceId = "{{ input.userId }}"
-category = "billing"
-saveAs = "output"
-# Output: { ok, resourceType, resourceId, category, data, schemaVersion, exists }
-
-[[steps]]
-id = "clear-billing"
-kind = "metadata.delete"
-resourceType = "user"
-resourceId = "{{ input.userId }}"
-category = "billing"
-saveAs = "output"
-# Output: { ok, resourceType, resourceId, category, deleted }
-```
-
-- `resourceType`/`resourceId`/`category`/`data` are all templated like any other step's params.
-- `metadata.write` is a **full replace** of the category, matching the REST `PUT` semantics.
-- `metadata.delete` is gated by the `writeRule` (deletion is a write) and is **idempotent** — an already-absent category returns `deleted: false`, not a 404, and never fails the step or the run. It's the surface a teardown workflow uses to clean up a resource's metadata in-flow — the only way to clear a category whose schema has `required` fields, since a `set` of `{}` fails schema validation.
-- Gate a category to exactly one workflow with `fromWorkflow('workflowKey')` in its `writeRule`/`readRule` — a REST call or a different workflow gets `403`. The workflow identity here is a privileged, call-local value the step runner passes in-process; it is never derived from a request header (an `X-Workflow-Context` header on a REST call has no effect).
-- Error behavior mirrors `database.*` steps: a 4xx (schema validation, rule denial, reserved category, bad segment) is **non-retryable**; a 429 or 5xx is retryable.
-- A `runAs:"system"` run's metadata calls carry no `user.*` context (empty `{}`) and get no app-level owner/admin bypass — only `fromWorkflow('key')` can authorize a system-run write/read/delete. A `runAs:"caller"` run's calls still get the app-level owner/admin bypass.
-
-`metadata.resolve` reverse-resolves a resource by a category's `unique` field value (metadata value → resource). It is **system-only** (`runAs:"system"`, like `user.resolve`) and bypasses `readRule` — it's an exact reverse-index lookup, not a metadata read. It returns `{ resourceId, resourceType }` on a hit and `{ resourceId: null }` on a miss (a miss NEVER throws, so branch on it). A `(resourceType, category, key)` whose `key` is not the category's declared `unique` field is a **non-retryable** error, distinct from a miss. One exact lookup (no scan) at any data volume.
-
-```toml
-[[steps]]
-id = "find-user"
-kind = "metadata.resolve"
-resourceType = "user"
-category = "billing"
-key = "stripeCustomerId"
-value = "{{ input.customerId }}"
-saveAs = "output"
-# Output: { resourceId, resourceType } on a hit; { resourceId: null } on a miss
-```
+The metadata-side control is the category's own rule: gate a category to exactly one workflow with `fromWorkflow('workflowKey')` in its `writeRule`/`readRule` — a REST call or a different workflow gets `403`. The workflow identity is a privileged, call-local value the step runner passes in-process; it is never derived from a request header (an `X-Workflow-Context` header on a REST call has no effect). A `runAs:"system"` run gets no app-level owner/admin bypass on metadata calls, so `fromWorkflow('key')` is the only thing that authorizes a system-run write/read/delete; a `runAs:"caller"` run keeps the bypass.
 
 ## Create-time initial metadata
 
@@ -224,10 +222,19 @@ primitive collections create "Class 42" --initial-metadata '{"settings":{"visibi
 - The category's `writeRule` is **waived** for this stamp — creation authority already covers it. The waiver is unreachable from the regular REST write route: it never accepts a caller-supplied `resourceId`, so it can't be used to bypass `writeRule` on an existing resource.
 - Capped at 10 categories per create.
 
+In the client, `collections.create(params:)` / `databases.create(params:)` take an optional `initialMetadata: [String: [String: JSONValue]]?` — category name → that category's values:
+
+```swift
+let database = try await client.databases.create(params: CreateDatabaseParams(
+    title: "Class Roster",
+    databaseType: "roster",
+    initialMetadata: ["settings": ["visibility": .string("class-only")]]
+))
+```
 
 ### Gating a collection's creation on its staged metadata
 
-> **Hold adoption until [#1881](https://github.com/Primitive-Labs/js-bao-wss/issues/1881) closes.** Do not gate a live collection type on an `md.self`-backed `collection.create` rule yet: on the alpha environment the `collection.create` workflow step has been observed dropping its `initialMetadata` even though the deployed step forwards it (under investigation in #1881), so a create that a direct API call would authorize becomes a 403 on the workflow path — the staged metadata the rule reads never arrives. The mechanism below is described for reference; wait for #1881 to close before relying on it.
+On the workflow path, an authored `initialMetadata` (or `database.create`'s `metadata`) whose template resolves to `null` fails the step non-retryably instead of creating the resource without it — so a create gated on staged metadata never silently degrades into a misleading 403. An omitted key stays a no-op.
 
 A collection type's `collection.create` rule is evaluated against the `initialMetadata` staged in the same create call — **before** the collection is persisted. The staged values bind to `md.self.<category>.<key>`, so a create rule can gate creation on the exact linkage the create is about to stamp:
 

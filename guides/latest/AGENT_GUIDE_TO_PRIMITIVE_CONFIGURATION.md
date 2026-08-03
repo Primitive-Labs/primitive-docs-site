@@ -83,11 +83,31 @@ config/
 App-level settings sync from `app.toml`. Edit the TOML and apply with `primitive settings push` (or a whole-config `sync push` — both operate on the same `app.toml`); `primitive settings pull` writes current server settings into it, `primitive settings diff` shows per-field differences, and `primitive settings show` renders the server-effective settings without touching any file. Change these settings through the TOML path, not with imperative `primitive apps update --flag` calls: those mutate the server directly and drift from the checked-in TOML, so the next push reverts them unless mirrored back. TOML-syncable settings:
 
 - `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `allowedDomains` (string array), `testAccountBaseEmails` (string array)
-- `[auth]` — `googleOAuthEnabled`, `googleClientId`, `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `redirectUris` (string array), `[auth.passkeys]` relying-party config
+- `[auth]` — `googleOAuthEnabled`, `googleClientId`, `googleClientSecret` (a `{{secrets.KEY}}` reference — see below), `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `redirectUris` (string array), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
 
-Push forwards only recognized keys and only those present: an omitted key is left untouched on the server (not cleared), an explicit `false` is forwarded, and `appleAudiences = []` clears the audiences. This omit-preserves rule is specific to app settings — a synced entity's owned scalar fields are cleared when their line is removed (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)). An unrecognized key is ignored with a warning (`Unrecognized [<section>] key "<key>" in app.toml — ignored. Recognized keys: …`). The Google OAuth **client secret** is the one auth setting excluded from `app.toml`: `settings pull` never writes it, and a hand-added `googleClientSecret` key under `[auth]` aborts the push before any write. Set it with `primitive apps update <app-id> --google-client-secret <secret>` (`''` clears it) — this flag is the exception, since the secret never lives in `app.toml`.
+Push forwards only recognized keys and only those present: an omitted key is left untouched on the server (not cleared), an explicit `false` is forwarded, and `appleAudiences = []` clears the audiences. This omit-preserves rule is specific to app settings — a synced entity's owned scalar fields are cleared when their line is removed (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)). An unrecognized key is ignored with a warning (`Unrecognized [<section>] key "<key>" in app.toml — ignored. Recognized keys: …`).
+
+`googleClientSecret` holds a whole `{{secrets.KEY}}` reference, never the secret itself, so it round-trips through `app.toml` like any other string setting. Store the value as an app secret first:
+
+```bash
+primitive secrets set GOOGLE_CLIENT_SECRET --value <client-secret>
+```
+
+```toml
+[auth]
+googleClientId = "1234.apps.googleusercontent.com"
+googleClientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+```
+
+A literal value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. Clearing the setting (`""`) leaves the app secret in place.
+
+A value stored before this rule shipped is a literal, and it keeps working — Google sign-in on an app that never migrated still uses the stored secret. It is deprecated, and it blocks configuration: while the stored value is a literal, **any** app-settings write is rejected with `GOOGLE_CLIENT_SECRET_MIGRATION_REQUIRED` unless that same write migrates the field — sets a valid `{{secrets.KEY}}` reference, or clears it. Store the value as an app secret and re-point the setting in one push.
+
+`GOOGLE_OAUTH_MISCONFIGURED` is reserved for a *reference* naming a secret that doesn't exist: the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone, so Primitive lets it through rather than rejecting it outright. Exempt is not unaffected: when the reference resolves the server does send `client_secret` alongside `code_verifier`, and Google requires it for the "Web application" client type the setup guide provisions — so on a dangling reference the native exchange fails at Google instead, as a generic `INVALID_TOKEN`.
+
+The server only ever sends `googleClientSecret` back when it holds a reference. A pre-existing literal is real credential material, so it is withheld from every read — `settings show`, `settings pull`, the API — and reported as `googleClientSecretStatus = "legacy-literal"` instead. On such an app the setting is simply absent from `app.toml`; re-point it at a secret reference and push.
 
 ## Owned scalar fields (clear on absence)
 
@@ -127,12 +147,11 @@ Keep everything in the sync tree — including test, probe, and dev workflows. A
 
 ## What sync does NOT carry
 
-A few settings are set with dedicated commands rather than TOML (app-level settings that *do* sync are listed under [App settings](#app-settings-app-toml)). The Google OAuth **client secret** is the app-level exception — it is never written to `app.toml`, and a hand-added `googleClientSecret` key aborts the push; set it with `primitive apps update <id> --google-client-secret <secret>`. Two workflow-level fields are the exception to "TOML round-trips everything": `sync push` sets them only when it **creates** a workflow, never when it updates one already on the server — flip them on an existing workflow with a direct update instead:
+A few settings are set with dedicated commands rather than TOML (app-level settings that *do* sync are listed under [App settings](#app-settings-app-toml)). Two workflow-level fields are the exception to "TOML round-trips everything": `sync push` sets them only when it **creates** a workflow, never when it updates one already on the server — flip them on an existing workflow with a direct update instead:
 
 ```bash
 primitive workflows update <id> --sync-callable true     # existing workflow only; the server re-validates against the currently-active steps
 primitive workflows update <id> --capabilities membership   # existing workflow only; comma-separated, "" revokes all
-primitive apps update <id> --google-client-secret <secret>  # secret, excluded from app.toml; "" clears
 ```
 
 `requiresClientApply` is an ordinary `[workflow]` TOML field — `sync push` forwards it on both create and update — so `primitive workflows update <id> --requires-client-apply false` is a convenience, not the only path.
@@ -145,6 +164,21 @@ App-level secrets are server-side values referenced from workflow/integration TO
 primitive secrets set OPENAI_API_KEY --value sk-...
 primitive secrets list
 primitive secrets delete OPENAI_API_KEY
+```
+
+## Email templates
+
+Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and workflows can register custom types. Built-in types: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by setting an override and triggered from an `email.send` workflow step. Each type exposes template variables (`{{magicLinkUrl}}`, `{{otpCode}}`, …) substituted at send time.
+
+Overrides round-trip through `primitive sync` as `email-templates/*.toml`, or manage them imperatively:
+
+```bash
+primitive email-templates list                 # all types + override status
+primitive email-templates get magic-link        # current subject + body + variables
+primitive email-templates variables magic-link  # available {{vars}}
+primitive email-templates set magic-link --subject "Sign in to MyApp" --html-file ./magic-link.html --text-file ./magic-link.txt
+primitive email-templates test magic-link        # send a test email
+primitive email-templates delete magic-link      # revert to the built-in default
 ```
 
 ## Headless auth (CI)

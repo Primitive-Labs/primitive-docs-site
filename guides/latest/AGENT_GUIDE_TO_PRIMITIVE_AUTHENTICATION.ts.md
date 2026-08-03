@@ -156,6 +156,31 @@ const { token } = await client.handleOAuthCallback(code, state);
 
 ---
 
+## One Account Across Providers
+
+Google and Apple identities are linked to an account, not stored as a single
+current provider. Consequences to code against:
+
+- **Same email, second provider → same account.** A user who signed in with
+  Google and later signs in with Apple under the same email resolves to the
+  existing account. `isNewUser` is `false` on that second sign-in; documents,
+  memberships, and permissions carry over. Don't build "merge my accounts" UI.
+- **A linked identity survives an email change.** The identity is matched
+  before the email is, so a provider-side email change still resolves to the
+  original account rather than provisioning a new one.
+- **Links never move.** A provider identity already linked to one account is
+  never re-pointed at another by a later sign-in — the original owner keeps it.
+- **Only Google and Apple link this way.** Magic link and OTP resolve by the
+  submitted email; passkeys are registered against an already-signed-in
+  account.
+
+Practical effect on sign-in handling: treat `isNewUser` as "first time in this
+app", not "first time with this provider" — a first-ever Apple sign-in by an
+existing Google user reports `isNewUser == false`, so onboarding gated on it is
+correctly skipped.
+
+---
+
 ## Magic Link
 
 ### Request + verify
@@ -256,7 +281,7 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
 
 > **Caveat on OTP disabled.** When OTP is disabled the request endpoint returns a plain 400 with the message `"OTP authentication is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the OTP UI on `getAuthConfig()`'s `otpEnabled` up front instead.
 
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, and `RESERVED_EMAIL_FOR_ADMIN` — compare those as string literals.
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the app's `googleClientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
 The same `AuthError` codes apply to `magicLinkRequest`/`magicLinkVerify` and `passkey*` methods.
 
@@ -661,21 +686,7 @@ Manage the whitelist with `primitive apps update --test-account-bases …` (max 
 
 ## Customizing Email Templates
 
-The Magic Link, OTP, and other emails Primitive sends can be customized via the CLI:
-
-```bash
-primitive email-templates list                       # all types + override status
-primitive email-templates get magic-link             # subject + body + variables
-primitive email-templates variables magic-link       # available {{vars}}
-primitive email-templates set magic-link \
-  --subject "Sign in to MyApp" \
-  --html-file ./emails/magic-link.html \
-  --text-file ./emails/magic-link.txt
-primitive email-templates test magic-link            # send test email
-primitive email-templates delete magic-link          # revert to default
-```
-
-Overrides are tracked by `primitive sync` (TOML in `email-templates/`). Custom templates can be triggered from `email.send` workflow steps — see the [Workflows guide](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md).
+The `magic-link` and `otp` sign-in emails are two of the transactional types Primitive sends; override either with a custom subject and branded HTML/text body for auth emails. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are triggered from `email.send` workflow steps.
 
 ---
 

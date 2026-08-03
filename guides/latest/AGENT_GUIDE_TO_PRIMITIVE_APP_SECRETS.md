@@ -20,7 +20,7 @@ primitive secrets delete OPENAI_API_KEY
 |---|---|---|
 | Integrations | `requestConfig.defaultHeaders`, `requestConfig.staticQuery` | Per request, when the proxy executes the call |
 | Workflows | Any step-config template string; CEL contexts (`runIf`, `switch` `when`) expose `secrets.*` | Just before the step runs |
-| Inbound webhooks | A webhook's `signingSecret` | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery |
+| Inbound webhooks | A webhook's `signingSecret` / `previousSigningSecret` — which must each be a **whole** reference, never a literal (`400` `SIGNING_SECRET_MUST_BE_SECRET_REF`) | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery, or `signing_secret_literal` / `signing_secret_unset` if the stored value is a raw secret or missing |
 | Databases | Operation `access` / per-param `access` CEL; trigger stamp `value` CEL | When the operation executes (secrets load only when the expression references `secrets.`) |
 
 Write the reference without inner spaces — `{{secrets.KEY}}`, uppercase key, max 64 chars. Integration and webhook fields resolve exactly that form (a spaced `{{ secrets.KEY }}` is left as literal text there); workflow step templates additionally accept the spaced form.
@@ -35,8 +35,9 @@ Integration templates only match uppercase keys — `{{secrets.MY_KEY}}` with `[
 
 1. **Never inline a credential in TOML** — config files are committed. Reference `{{secrets.KEY}}` and set the value with the CLI.
 2. **Resolve secrets in integration config, not workflow step config.** A workflow step's resolved config is recorded in the run's step output snapshots — a secret templated into `request.headers` becomes readable in run detail. Secrets in the integration's `defaultHeaders`/`staticQuery` resolve after that snapshot and stay invisible. (See the integrations guide.)
-3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value.
-4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow renders the missing-path sentinel (or fails the step under `strict = true`); an integration header referencing a deleted key sends the unresolved placeholder upstream.
+3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value. A key holds exactly one value, so this is a sharp cutover; where a provider gives an overlap window (a webhook signing secret), create a SECOND key and rotate the reference onto it instead.
+4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow renders the missing-path sentinel (or fails the step under `strict = true`); an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook whose referenced key is gone rejects every signed delivery `401`.
+5. **Budget the 100-key limit.** Every credential a server-side config references is one key — an integration's API key, each signed webhook's signing secret (plus a second key while a rotation window is open), a database rule's token. An app with many signed webhooks needs one key per webhook.
 
 ## Config Vars
 

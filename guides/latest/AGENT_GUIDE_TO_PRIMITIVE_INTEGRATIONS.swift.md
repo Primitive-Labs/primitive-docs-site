@@ -363,7 +363,7 @@ primitive integrations test <id> --method POST --body '{"foo":"bar"}'
 
 Note: `--method` defaults to `GET` regardless of the integration's `defaultMethod`. Pass `--method` explicitly when the integration only allows non-GET methods.
 
-The test endpoint runs with `allowInactive: true` and `allowMissingSecret: true`, includes a `requestPreview` (with secrets redacted), and works against `draft` integrations.
+The test endpoint runs with `allowInactive: true`, includes a `requestPreview` (with secrets redacted), and works against `draft` integrations.
 
 ### Logs
 
@@ -405,53 +405,7 @@ primitive integrations tests runs <id> [--limit 20] [--group <comparison-group>]
 
 ### Sync (TOML <-> server)
 
-```bash
-primitive sync init     # create config tree + .primitive-sync.json
-primitive sync pull     # server -> local TOML
-primitive sync push [--dry-run] [--force]
-primitive sync diff
-```
-
-The sync directory auto-resolves to `.primitive/sync/<env>/<appId>/`; pass `--dir <path>` to override it. `init` creates these subdirs: `integrations/`, `webhooks/`, `cron-triggers/`, `blob-buckets/`, `prompts/`, `workflows/`, `database-types/`, `rule-sets/`, `group-type-configs/`, `collection-type-configs/`, `email-templates/`. Integration files live at `integrations/<key>.toml`.
-
-## Typical Workflow
-
-# This worked example pins a fixed sync dir (`--dir ./config`) so the file paths
-# below are concrete; omit `--dir` to use the default `.primitive/sync/<env>/<appId>/`.
-
-```bash
-# Initial setup
-primitive sync init --dir ./config
-primitive sync pull --dir ./config
-
-# Add a new integration
-cat > config/integrations/openai.toml <<'EOF'
-[integration]
-key = "open-ai"
-displayName = "OpenAI"
-status = "draft"
-
-[requestConfig]
-baseUrl = "https://api.openai.com/"
-allowedMethods = ["POST"]
-allowedPaths = ["/v1/responses", "/v1/chat/completions"]
-defaultMethod = "POST"
-
-  [requestConfig.defaultHeaders]
-  Content-Type = "application/json"
-  Authorization = "Bearer {{secrets.OPENAI_API_KEY}}"
-EOF
-
-# Push and configure
-primitive sync push --dir ./config --dry-run
-primitive sync push --dir ./config
-primitive secrets set OPENAI_API_KEY --value sk-...
-primitive integrations test <integration-id> --method POST --path /v1/responses \
-  --body '{"model":"gpt-4.1-mini","input":"hi"}'
-primitive integrations update <integration-id> --status active
-```
-
-If `sync push` reports a conflict, someone modified the server since your last `pull`. Either re-pull and merge, or `--force` to overwrite the server.
+Integration configs live at `integrations/<key>.toml`, one file per integration. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`), the `--dir` override, snapshots, pruning, and conflict handling.
 
 ## Calling from the Client SDK
 
@@ -496,8 +450,6 @@ If `sync push` reports a conflict, someone modified the server since your last `
     switch error.code {
     case .integrationNotFound:
       break // 404, also fires for status != active
-    case .integrationSecretMissing:
-      break // 409, MISSING_SECRET upstream
     case .integrationRequestInvalid:
       break // 400/413/422 (method/path/body)
     case .integrationProxyFailed:
@@ -519,7 +471,6 @@ If `sync push` reports a conflict, someone modified the server since your last `
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `INTEGRATION_INACTIVE` | 404 | `status != "active"`. |
-| `MISSING_SECRET` | 409 | A stored integration-scoped secret row is required but missing. Integrations using `{{secrets.KEY}}` app-secret templates don't trigger this. |
 | `DISALLOWED_METHOD` | 422 | Method not in `allowedMethods`. |
 | `DISALLOWED_PATH` | 422 | Path doesn't match `allowedPaths`. |
 | `REQUEST_BODY_TOO_LARGE` | 413 | Body exceeds `maxRequestBodyBytes`. |

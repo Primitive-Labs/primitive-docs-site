@@ -271,3 +271,154 @@ re-loads logs so the same error has richer context next time you look.
 - Every action is a round trip over the network (~5–20ms on a good LAN), so it's
   visibly not real-time; the event stream is push-based, so observation lag stays
   low even when action lag doesn't.
+
+## Driving the UI with idb
+
+The Debug Inspector asserts **state** — what the client holds and what tests
+return. It cannot drive the **UI**: tapping a button or typing in a field. For
+that, use **idb** (Facebook's iOS Debug Bridge), the one tool that reaches a
+running SwiftUI app headlessly. `xcrun simctl` has no tap or text input, and
+macOS accessibility can't see inside a SwiftUI surface, so idb is the way to
+tap, type, and read the on-screen accessibility tree.
+
+The two are complements, not alternatives: **idb drives the UI, the Inspector
+asserts the resulting state.** A typical check taps through a flow with idb,
+then switches to the Inspector to confirm the records or connection state that
+resulted.
+
+### The `ui_signin` smoke scenario
+
+The template ships this pairing ready to run. `scripts/smoke-test.sh` has a
+`ui_signin` scenario that boots the simulator, launches the app, signs in
+end-to-end, and asserts the post-login screen renders:
+
+```bash
+bash scripts/smoke-test.sh ui_signin   # the idb-driven UI sign-in test
+bash scripts/smoke-test.sh --list      # launch_survive + ui_signin
+bash scripts/smoke-test.sh             # default run — launch_survive only, no idb needed
+```
+
+`ui_signin` is available but not part of the default run, so a bare
+`scripts/smoke-test.sh` (and `pnpm swift:smoke` in the monorepo) stays
+zero-dependency. Run `ui_signin` explicitly to opt into idb.
+
+The scenario locates login controls by stable `.accessibilityIdentifier`
+(`primitive.login.emailField`, `primitive.login.emailSubmit`,
+`primitive.login.otpField`, `primitive.login.otpVerify`), so it survives
+copy changes to the login form. It asserts the identifier in
+`PRIMITIVE_SMOKE_SUCCESS_ID` renders after sign-in (default
+`primitive.template.home`, the unmodified template's Home screen); point it at
+your own screen's identifier when you replace the post-login UI.
+
+### Prerequisite: a test account
+
+`ui_signin` signs in through the `+primitivetest` OTP bypass — no mailbox, no
+real code. Whitelist a base email on the app and set OTP as the email method,
+then hand the scenario a derived address. The full contract (address shape,
+the fixed `000000` code, the per-app whitelist, TTL, and member-only roles) is
+in the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) under
+"Test User Sign-In" — don't re-derive it here.
+
+The scenario's preflight checks all three prerequisites through the CLI's
+effective-settings view before it builds:
+
+```bash
+primitive settings show --json   # must list your base under testAccountBaseEmails,
+                                 # report otpEnabled: true, and have a signup
+                                 # mode that admits the test address
+```
+
+With OTP disabled the same email button sends a magic link instead of prompting
+for a code, so `otpEnabled` is a hard requirement. Set these via `app.toml` +
+`primitive settings push` (not the deprecated `apps update`). Then:
+
+```bash
+export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
+```
+
+**The signup mode has to admit the address.** The `+primitivetest` bypass
+replaces the emailed code — it does not skip the app's signup gate. The server
+runs the invite-only/domain access check first and only then applies the
+test-email whitelist, so on an app with `mode = "invite-only"` (the default for
+a freshly scaffolded app) an uninvited test address is rejected at OTP request
+with `This app is invite-only. You've been added to the waitlist.`
+
+Two ways through:
+
+- Set `mode = "public"` in `app.toml` and `primitive settings push`.
+- Stay invite-only and pre-invite the test address. This genuinely works — an
+  unaccepted, unexpired invitation for the address satisfies the gate, and OTP
+  verify then consumes it. Invite the **exact** address, lowercase
+  (`you+primitivetest-smoke@example.com`), with role `member`: invitation
+  lookup matches the literal email, so an invitation for the bare base address
+  does not cover a `+primitivetest` one, and `admin`/`owner` roles are refused
+  for test addresses. With `mode = "domain"`, the address's domain must be in
+  `allowedDomains` instead.
+
+The preflight can read `mode` but not the app's invitations, so under a
+non-public mode it fails unless you tell it the address is already admitted:
+
+```bash
+export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address invited
+```
+
+To check the prerequisites without the multi-minute boot and build, run the
+preflight on its own:
+
+```bash
+PRIMITIVE_SMOKE_PREFLIGHT_ONLY=1 scripts/smoke-test.sh ui_signin
+```
+
+It exits 0 when everything is in place and otherwise names the exact setting to
+fix. That includes the case where `primitive settings show` itself fails (CLI
+not logged in, app id unresolvable, API error): the preflight reports
+`could not read settings (is the CLI logged in and pointed at this app?)`
+instead of failing with no explanation.
+
+### Installing idb
+
+idb is two pieces: a native companion (Homebrew) and the `idb` Python client:
+
+```bash
+brew install facebook/fb/idb-companion
+python3.12 -m venv idbenv && ./idbenv/bin/pip install fb-idb
+export PATH="$PWD/idbenv/bin:$PATH"   # put `idb` on PATH
+```
+
+**Pin Python 3.12.** `fb-idb` calls `asyncio.get_event_loop`, which was removed
+in Python 3.14, so it fails to run under 3.14. Install it into a 3.12 venv as
+shown. `ui_signin`'s preflight detects a missing or unrunnable idb and prints
+these steps rather than a raw stack trace.
+
+### Driving idb by hand
+
+To drive the app outside the scenario, start a companion and issue `ui`
+commands against it. Coordinates are in **points** — the same units
+`idb ui describe-all` reports — so there is no pixel conversion:
+
+```bash
+idb_companion --udid <UDID> --grpc-port 10882 &        # serves on a gRPC port
+idb --companion localhost:10882 ui describe-all         # the accessibility tree
+idb --companion localhost:10882 ui tap <X> <Y>          # tap a point
+idb --companion localhost:10882 ui text "hello"         # type into the focused field
+idb --companion localhost:10882 ui key 40               # 40 = Return
+```
+
+To tap a control by identifier rather than raw coordinates, read
+`describe-all`, find the element whose `AXUniqueId` matches (this is where a
+SwiftUI `.accessibilityIdentifier` surfaces), and tap the center of its `frame`
+rounded to integer points (`idb ui tap` rejects non-integer coordinates) —
+which is exactly what `ui_signin` does. On a failed assertion the scenario
+writes a screenshot and dumps `describe-all` to the log, so a missed identifier
+is diagnosable without re-running interactively.
+
+`ui_signin` reinstalls the app before each run (clearing any persisted session
+so the login screen shows) and launches with the Debug Inspector disabled
+(`PRIMITIVE_DEBUG_INSPECTOR=0`), which avoids the first-launch Local Network
+permission alert that would otherwise cover the form on a clean simulator.
+
+### Reach
+
+Like `launch_survive`, this is macOS-only (a booted simulator plus idb) and is
+**not** part of the Linux `pnpm test` suite. It's a developer- and
+agent-invoked check, not a gate the Linux CI enforces.

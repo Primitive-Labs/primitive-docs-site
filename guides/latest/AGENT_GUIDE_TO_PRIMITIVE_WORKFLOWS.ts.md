@@ -474,7 +474,7 @@ version = "{{ steps.read.output.record.version }}"   # apply only if version sti
 
 Failure semantics:
 
-- A failed `precondition`/`ifNotExists` throws `CONDITION_NOT_MET` — a **non-retryable** classified failure. Nothing is written (the transaction rolls back). It is not auto-retried, so a step that must retry until it wins writes an explicit read → compute → conditional-write loop (e.g. `forEach` over a small range, or `runIf` on the prior attempt's `code`), not a bare retry.
+- A failed `precondition`/`ifNotExists` throws `CONDITION_NOT_MET` — a **non-retryable** classified failure. Nothing is written (the transaction rolls back). It is not auto-retried, so a step that must retry until it wins writes an explicit read → compute → conditional-write loop (e.g. `forEach` over a small range, or `runIf` on the prior attempt's `code`), not a bare retry. Capture the attempt with `continueOnError = true` and read the code back from `steps.<id>.code` for a plain step, or `steps.<id>.errors[0].code` / `steps.<id>.items[0].code` for an attempt made inside a `forEach`.
 - **Field-equality only.** Operators (`$gt`, `$in`, …) and combinators (`$and`/`$or`) in a `precondition` are rejected non-retryably at validation with a clear error — they are not silently ignored. Express richer conditions by reading first and comparing in a `transform`/`script`, then gating the write on a scalar field.
 - **`document.bulkUpdate`** takes a per-operation `precondition` too (`{ model, action, id, fields?, precondition? }`); a failed precondition on any operation is fail-fast for the **whole blob** — nothing commits, matching the step's all-or-nothing semantics.
 
@@ -945,6 +945,7 @@ reason = "preferences backfill"
 - Each user is processed by the `perUser.workflowKey` child workflow. The iterated user's id is injected into the child as `input.userId` automatically, so a child with no `perUser.input` block still reads `{{ input.userId }}`. `onPartialFailure` controls whether per-user failures stop the whole iteration or are tallied and skipped.
 - `perUser.input` values are rendered per user against a `user` binding (`user.userId`, `user.role`) with full template syntax — filters and fallbacks included (`{{ user.userId | upper }}`, `{{ user.role || 'member' }}`). A key set in `perUser.input` overrides the injected `userId` default (author-wins).
 - Prefer `iterate-users` over a hand-rolled `forEach` across a `users.list` query when the fan-out is app-wide and long-running; `forEach` is better for bounded, in-run collections.
+- **`forEach` on an `iterate-users` step is rejected at save time** (`'iterate-users' cannot be used with forEach`): the step already fans out over the entire roster, so nesting it in a loop multiplies the whole user base by the loop length. Put the `iterate-users` step in a child workflow and `forEach` over `workflow.call` if you genuinely need a per-item app-wide pass.
 
 ## Templating
 
@@ -1102,7 +1103,11 @@ subject = "Update"
 htmlBody = "<p>Hi {{ member.name }}</p>"
 ```
 
+The source is a **bare path** into the run context (to an array, or to `{items: [...]}`) — not a template, unlike every other field on the step. A whole-value template wrapping one bare path (`forEach = "{{ steps.team.items }}"`) is unwrapped and resolves to the same array. Any other use of `{{ }}` in the source — a partial template (`"rows {{ steps.team.items }}"`), several expressions (`"{{ a }} {{ b }}"`), an empty expression (`"{{ }}"`), or a wrapped expression that is not a bare path (`"{{ steps.team.items || [] }}"`, `"{{ steps.team.items | default(1) }}"` — operators and filters work in the step's other fields, not in the source) — and an empty source string are rejected at push time; they could never resolve, and used to iterate zero times while reporting the step `completed`. A source that resolves to nothing still iterates zero times with `ok: true` (that is the empty-collection case, not an error). Kebab-case step ids are ordinary paths (`forEach = "{{ steps.list-securities.items }}"` works); a path segment with other punctuation needs the bracket form (`"{{ steps['odd.key'].items }}"`).
+
 Output is always `{ items: [...per-iter results], errors: [{index, error}], totalSucceeded, totalFailed, totalEmpty, ok }` — even when there are no errors. Results are ordered by input index regardless of completion order. `ok` is `true` iff every iteration succeeded (and the source was non-empty); use it in `runIf` on the next step.
+
+When an iteration fails under `continueOnError` and the failure was **classified** (e.g. a conditional write's `CONDITION_NOT_MET`), its `code` and `status` are preserved on both the error entry and the item — `steps.<id>.errors[0].code`, `steps.<id>.items[0].code` — so a following step can tell that failure apart from any other one. This holds for parallel (`concurrency > 1`) fan-out too.
 
 **Parallel forEach** — add `concurrency` to fan out iterations across multiple lanes:
 
@@ -1180,7 +1185,7 @@ The predicate runs against each iteration's `result` plus the usual `input`/`ste
 ## Error handling
 
 - **Default**: a failed step throws and the workflow fails.
-- `continueOnError = true`: failure is captured as `steps[id] = { error, errorDetails, ok: false, errored: true }` and execution continues.
+- `continueOnError = true`: failure is captured as `steps[id] = { error, errorDetails, ok: false, errored: true }` and execution continues. A **classified** failure (e.g. a conditional write's `CONDITION_NOT_MET`) also carries `code` and `status` — see the verdict-namespace table below.
 - `strict = true`: any unresolved template expression in the step throws with a path-listing error.
 - `expect:` filter (in templates): runtime type check.
 - `[[compensate]]` block at the top level runs after a failure (when `continueOnError` is not set). Compensate steps see `steps._error = { message, stepId }`. Compensate runs only in sync execution paths (e.g., `executeWorkflowSync`); not all engine modes invoke it.
@@ -1235,6 +1240,7 @@ Every **object** entry in `steps[id]` carries a reserved verdict namespace along
 | `skipped: true` | The step's `runIf` evaluated falsy, or a step listed in its `skipWhenSkipped` was itself skipped. The runner did NOT execute. |
 | `errored: true` | The step threw but was captured by `continueOnError = true` |
 | `error`, `errorDetails` | Companion fields populated when `errored: true` |
+| `code`, `status` | Companion fields populated when `errored: true` **and** the failure was classified (e.g. `CONDITION_NOT_MET` / `409`). Absent when the failure carried no classification, so only branch on `steps.<id>.code` where a classified failure is the case you are testing for |
 
 `ok`, `skipped`, `errored`, `error`, and `errorDetails` are written by the engine and override any same-named field the runner would have produced. Downstream `runIf` and templates can rely on them whenever the step's result is an object — skipped and errored steps always are:
 
@@ -1355,20 +1361,158 @@ External services trigger workflows via inbound webhooks. This is the **inbound*
 key = "stripe-payments"
 displayName = "Stripe Payments"
 workflowKey = "process-stripe"
-verificationScheme = "stripe"     # stripe | github | slack | custom | none
-signingSecret = "{{secrets.STRIPE_WEBHOOK_SECRET}}"  # raw value, or a {{secrets.KEY}} reference
+verificationScheme = "stripe"     # stripe | github | slack | discord | jwt | plaid | custom | none
+signingSecret = "{{secrets.STRIPE_WEBHOOK_SECRET}}"  # a whole {{secrets.KEY}} reference; nothing else is accepted
 status = "active"                 # active | paused; create defaults to active
 # Optional: toleranceSeconds, deduplicationEnabled, deduplicationWindowMs,
-# secretGracePeriodMs, [webhook.allowedIps] cidrs, [webhook.inputMapping]
+# secretGracePeriodMs, maxBodyBytes, [webhook.allowedIps] cidrs, [webhook.inputMapping]
 ```
 
-`signingSecret` is required unless `verificationScheme = "none"`. It may be a raw value or a `{{secrets.KEY}}` reference (uppercase-led key, no spaces — the tighter form) into the app secret store; the reference is stored and re-emitted verbatim (never returned as a real secret) and resolved server-side against the app secrets immediately before HMAC verification. The referenced key must exist at create/update or the write is rejected. It **fails closed**: if the reference can't be resolved at delivery (secret deleted, or encryption key unset) the request is rejected with `401` (`rejectionReason: secret_unresolved`) rather than verifying against the literal reference; an unresolvable grace-window `previousSigningSecret` reference is dropped.
+### Public-key schemes: `[verification.<scheme>]`
+
+`discord`, `jwt` and `plaid` verify with public key material rather than a shared secret, so they take no `signingSecret` and are configured with a `[verification.<scheme>]` table that round-trips through `sync pull`/`push`:
+
+```toml
+[verification.discord]
+publicKey = "<64-char hex Ed25519 application public key>"
+# optional previousPublicKey for a rotation grace window
+```
+
+```toml
+[webhook]
+key = "provider-events"
+verificationScheme = "jwt"
+toleranceSeconds = 300
+deduplicationWindowMs = 360000     # must cover the freshness window (below)
+
+[verification.jwt]
+header = "X-Provider-Signature"    # required — the header carrying the compact JWS
+algorithms = ["ES256"]             # required — ES256/384/512 | RS256 | PS256 | EdDSA
+bodyHashClaim = "request_body_sha256"  # required — claim holding SHA-256 of the body
+bodyHashEncoding = "hex"           # hex (default) | base64 | base64url
+issuer = "https://provider.example.com"   # optional, checked when set
+audience = "https://api.example.com/hook" # optional, checked when set
+eventIdClaim = "jti"               # optional; defaults to the body-hash claim value
+jwks = { keys = [ { kid = "key-1", kty = "EC", crv = "P-256", x = "...", y = "..." } ] }
+```
+
+Every key needs a `kid`, the kids must be unique within the JWKS, and each one must be 1–128 characters from `A-Z`, `a-z`, `0-9`, `_`, `.` and `-` — the same shape the delivery path requires of the token's `kid` header. A kid outside that set (one holding a `/` or a `:`, say) is rejected at push time with `JWKS_KID_INVALID`, rather than stored as a key no delivery could ever select. A document fetched from a `jwksUrl` (below) is deliberately more tolerant: the tenant does not control what the provider publishes, so a key whose `kid` is outside that set is dropped and the remaining keys still verify deliveries — one odd key at the provider cannot take the whole webhook down. If dropping leaves no selectable key, the document is rejected and the delivery fails `key_fetch_failed`. The tradeoff is worth knowing: a provider key with an odd `kid` will never verify a delivery (`kid_unknown`) rather than failing loudly at fetch time; the platform logs a warning with the sent and kept key counts when it drops any.
+
+Exactly one key source is required: the inline `jwks` above, or `jwksUrl` — the provider's published JWKS endpoint, which is what Auth0, Okta and OIDC-style signers give you. Supplying both is a `400 JWKS_KEY_SOURCE_CONFLICT`, supplying neither is a `400`.
+
+```toml
+[verification.jwt]
+header = "X-Provider-Signature"
+algorithms = ["ES256"]
+bodyHashClaim = "request_body_sha256"
+jwksUrl = "https://tenant.auth0.com/.well-known/jwks.json"
+```
+
+`jwksUrl` is validated when the webhook is saved and again on every delivery, and a URL that fails is a `400 JWKS_URL_INVALID` at write time: `https` only, port 443 only, a hostname of two or more labels ending in an alphabetic TLD (so IP literals and single-label names are out), no reserved suffix (`.local`, `.internal`, `.home.arpa`, …), no credentials, no fragment, no `{{secrets.KEY}}` template, at most 2048 characters. The fetched document is subject to the same rules as an inline one (unique `kid`s, a `kty` on every key, no private material) — with the one exception above, that an unselectable `kid` is dropped rather than failing the document — plus transport limits — 64 KiB per document, 8 KiB per key, 50 keys, a 5-second timeout, redirects not followed.
+
+At delivery time the document is cached per webhook, so a burst of deliveries costs one fetch, not one each; a `kid` the cached document does not carry triggers at most one extra refresh a minute, which is what picks up a rotation that publishes and signs at the same moment. When a fetch fails, the last document fetched successfully keeps verifying deliveries for up to an hour; with no such document the delivery is rejected. Failures show on the delivery record as `key_fetch_failed`, `key_fetch_throttled` or `kid_unknown` — the same `rejectionReason` vocabulary the inline source uses, so nothing downstream changes.
+
+The `jwt` scheme accepts a delivery only when **all** of these hold, and returns `401` otherwise: the header is present and is a single compact JWS; the token's `alg` is in `algorithms` (the list is a closed asymmetric set — `none` and `HS*` cannot be configured, which closes algorithm confusion); its `kid` names a key in the configured JWKS (inline or fetched) whose type matches the pinned algorithm; the signature verifies; `iat` is present and inside `toleranceSeconds` (up to 60s of future skew allowed); and `bodyHashClaim` matches a SHA-256 of the delivered body bytes. `rejectionReason` on the delivery record distinguishes them: `sig_missing`, `sig_malformed`, `alg_not_allowed`, `kid_missing`, `kid_unknown`, `key_invalid`, `sig_invalid`, `sig_expired`, `body_hash_missing`, `body_mismatch`, `body_too_large`, `scheme_misconfigured`, `verifier_error` — plus `key_fetch_failed` and `key_fetch_throttled` when the keys come from a `jwksUrl`.
+
+### `plaid`: the JWT preset with keys fetched from Plaid
+
+Plaid signs deliveries the same way but publishes no JWKS — each key is fetched from Plaid's API by `kid`. `plaid` is that preset over the same mechanism, so the header (`Plaid-Verification`), the algorithm (`ES256`) and the body-hash claim (`request_body_sha256`, hex) are fixed in code and cannot be configured:
+
+```toml
+[webhook]
+key = "plaid-events"
+verificationScheme = "plaid"
+toleranceSeconds = 300
+deduplicationWindowMs = 360000     # same JWT-family bound as `jwt`
+
+[verification.plaid]
+environment = "sandbox"            # required — sandbox | production (an enum, never a URL)
+clientId = "{{secrets.PLAID_CLIENT_ID}}"   # required — must be a {{secrets.KEY}} reference
+secret = "{{secrets.PLAID_SECRET}}"        # required — must be a {{secrets.KEY}} reference
+```
+
+The key endpoint is derived from `environment` in code, so there is no way to point verification at another host: a `keyEndpoint`, `keyEndpointUrl`, `baseUrl` or `host` key in the table is rejected `400` (`PLAID_ENDPOINT_UNSUPPORTED`), as is an environment outside the enum or a literal credential (`CREDENTIAL_MUST_BE_SECRET_REF`). Those three keys are the whole table — any other key is rejected `400` (`PLAID_UNKNOWN_CONFIG_KEY`) rather than stored and ignored, so a setting that would never be checked cannot round-trip through `sync pull`/`push` looking as though it took effect.
+
+Both credential references must name app secrets that already exist — a create, an update that changes the config, or an update that switches the webhook onto `plaid` is rejected `400` rather than failing later as a `401`. The check is on the config actually changing (or on the scheme moving onto `plaid`), not on the field being sent: re-pushing an unchanged config on an unchanged scheme is accepted even after a referenced secret has been deleted, so one dead reference does not start failing every later `sync push`. That webhook then fails closed at delivery instead, rejecting with a `401` (`secret_unresolved`).
+
+Every signature check the `jwt` scheme makes applies unchanged. The `jwt` settings `plaid` does not carry are `issuer`, `audience` and `eventIdClaim` — none of them is checked on a plaid delivery, and none may be written into `[verification.plaid]` (see above), so a plaid delivery's `externalEventId` is always the body-hash claim and there is no issuer or audience pinning. On top of those checks come the key-resolution outcomes, which appear on the delivery record as their own `rejectionReason` values:
+
+| `rejectionReason` | When |
+|---|---|
+| `secret_unresolved` | a credential reference no longer resolves — no request to Plaid is made |
+| `kid_unknown` | Plaid answered that it does not know the token's `kid` (a 400 whose `error_code` names the key) |
+| `key_expired` | Plaid returned the key with a non-null `expired_at` |
+| `key_fetch_failed` | Plaid was unreachable, timed out, or answered unusably — including any other 400, such as `INVALID_API_KEYS` after a credential rotation |
+| `key_fetch_throttled` | the webhook's key-fetch budget for this minute is spent (counted per worker instance, not globally) |
+
+Key rotation needs no configuration change: a new `kid` is simply an uncached one, fetched once and then served from cache (10 minutes fresh, 5 more stale). Unknown and expired keys are remembered for a minute, and an unreachable Plaid for ten seconds, so repeated deliveries do not become one outbound request each. Only an answer Plaid gives *about that `kid`* counts as a verdict on the key: a response the platform cannot recognise, or an error about the request or the credentials, is `key_fetch_failed` and leaves the previously-resolved copy in place. The fetch budget is charged only for `kid`s that have never resolved on that webhook, and a fetch that returns a key is refunded, so a flood of invented `kid`s cannot stop deliveries signed with the keys the webhook actually uses; when the budget is spent, a previously-resolved key is served for up to an hour rather than the delivery rejected. The one case the budget does not cover is a `kid` that is *both* brand-new and arriving while a flood has the budget spent — indistinguishable from an invented one before the fetch — so the first delivery on a freshly rotated key can be delayed by a sustained flood; the key already in use keeps verifying throughout.
+
+`externalEventId` for a `jwt` delivery is the body-hash claim unless `eventIdClaim` names another claim — and a configured `eventIdClaim` the token doesn't carry falls back to the body hash rather than leaving the delivery without a dedup key. So a captured delivery redelivered intact lands as `duplicate` inside the dedup window rather than firing a second run.
+
+That is why, for every scheme except `none`, `deduplicationEnabled` must stay `true`, `toleranceSeconds` must be greater than `0`, and `deduplicationWindowMs` must cover the whole window in which a captured delivery still verifies: `toleranceSeconds * 1000 + 60000` for the JWT family (`jwt` and `plaid`, whose future-skew allowance it is) and `toleranceSeconds * 2000` for the HMAC schemes (whose check is `|now - timestamp| <= tolerance`). A write that violates any of them is rejected `400` (`DEDUP_REQUIRED_FOR_SIGNED_SCHEME`, `DEDUP_WINDOW_TOO_SHORT`, `REPLAY_VALUE_OUT_OF_RANGE`). `deduplicationEnabled` is strictly typed on every scheme, `none` included: a non-boolean such as `0` or `"false"` is rejected (`REPLAY_VALUE_OUT_OF_RANGE`) rather than read as `false` or `true`. The rules are checked only when a write actually changes one of those values, so a webhook created before they existed keeps taking unrelated edits — but the next change to its replay settings has to leave a valid record behind. Those are write-time rules; at delivery time a signed webhook deduplicates whatever its record stores, and over at least the window above, so a record written before the rules existed still suppresses replays.
+
+On a signed scheme the key a delivery is deduplicated on comes only from material the signature covers. Where the provider signs an identifier of its own, that is the key: `stripe` uses the body's `id`, `slack` its `event_id`, `discord` the interaction `id`, and `jwt`/`plaid` the `eventIdClaim`. Where it doesn't, the key is a SHA-256 of the exact payload that was signed — the body for `github` and for `jwt`/`plaid`, `<t>.<body>` for `custom` — and a signed payload carrying no id falls back to the same hash.
+
+Every key carries a tag naming which of those it is: `sha256:<hex>` for a digest the platform computed over the signed payload, `id:<value>` for an identifier the delivery itself carried (including the `X-Webhook-Event-Id` header on `none`), and `cap:<hex>` for the lossless rehash of a key too long to index. The tags keep the two kinds of value from naming each other: without them a sender able to sign for the webhook could set an event id to the exact `sha256:` key a later, id-less delivery would produce, claim that key first, and have the legitimate delivery answered `duplicate` and never dispatched. An id that itself starts with a tag is nested inside `id:` rather than escaping it, and no ordinary derivation can produce a `cap:` key. `github` and `custom` keys are unchanged by the tagging; the `jwt`/`plaid` default key is now the canonical `sha256:` hex regardless of the `bodyHashEncoding` the provider uses. Editing or dropping `X-GitHub-Delivery` or `X-Webhook-Event-Id` on a captured delivery therefore changes nothing: the replay is answered `200 {"received": true, "duplicate": true}` and no second run fires. Those two headers still travel to the delivery log and to the workflow's `meta.externalEventId` as the provider's own id, for display and correlation — never as a security decision. The delivery log carries the derived key as `dedupKey` on accepted deliveries only — the `duplicate` row itself carries none, because the `duplicate` status is already the answer to "was this suppressed?"; the `dedupKey` on the accepted row is what tells you *which* earlier delivery it collapsed into. `primitive webhooks events <webhook-key> --json` carries it too. The reverse join is not available: a `duplicate` row shows `dedupKey` empty, and on `github`/`custom`/`none` its `externalEventId` comes from a header the signature does not cover, so a replay can have changed it. Correlate a suppressed delivery to its original by payload summary and timestamp instead.
+
+One `custom` behavior changes with this: the key is now `sha256:<hex>` of `<t>.<body>`, so the signed timestamp is part of it. A sender that retries the same logical event by **re-signing it with a fresh `t`** — the only retry `toleranceSeconds` lets through, and the normal one for a Stripe-style scheme — now produces a different key and fires the workflow a second time, where it used to be suppressed by the shared `X-Webhook-Event-Id`. That is deliberate (a header the signature does not cover cannot decide anything), but if your `custom` sender retries that way, make the workflow idempotent or move the event id into the signed body.
+
+`github` is the one scheme whose dedup entries **never expire**. GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
+
+On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_not_active` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
+
+One delivery outcome is a `503`: `Failed to record webhook delivery`, when the platform verified the delivery but could not write the `accepted` row that carries its dedup key. The workflow is **not** started in that case. That row is the only durable record that the delivery ran, so dispatching without it would leave the delivery replayable — for the whole window, and permanently on `github` — and a `503` asks the sender to retry, which is the resolution: the retry re-runs the whole path and either records the delivery and dispatches it, or fails the same way. Size your provider's retry policy to cover it. Unlike the `202` for `workflow_not_active`, this one *wants* the retry. It applies only where a dedup key was actually due: a delivery whose target workflow doesn't exist yet, and a `none` webhook with `deduplicationEnabled: false`, keep their previous best-effort logging and still dispatch.
+
+Any credential inside a `[verification.*]` table must be a `{{secrets.KEY}}` reference, and the reference must be the WHOLE value — the table is stored in cleartext, so a literal would be readable, and so would the literal half of a mixed value like `"sk_live_abcd{{secrets.SUFFIX}}"`. A write carrying either is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`). A `{{secrets.KEY}}` reference is returned verbatim on every read path, so a compliant table survives a `pull` → `push` round trip unchanged. A literal written before this rule existed is **not**: every read path (`GET`, the admin API, and therefore `sync pull`) returns it as `[redacted]`. Pushing a file that still holds `[redacted]` is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`) — including on an edit that changed something else entirely — until the real value is moved into the app secret store and the table references it.
+
+The separate rule that a referenced key must EXIST (`400` `MISSING_CONFIG_SECRET_REF`) applies only to the paths the ACTIVE scheme resolves at delivery — today `[verification.plaid]`'s `clientId` and `secret`. A table for some other scheme is inert, so a `stripe` webhook that still carries a `[verification.plaid]` section naming deleted keys stays editable.
+
+Bodies are verified over the raw bytes, so a payload that is not valid UTF-8 verifies correctly on every scheme. A body over the webhook's size cap is rejected `401` (`body_too_large`) before it is read, on every scheme including `none`. The cap defaults to 5 MiB and is set per webhook with `maxBodyBytes` (platform maximum 25 MiB); a value above the maximum, or a non-positive one, is rejected `400` at write time on both the tenant and admin APIs, and an unset value uses the 5 MiB default.
+
+The `[verification.<scheme>]` table owns the stored config once a file declares a `[verification]` section: removing the scheme's table (leaving a bare `[verification]`) clears it on the next push, which is how a compromised key is revoked through `sync`. A file with no `[verification]` section at all leaves the stored config untouched.
+
+`signingSecret` is required for `stripe`, `github`, `slack` and `custom`, and must be a **whole** `{{secrets.KEY}}` reference into the app secret store — nothing else is accepted, on either the tenant or the admin API, on create, update and `rotate-secret`:
+
+| Write | Result |
+|---|---|
+| a raw value, or a mixed value like `"sk_live_abcd{{secrets.SUFFIX}}"` | `400` `SIGNING_SECRET_MUST_BE_SECRET_REF`, carrying the `primitive secrets set KEY --value <value>` remediation |
+| a reference to a key that does not exist | `400` naming the missing key |
+| any non-null value on `none` / `discord` / `jwt` / `plaid` | `400` `SIGNING_SECRET_NOT_SUPPORTED_FOR_SCHEME` |
+| `signingSecret: null` on a scheme that requires one | `400` — the field is never silently blanked |
+| a whole reference to an existing key | accepted, stored trimmed and canonical (`{{secrets.KEY}}`) |
+
+The Admin Console edits the same field as a picker over the app's secrets, with an inline row that creates one and writes the reference; it is shown only for the schemes that take a signing secret.
+
+The reference is stored and returned verbatim (it carries no secret material), so a `pull` → `push` round trip is unchanged. The gate is on the value the record ends up with and fires only when it CHANGES, so re-pushing an unchanged reference whose secret was later deleted is accepted rather than aborting the push.
+
+Switching a webhook onto a scheme that uses no signing secret **clears** `signingSecret`, `previousSigningSecret` and the rotation timestamp; switching back means supplying a reference again (a bare switch back is rejected naming `signingSecret`).
+
+Every read path reports a derived `signingSecretStatus`:
+
+| value | meaning |
+|---|---|
+| `reference` | `signingSecret` holds a whole reference and is returned verbatim |
+| `legacy-literal` | the stored value is a raw secret: it is never returned, `sync pull` writes no `signingSecret` line, and every signed delivery is rejected `401` (`rejectionReason: signing_secret_literal`) — store the value as a secret and push the reference |
+| `unset` | no signing secret. Normal for `none` / `discord` / `jwt` / `plaid`; on a signing scheme it is an unusable webhook — every signed delivery is rejected `401` (`rejectionReason: signing_secret_unset`), because an empty HMAC key is as forgeable as none at all |
+
+Resolution **fails closed**: if the reference can't be resolved at delivery (secret deleted, or the platform's secret encryption key unset) the request is rejected `401` (`rejectionReason: secret_unresolved`) rather than verifying against the literal reference text; an unresolvable grace-window `previousSigningSecret` reference is dropped rather than passed to the verifier.
+
+**Rotation is key rotation.** A key holds exactly one value, so `primitive secrets set KEY --value <new>` is a sharp cutover. To accept both secrets during a provider's overlap window, create a second key and rotate onto it:
+
+```bash
+primitive secrets set STRIPE_WEBHOOK_SECRET_2 --value whsec_new...
+primitive webhooks rotate-secret <webhookId> --secret "{{secrets.STRIPE_WEBHOOK_SECRET_2}}"
+```
+
+`rotate-secret` requires a scheme that uses a signing secret (`400` otherwise), takes a whole reference to an existing key, moves the previous reference into `previousSigningSecret`, sets the rotation timestamp, and returns the serialized webhook. Rotating onto the key already in use is rejected — it would provide no overlap. The previous reference keeps verifying for `secretGracePeriodMs` (24 hours by default).
+
+Each referenced credential consumes one of the app's 100 secret slots, so an app with many signed webhooks needs one key per webhook.
 
 Receive endpoint: `POST /app/{appId}/webhook/{webhookKey}`. The platform verifies the signature per `verificationScheme`, then starts `workflowKey` with the event payload as input; `inputMapping` (e.g. `"data.object"`) extracts a nested path first. A webhook-triggered workflow is `runAs: "system"`, so what stops a client from starting it directly with a crafted payload is the system-invocation gate (members get a 403) plus the signature verification — not `accessRule`, which a system workflow doesn't evaluate on the trigger (see [Access control](#access-control)).
 
-CLI: `primitive webhooks list | get | create | update | delete | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_not_active`). `active` and `paused` are the settable statuses (`create` and `update` reject anything else, and `create` defaults to `active`); `archived` is reserved for delete and only appears on read — `list --status` filters by `active`, `paused`, or `archived`.
+CLI: `primitive webhooks list | get | create | update | delete | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_not_active`); `--json` adds each delivery's `dedupKey`. `active` and `paused` are the settable statuses (`create` and `update` reject anything else, and `create` defaults to `active`); `archived` is reserved for delete and only appears on read — `list --status` filters by `active`, `paused`, or `archived`.
 
-`webhooks test <webhook-key> --payload '<json>'` delivers and signs that JSON object exactly as given — pass the event directly (e.g. `'{"type":"charge.succeeded","data":{"id":"ch_1"}}'`), not wrapped in `{"payload": ...}`. Omitting `--payload` (or passing a non-object) sends a canned `{"type":"webhook.test", ...}` ping instead.
+`webhooks test <webhook-key> --payload '<json>'` **signs** that JSON object exactly as given and returns the signed request body plus the signature headers — it does **not** post them to the receive endpoint, so it dispatches no workflow and writes no delivery row. Pass the event directly (e.g. `'{"type":"charge.succeeded","data":{"id":"ch_1"}}'`), not wrapped in `{"payload": ...}`. Omitting `--payload` (or passing a non-object) signs a canned `{"type":"webhook.test", ...}` ping instead. To exercise the real path, send the returned body with the returned headers to `POST /app/{appId}/webhook/{webhookKey}` yourself. That delivery is where the `github` consequence bites: the key is `sha256(body)` and `github` entries never expire, so replaying the same signed body is answered `duplicate` the second time and does not dispatch — permanently, with recreating the webhook as the only reset. Vary the payload between real test deliveries (any byte change is a different key). The canned ping carries a fresh timestamp, so it is safe to repeat.
 
 A `workflow_not_active` delivery means the bound workflow was draft or archived when the event arrived: the request is acked with HTTP 202 `{ received: true }` (so the sender doesn't retry) but the workflow is **not dispatched**. Activate the workflow and resend — these events are excluded from deduplication, so the resend isn't dropped as a duplicate. Binding a webhook to a not-yet-active workflow succeeds and returns a non-blocking `warning` carrying `WORKFLOW_NOT_ACTIVE`.
 
@@ -1611,7 +1755,7 @@ Opt a workflow into synchronous invocation by setting `syncCallable = true` in t
 Server-side constraints on a `syncCallable` workflow:
 
 - **Step kinds are restricted.** The server validates step kinds against a sync-compatible list when the flag is set (or when steps are pushed against a sync-callable workflow). Long-running or suspending kinds (`event.wait`, `delay` over the timeout) reject at save time with `Workflow contains sync-incompatible steps`.
-- **No run-scoped `lock:`.** A `syncCallable` workflow cannot also declare a run-scoped `lock:`. The declarative-lock acquire-around-run lifecycle runs only on the durable execution path, not under run-sync, so a lock on a sync-callable workflow would be silently skipped while the run still reported success. The server rejects the combination at save time with `Workflow lock is incompatible with syncCallable`, and a `workflow.call` into a workflow that declares a lock fails fast for the same reason (its child runs under run-sync). Honoring declarative locks under run-sync / `workflow.call` is tracked in [#1883](https://github.com/Primitive-Labs/js-bao-wss/issues/1883).
+- **Run-scoped `lock:` is honored.** A `syncCallable` workflow may declare a run-scoped `lock:`: the acquire-around-run lifecycle now runs under run-sync and through `workflow.call`, not only on the durable path. All paths share one app-scoped lock namespace, so a durable `start()` run and a `run-sync` run of the same key serialize against each other. A nested `workflow.call` that declares a key an ancestor already holds re-enters it (runs without re-acquiring); concurrent same-run `workflow.call` siblings declaring the same fresh key are NOT mutually excluded (a run does not serialize against itself). The imperative `lock.*` steps are not an escape hatch for this: a `workflow.call` child inherits its parent's run identity, and every workflow-held lock is owned by that identity, so two `lock.acquire` steps on one key inside a single run both return `acquired: true` with the same handle. To serialize concurrent branches, set the `forEach` step's `concurrency = 1`; to let them run concurrently without contending, give each branch its own key.
 - **Timeout.** The invocation timeout defaults to 5s (`timeoutMs`) and is capped server-side at 30s; anything above the ceiling clamps silently. Exceeding it resolves with `status: "timeout"` in the envelope. The timeout ends the **call**, not the execution: work is not interrupted at the boundary, so side effects from steps still in flight (database writes, emails) can land after the envelope resolves. The run record is finalized `terminated` before the response returns — the envelope's `run.status` reads `terminated`, and the record never transitions to `completed`. `getStatus` targets durable `start()` runs; a sync run's final state comes back in the envelope's `run` and appears in `workflows.listRuns()`. Step-run records are salvaged only when execution settles within a short grace window at the boundary — a timed-out run typically persists no step runs. Recovery: never poll for completion after a timeout; treat the run as incomplete, reconcile against actual resource state with idempotent cleanup or retry, and re-invoke with a **new** `runKey` — the sync path has no `forceRerun`, so the same `runKey` returns the terminated run without re-executing. When the final outcome must be knowable, prefer `start()`: a durable run's record reaches a real terminal status pollable via `getStatus`.
 - **Apply still applies.** A sync-callable workflow may still have `requiresClientApply = true`, in which case the synchronous call resolves with `status: "apply_pending"` and the normal `claimApply`/`confirmApply` flow takes over. Most sync-callable workflows want `requiresClientApply = false`.
 
@@ -1732,6 +1876,8 @@ primitive workflows analytics top --days 7
 
 `runs list` includes a `DELAY` column (`queueDelayMs`); `runs status` includes "Execution started" (`executionStartedAt`), "Queue delay" (`queueDelayMs`), and "Create call" (`createCallDurationMs`, the wall-clock time of the run's underlying create call) lines. `executionStartedAt` and `queueDelayMs` are `null` while the run is still queued.
 
+`runs failures` is the triage view: failed runs only, with `STEP` and `ERROR` columns naming the failed step and the cause, so repeated failures group at a glance instead of needing one `runs error` call per run. Its `--json` emits the shared inspection item shape inside `{ items }` — group on `detail.errorTitle`, and pivot to `runs error <workflow-id> <run-id>` for the caret-annotated expression and step input/config. An empty `STEP` means the run failed with no attributable step (a launch-time abort, a reclaimed run, or output-schema validation after every step completed) — the message is still there. The HTTP payload spells that as an explicit `null`; the CLI's `--json` omits the key entirely, so test for "missing or null". See the inspection guide for the full field table.
+
 All inspection commands take `--json`.
 
 Every `<workflow-id>` argument above — CRUD, draft/publish, configs, runs — accepts the workflow **key** as well as the ULID. The value is tried as an id first (the id wins when both exist), then as a key lookup scoped to the app and case-insensitive; an unknown value exits non-zero with `Workflow not found for id or key "<arg>"`. The `workflows tests` commands take the ULID. Don't generalize to cron triggers: `cron-triggers` ops take the `triggerId`, never the trigger key.
@@ -1742,7 +1888,7 @@ primitive workflows codegen [workflow-key] [-o <dir>] [--check] [--json]
 ```
 
 
-A run that aborts during **setup** — before any step executes (resolving its config/revision, loading steps, or validating `input` against `inputSchema`) — is still marked `failed` with the real error message, and records one synthetic step with id `__setup__` and kind `setup`. So `runs steps` is never empty and `runs error` always names the failure, even when no author-defined step ran.
+A **durable** run (started with `primitive workflows preview` or `workflows.start()`) that aborts during **setup** — before any step executes (resolving its config/revision, loading steps, or validating `input` against `inputSchema`) — is still marked `failed` with the real error message, and records one synthetic step with id `__setup__` and kind `setup`. So `runs steps` is never empty and `runs error` always names the failure, even when no author-defined step ran. A `syncCallable` run does not synthesize that step: a setup abort there records no step run, so `runs steps` is empty and `STEP`/`failedStepId` is blank — the error message is still recorded on the run.
 
 ### Reusable step fragments
 
@@ -1764,6 +1910,41 @@ kind = "database.mutate"
 ```
 
 Fragments live at `<workflowDir>/../workflow-fragments/<name>.toml` and contain only `[[steps]]` tables (no `[workflow]` block, no further `include`). The CLI expands `include` references before `sync push` — the server only ever stores the flattened step list. Step ids must be unique across the expanded set; collisions are reported with both source locations. Use `primitive workflows expand <file>` to print the expanded result.
+
+**Expansion order: all included steps come first, then the workflow's own `[[steps]]`** — no matter where the `include` sits in the file. Fragments expand in the order they appear in the `include` array, each contributing its steps in file order; the workflow's own steps follow, also in file order. Writing `include` below your own `[[steps]]` does not push the fragment's steps later. To run something ahead of an included fragment, lift that work into a fragment of its own and list it earlier in `include`. Steps execute in expanded order, so `primitive workflows expand <file>` is the authoritative check on sequencing.
+
+**Parameterized includes.** The `[[include]]` array-of-tables form passes parameters into a fragment and can gate all of its steps behind one condition:
+
+```toml
+# config/workflows/onboard.toml
+[[include]]
+fragment = "lifecycle-email"          # required
+runIf = "input.plan == 'pro'"         # optional
+[include.with]
+id = "welcome"
+subject = "Welcome aboard"
+retries = 3
+```
+
+```toml
+# config/workflow-fragments/lifecycle-email.toml
+[[steps]]
+id = "{{ params.id }}-subject"
+kind = "transform"
+saveAs = "emailSubject"
+runIf = "input.emailOptIn"
+[steps.output]
+subject = "{{ params.subject }} — {{ input.appName }}"
+maxRetries = "{{ params.retries }}"
+```
+
+- Allowed keys in an `[[include]]` table: `fragment` (required), `with`, `runIf`. Any other key is an error.
+- One form per file: mixing bare strings and `[[include]]` tables in a single `include` array is an error.
+- `{{ params.X }}` is substituted at expand time from that include's `with` table, anywhere in the fragment's steps — ids, strings, nested tables, arrays. Dotted paths (`{{ params.email.subject }}`) resolve into nested `with` tables. A reference with no matching key is a hard error naming the fragment and the include.
+- A whole-string `{{ params.X }}` splices the raw typed value (`maxRetries` above expands to the number `3`); an embedded reference stringifies the value into the surrounding text.
+- Only the `params.` namespace is touched. Every other `{{ ... }}` template (`{{ input.appName }}` above) passes through verbatim for the server to render at run time, and no `params.` reference survives expansion.
+- An include-level `runIf` is ANDed onto every expanded step: both present → `(<includeRunIf>) && (<stepRunIf>)`; one present → that one; neither → no `runIf`. The example above yields `runIf = "(input.plan == 'pro') && (input.emailOptIn)"`.
+- Include the same fragment more than once with different `with` tables to get several parameterized copies — derive the step ids from `{{ params.* }}` so the expanded ids stay unique.
 
 ### Operation `$params` validation
 
@@ -1940,7 +2121,11 @@ The `workflowStatus` event uses `"completed"`. The `getStatus` method returns `"
 
 ### `workflows.waitFor`
 
-`workflows.waitFor(runId, options?)` wraps the `workflowStatus` frame in a single awaitable call instead of a manual event listener:
+`workflows.waitFor` wraps the `workflowStatus` frame in a single awaitable call instead of a manual event listener.
+
+- Event-driven: subscribes to the `workflowStatus` frame, plus one reconcile fetch immediately after subscribing to close the started-before-subscribed race; re-runs that reconcile on reconnect. No polling.
+- Settles on every terminal state (`completed` / `failed` / `terminated` / `apply_pending` / `apply_claimed`), including `"failed"` — a failing run is a normal result, not an error.
+- Fails only on timeout (`JsBaoError` code `WORKFLOW_WAIT_TIMEOUT`; default `timeoutMs` is 900000 / 15 minutes) or when `runId` doesn't resolve to a run (`NOT_FOUND`).
 
 ```ts
 const { status, output, error } = await client.workflows.waitFor(runId, { timeoutMs: 60000 });
@@ -1956,9 +2141,7 @@ workflows.waitFor(runId: string, options?: { timeoutMs?: number }): Promise<{
 }>
 ```
 
-- Event-driven: subscribes to the `workflowStatus` frame, plus one reconcile fetch immediately after subscribing to close the started-before-subscribed race; re-runs that reconcile on WS reconnect. No polling.
-- Resolves on every terminal state, including `"failed"` — a failing run does not reject.
-- Rejects only on timeout (`JsBaoError` code `WORKFLOW_WAIT_TIMEOUT`; default `timeoutMs` is 900000 / 15 minutes, pass `0` or `Infinity` to disable) or when `runId` doesn't resolve to a run (`NOT_FOUND`).
+Pass `timeoutMs: 0` or `Infinity` to disable the timeout.
 
 ## Apply pattern
 

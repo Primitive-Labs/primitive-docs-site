@@ -110,7 +110,9 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
 `action` and `user_ulid` are required by the TypeScript interface. At runtime, `user_ulid` will be back-filled from the queue's user-resolver if you omit it AND the resolver returns a value — but the type checker won't let you omit it, so always pass it explicitly (or use `ANALYTICS_UNAUTHENTICATED_USER`).
 {{/lang}}
 {{#lang swift}}
-`analytics.logEvent` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+`analytics.logEventAsync` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+
+**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. The synchronous members of the same names still exist and still work, so existing code keeps compiling, but they are deprecated and go away in the next major release: they hand the work to a background task and return immediately, so two consecutive calls are not ordered against each other and an event logged just before a synchronous `flush()` may miss *that* batch (it goes out with the next one). Prefer the `Async` members in new code.
 {{/lang}}
 
 ### Event with Context
@@ -211,6 +213,8 @@ So **don't** add your own `beforeunload → flush` listener — it's redundant a
 {{/lang}}
 {{#lang swift}}
 The queue auto-flushes every **100ms** (or earlier when batched). `await client.destroy()` cancels the flush timer and triggers a final flush before storage closes, so you don't need a manual flush on teardown.
+
+`flushAsync()` returns once the batch has actually reached the socket — that is the difference from the deprecated synchronous `flush()`, which returns as soon as the send is scheduled.
 {{/lang}}
 
 ---

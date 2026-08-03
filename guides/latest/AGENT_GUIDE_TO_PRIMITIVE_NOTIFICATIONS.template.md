@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Notifications
 
-Multi-channel notifications: a durable in-app inbox, live WebSocket delivery while connected, and push (iOS/Android) once a device is registered. Client SDK surface is `client.notifications.*`; a workflow can send from the server with the `notification.send` step. **This capability is JS-client-only today** — there is no Swift client API for notifications.
+Multi-channel notifications: a durable in-app inbox, live WebSocket delivery while connected, and push (iOS/Android) once a device is registered. Client SDK surface is `client.notifications.*`, available on both the JS and Swift clients; a workflow can send from the server with the `notification.send` step.
 
 ## Client SDK Reference
 
@@ -21,62 +21,29 @@ Multi-channel notifications: a durable in-app inbox, live WebSocket delivery whi
 
 ### Sending
 
-```typescript
-const { results } = await client.notifications.send({
-  title: "Your report is ready",
-  body: "Tap to view this week's summary.",
-  target: { userId },
-  channels: ["in-app", "ios"],       // default ["in-app"] if omitted
-  deepLink: "myapp://reports/latest",
-  idempotencyKey: `weekly-report-${userId}-2026-07-14`,
-});
+{{ example: notifications/send }}
 
-for (const r of results) {
-  console.log(r.channel, r.status); // e.g. "in-app" "delivered", "ios" "delivered"
-}
-```
-
-`SendNotificationParams`: `{ title, body, target: { userId }, channels?: string[], iconUrl?, deepLink?, expiresAt?, sourceRef?, idempotencyKey? }`. Valid `channels` today: `"in-app" | "ios" | "android"` — an unrecognized channel name throws (`UnsupportedChannelError`, see Errors below). `expiresAt` (ISO date) auto-deletes the inbox row after that time; it does not affect push delivery.
+`SendNotificationParams`: `{ title, body, target: { userId }, channels?: string[], iconUrl?, deepLink?, expiresAt?, sourceRef?, idempotencyKey? }`. `channels` defaults to `["in-app"]` when omitted. Valid `channels` today: `"in-app" | "ios" | "android"` — an unrecognized channel name throws (`UnsupportedChannelError`, see Errors below). `expiresAt` (ISO date) auto-deletes the inbox row after that time; it does not affect push delivery.
 
 `NotificationSendResult` (one per requested channel): `{ channel, status: "delivered"|"failed"|"skipped"|"invalidated", notificationId?, delivered?, failed?, invalidated?, tokenAttempts?, skipReason?, retryable? }`. `notificationId` is the durable inbox row id (in-app only). `delivered`/`failed`/`invalidated` are per-token tallies for push — one user can hold several device tokens, so a single "ios" entry can partially succeed. `tokenAttempts` is the per-token detail: `{ tokenSuffix, status, httpStatus?, reason?, retryable? }`. `status: "invalidated"` means every token for that channel was dead (evicted) — treat it the same as a failure for delivery purposes, though it is not itself a caller error.
 
 ### Reading and managing the inbox
 
-```typescript
-const { items, unreadCount } = await client.notifications.list({ limit: 20 });
-
-for (const n of items) {
-  console.log(n.title, n.read);
-}
-
-if (items[0] && !items[0].read) {
-  await client.notifications.markRead(items[0].notificationId);
-}
-```
+{{ example: notifications/list-inbox }}
 
 ### Registering for push
 
-```typescript
-const device = await client.notifications.registerDevice({
-  token: deviceToken,
-  platform: "ios",
-  environment: "production",
-  bundleId: "com.example.myapp",
-});
-
-console.log(device.tokenSuffix); // last 8 chars only
-```
+{{ example: notifications/register-device }}
 
 `RegisterPushDeviceParams`: `{ token, platform: "ios"|"macos"|"android", environment: "sandbox"|"production", bundleId?, deviceName?, appVersion? }`. `environment` matters for `ios`/`macos` (APNs sandbox vs production certificates); FCM (`android`) has no sandbox tier — always pass `"production"` for Android tokens. Registering a token already owned by a different user **reassigns it** to the calling user (deliberate shared-device semantics: a token identifies a device, so when a different account signs in and re-registers, delivery must follow the signed-in user).
 
 ## Live WebSocket Event
 
-```typescript
-client.on("notification", (event) => {
-  // event: { type: "notification", notificationId, title, body, iconUrl?, deepLink?, sourceRef?, createdAt }
-  console.log(event.title, event.body);
-});
-```
+{{ example: notifications/live-events }}
+
+{{#lang swift}}
+Subscribe through `client.stream(for:)` — a `for await` loop in a `.task`, which unsubscribes when the loop ends — or through `client.observeOnMainActor(_:handler:)` when you need a main-actor callback, holding the returned `EventSubscription` for as long as you want the handler live.
+{{/lang}}
 
 This is a **best-effort real-time mirror**, not the source of truth — it fires only if the recipient is connected at send time. `client.notifications.list()` (the durable inbox row) is authoritative; a client that reconnects after a missed event simply sees the notification the next time it lists or checks `unreadCount()`. Don't build read/unread state purely off this event — always reconcile against `list()`/`unreadCount()`.
 

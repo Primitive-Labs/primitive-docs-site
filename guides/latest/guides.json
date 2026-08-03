@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-07-22",
+    "stampedAt": "2026-07-31",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "2.0.10",
@@ -514,7 +514,7 @@
     },
     {
       "topic": "notifications",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.md",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.ts.md",
       "description": "Multi-channel notifications (in-app inbox, push) — client SDK, notification.send step, dedupe",
       "keywords": [
         "notifications",
@@ -554,11 +554,21 @@
       "prerequisites": [],
       "relatedGuides": [
         "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.swift.md"
+        }
       ]
     },
     {
       "topic": "locks",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.md",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.ts.md",
       "description": "Named locks: mutual exclusion by key across client, CLI, and workflows; leases, LockTimeoutError",
       "keywords": [
         "lock",
@@ -599,6 +609,16 @@
       "prerequisites": [],
       "relatedGuides": [
         "workflows"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.swift.md"
+        }
       ]
     },
     {
@@ -988,6 +1008,37 @@
       ],
       "relatedGuides": [
         "app-secrets"
+      ]
+    },
+    {
+      "topic": "inspecting-and-debugging",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_INSPECTION.md",
+      "description": "Inspect a running app from the CLI — runs, connections, blobs, and --watch/--follow tailing",
+      "keywords": [
+        "inspect",
+        "inspection",
+        "debug",
+        "debugging",
+        "watch",
+        "follow",
+        "tail",
+        "workflow runs",
+        "connections",
+        "sessions",
+        "blob-buckets",
+        "logs",
+        "--json"
+      ],
+      "useCases": [
+        "Listing recent workflow runs and their statuses",
+        "Tailing new workflow runs live with --follow",
+        "Watching a list update in place with --watch",
+        "Inspecting active connections and sessions for a user",
+        "Reading blob metadata without downloading the object"
+      ],
+      "relatedGuides": [
+        "devtools",
+        "workflows"
       ]
     },
     {

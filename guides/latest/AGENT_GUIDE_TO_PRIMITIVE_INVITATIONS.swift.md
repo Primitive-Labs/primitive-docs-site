@@ -301,7 +301,7 @@ Check quota, mint the app invitation, share the project document by email, and a
 The `invitation` event is the only typed app-membership event. The lifecycle action is on `event.action` (not `event.type`, which is always `"invitation"`). Branch on `action`: `created`/`updated`/`cancelled` go to the invitee only; `declined` to both; `accepted` to the inviter only (with `event.acceptedBy` carrying the userId). Treat unknown actions as a no-op.
 
 ```swift
-  let sub = client.events.on(.invitation) { (event: InvitationEvent) in
+  for await event in client.stream(for: InvitationEvent.self) {
     switch event.action {
     case "created":   break  // invitee only
     case "updated":   break  // invitee only

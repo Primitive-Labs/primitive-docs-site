@@ -72,21 +72,23 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
 `action` and `user_ulid` are required; `feature` (defaults to `"unspecified"`) groups related events.
 
 ```swift
-  client.analytics.logEvent(AnalyticsEventInput(
+  await client.analytics.logEventAsync(AnalyticsEventInput(
     action: "photo_uploaded",
     feature: "gallery",
     user_ulid: currentUserUlid
   ))
 ```
 
-`analytics.logEvent` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+`analytics.logEventAsync` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+
+**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. The synchronous members of the same names still exist and still work, so existing code keeps compiling, but they are deprecated and go away in the next major release: they hand the work to a background task and return immediately, so two consecutive calls are not ordered against each other and an event logged just before a synchronous `flush()` may miss *that* batch (it goes out with the next one). Prefer the `Async` members in new code.
 
 ### Event with Context
 
 Pass a `context_json` object for per-event debug data. The serialized payload is bounded at **1 KiB**, so keep it small — don't dump request bodies or full reports.
 
 ```swift
-  client.analytics.logEvent(AnalyticsEventInput(
+  await client.analytics.logEventAsync(AnalyticsEventInput(
     action: "search_executed",
     feature: "search",
     user_ulid: currentUserUlid,
@@ -111,7 +113,7 @@ Pass a `context_json` object for per-event debug data. The serialized payload is
 `logSnapshot` records a state snapshot event. It auto-resolves the user; if no user is authenticated, the call is a no-op (no error).
 
 ```swift
-  client.analytics.logSnapshot(context: ["screen": "settings", "tab": "billing"])
+  await client.analytics.logSnapshotAsync(context: ["screen": "settings", "tab": "billing"])
 ```
 
 This logs an event with `action: "_snapshot"`, `feature: "_state"`, and your context as `context_json`.
@@ -123,7 +125,7 @@ This logs an event with `action: "_snapshot"`, `feature: "_state"`, and your con
 Events with no authenticated user are dropped. To log on pre-auth screens (landing pages, sign-up flow), pass the unauthenticated-user constant as the `user_ulid`. Its value is `"UNAUTHENTICATED"`. Use sparingly — most analytics should be tied to real users.
 
 ```swift
-  client.analytics.logEvent(AnalyticsEventInput(
+  await client.analytics.logEventAsync(AnalyticsEventInput(
     action: "landing_page_view",
     feature: "onboarding",
     user_ulid: AnalyticsEventInput.unauthenticatedUser
@@ -137,10 +139,13 @@ Events with no authenticated user are dropped. To log on pre-auth screens (landi
 Events are buffered and flushed automatically — including when the WebSocket reconnects — so you rarely need to flush manually. Call `flush` to force a send (e.g. before an explicit teardown).
 
 ```swift
-  client.analytics.flush()
+  // Returns once the batch has reached the socket.
+  await client.analytics.flushAsync()
 ```
 
 The queue auto-flushes every **100ms** (or earlier when batched). `await client.destroy()` cancels the flush timer and triggers a final flush before storage closes, so you don't need a manual flush on teardown.
+
+`flushAsync()` returns once the batch has actually reached the socket — that is the difference from the deprecated synchronous `flush()`, which returns as soon as the send is scheduled.
 
 ---
 
@@ -149,11 +154,11 @@ The queue auto-flushes every **100ms** (or earlier when batched). `await client.
 If your app reports its plan/version dynamically (e.g. after an in-app upgrade), set them on the client. They flow into every subsequent event automatically. Pass `null`/`nil` to clear an override.
 
 ```swift
-  client.analytics.setPlanOverride("pro")
-  client.analytics.setAppVersionOverride("2.1.4")
+  await client.analytics.setPlanOverrideAsync("pro")
+  await client.analytics.setAppVersionOverrideAsync("2.1.4")
 
   // Pass nil to clear an override
-  client.analytics.setPlanOverride(nil)
+  await client.analytics.setPlanOverrideAsync(nil)
 ```
 
 ---
@@ -348,15 +353,15 @@ Configure auto events on the client, set the app-version override once, then log
   ))
 
   // Set version once after init (or after a deploy notification)
-  client.analytics.setAppVersionOverride("2.1.4")
+  await client.analytics.setAppVersionOverrideAsync("2.1.4")
 
   func trackFeatureUsed(
     _ userUlid: String,
     feature: String,
     action: String,
     context: JSONValue? = nil
-  ) {
-    client.analytics.logEvent(AnalyticsEventInput(
+  ) async {
+    await client.analytics.logEventAsync(AnalyticsEventInput(
       action: action,
       feature: feature,
       user_ulid: userUlid,
@@ -365,13 +370,13 @@ Configure auto events on the client, set the app-version override once, then log
   }
 
   // Authenticated event
-  trackFeatureUsed(currentUserUlid, feature: "reports", action: "report_generated", context: [
+  await trackFeatureUsed(currentUserUlid, feature: "reports", action: "report_generated", context: [
     "reportType": "quarterly",
     "format": "pdf",
   ])
 
   // Pre-auth event (landing page)
-  client.analytics.logEvent(AnalyticsEventInput(
+  await client.analytics.logEventAsync(AnalyticsEventInput(
     action: "landing_page_view",
     feature: "onboarding",
     user_ulid: AnalyticsEventInput.unauthenticatedUser

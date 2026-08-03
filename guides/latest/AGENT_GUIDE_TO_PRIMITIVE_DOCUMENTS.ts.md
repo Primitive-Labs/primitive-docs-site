@@ -1906,6 +1906,69 @@ primitive documents import <path> --overwrite --dry-run   # Preview without chan
 
 Export creates a directory per document containing `metadata.json`, `document.yjs` (Yjs state), `permissions.json` (for reference), and `blobs/` (attachments). Permissions are **not** restored on import — the importing admin becomes the new owner and manages sharing in the target app. Document IDs are preserved across import. User-scoped aliases can be restored with `--aliases overwrite` or kept as-is with `--aliases skip`.
 
+## Admin CLI: Inspecting documents
+
+The `primitive` CLI also has commands for inspecting and managing documents from an operator or debugging session. Like export/import, these are admin operations, not used in application code. `--json` is available on every command for scripting.
+
+```bash
+# List a user's documents (documentId, title, permission, grantedAt).
+# --user-id is required — there is no app-wide document enumeration.
+primitive documents list --user-id <user-id>
+
+# Show one document's metadata and the caller's access (permission, access source, link access)
+primitive documents get <document-id>
+
+# List the user-level permissions on a document (userId, email, permission, grantedAt)
+primitive documents permissions list <document-id>
+
+# Discover the models in a document and describe one model's fields and indexes
+primitive documents records models <document-id>
+primitive documents records describe <document-id> <model-name>
+
+# Query and count records in a model (--filter is JSON; --limit caps at 100)
+primitive documents records query <document-id> <model-name> --filter '{"status":"open"}' --limit 50
+primitive documents records count <document-id> <model-name>
+
+# Dump every record grouped by model, and read summary statistics
+primitive documents dump <document-id>
+primitive documents stats <document-id>
+```
+
+`records models` and `records describe` read the document's discovered schema — the models a client has written into the document, with each field's type and whether it is indexed, unique, or required. A newly created document with no records yet reports no models.
+
+`records query` returns a page of records as `{ items, hasMore, nextCursor }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records count` returns how many records match a `--filter`. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
+
+The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
+
+```bash
+# Create or replace a record (--id optional — a unique id is generated when omitted;
+# --upsert-on <field> updates the record whose field value matches instead)
+primitive documents records save <document-id> <model-name> --data '{"name":"gear","qty":5}'
+
+# Merge fields into an existing record
+primitive documents records patch <document-id> <model-name> <record-id> --data '{"qty":6}'
+
+# Delete a record (prompts unless -y; deleting a missing record is a no-op)
+primitive documents records delete <document-id> <model-name> <record-id> -y
+
+# Apply an ordered multi-model operations blob atomically
+primitive documents records bulk <document-id> --data-file ops.json -y
+```
+
+`records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "fields" }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
+
+Grant and revoke a user's access to a document. `grant` takes either `--user-id` or `--email` plus a `--permission` level of `reader` or `read-write`; re-granting for the same user updates the level in place. `revoke` targets a user by id argument or `--email`, and prompts for confirmation unless `-y` is passed.
+
+```bash
+# Grant a user reader (or read-write) access
+primitive documents permissions grant <document-id> --user-id <user-id> --permission reader
+primitive documents permissions grant <document-id> --email user@example.com --permission read-write
+
+# Revoke a user's access (by id argument or --email)
+primitive documents permissions revoke <document-id> <user-id>
+primitive documents permissions revoke <document-id> --email user@example.com -y
+```
+
 ## Common Errors
 
 | Symptom                                         | Cause                                                                    | Fix                                                                                                  |

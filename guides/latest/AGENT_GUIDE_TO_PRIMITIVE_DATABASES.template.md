@@ -131,31 +131,17 @@ const client = new JsBaoClient({ apiUrl, wsUrl, appId, token });
 
 ## Configuring with the CLI
 
-All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive sync` command. This keeps configuration version-controlled alongside your code.
+All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive sync` command, which keeps configuration version-controlled alongside your code. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and the `--dir` override.
 
-```bash
-primitive sync init            # Initialize config dir (auto-resolves .primitive/sync/<env>/<appId>/)
-primitive sync pull            # Pull current config from server
-primitive sync diff            # Preview changes
-primitive sync push            # Push local config to server
-primitive sync push --dry-run  # See what would change without applying
-primitive sync migrate-toml    # Rewrite database-type and workflow files to native TOML tables
-primitive sync migrate-toml --dry-run  # Preview the rewrite without writing files
-# Override with a fixed path:
-primitive sync init --dir ./config
-primitive sync push --dir ./config
-```
-
-`migrate-toml` is a purely local rewrite — it converts JSON-string fields to native TOML tables in place, semantically identical on the server: `definition`/`params` in database-type files (see [Operation types](#operation-types) for the two forms and the fallback rules) and `inputSchema`/`outputSchema` in workflow files.
-
-The config directory structure:
+Database configs live under these paths in the sync directory:
 
 ```
-config/
-  database-types/*.toml           # Database type configs + operations
-  rule-sets/*.toml                # Access rule sets (CEL rules)
-  group-type-configs/*.toml       # Group type configs
+database-types/*.toml           # Database type configs + operations
+rule-sets/*.toml                # Access rule sets (CEL rules)
+group-type-configs/*.toml       # Group type configs
 ```
+
+`primitive sync migrate-toml` rewrites database-type and workflow files to native TOML tables — a purely local rewrite, semantically identical on the server, that converts JSON-string fields to native tables: `definition`/`params` in database-type files (see [Operation types](#operation-types) for the two forms and the fallback rules) and `inputSchema`/`outputSchema` in workflow files. Pass `--dry-run` to preview the rewrite without writing files.
 
 ### Database type config files
 
@@ -341,13 +327,27 @@ Beyond sync, the CLI exposes commands for one-off ops (use `--help` for full fla
 
 ```bash
 primitive database-types list | get <type> | delete <type> | operations list <type>
-primitive databases list | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
+primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
 primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
-# Admin record introspection
+# Admin record introspection. `get` on a missing id prints null at exit 0 — a
+# miss is not an error. Every --filter below also accepts --filter-file <path>
+# (JSON or TOML). Without --group-by, aggregate covers the whole model: the
+# human view prints one number, but --json returns an object keyed by the
+# operation ({"count":2}, {"sum_age":60}).
 primitive databases records models <id>
-primitive databases records describe <id> <model>
-primitive databases records query <id> <model> --filter '{"status":"open"}'
+primitive databases records describe <id> <model-name>
+primitive databases records query <id> <model-name> --filter '{"status":"open"}'
+primitive databases records get <id> <model-name> <record-id>
+primitive databases records count <id> <model-name> [--filter '{...}']
+primitive databases records aggregate <id> <model-name> --op avg --field price [--group-by status]
+
+# Admin record writes — both MERGE the given fields (omitted fields keep their
+# stored value). They differ twice. On a missing record: `save` creates it (id
+# generated when omitted), `patch` fails 404. On an explicit null: `save`
+# removes the key, `patch` stores the value null.
+primitive databases records save <id> <model-name> [record-id] --data '{"status":"open"}'
+primitive databases records patch <id> <model-name> <record-id> --data '{"status":"closed"}'
 
 # Data migration (records + indexes + constraints; type config excluded — run sync push on target first)
 primitive databases export <id> --output ./out
@@ -450,7 +450,7 @@ A **database type** is a named configuration shared across many databases. It pr
 
 - **Registered operations** (`type` is one of `query`, `mutation`, `count`, `aggregate`, `pipeline`, `applyToQuery`) with per-operation CEL `access`
 - **Triggers** — computed fields evaluated server-side before each save
-- **`celContextAccess`** — one CEL expression gating whether non-owner/manager users may read **and** update the database's CEL context (defaults to deny when unset; owner/manager always have access). A single rule covers both endpoints, so granting read necessarily grants update. Prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category, which carries separate `readRule` and `writeRule` — see [Migrating the CEL context to metadata categories](#migrating-the-cel-context-to-metadata-categories)
+- **`celContextAccess`** — one CEL expression gating whether users without owner/manager or app-wide authority may read **and** update the database's CEL context (defaults to deny when unset; owners, managers, and app admins/app owners always have access). A single rule covers both endpoints, so granting read necessarily grants update. Prefer a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category, which carries separate `readRule` and `writeRule` — see [Migrating the CEL context to metadata categories](#migrating-the-cel-context-to-metadata-categories)
 - **`autoPopulatedFields`** — declarative server-side field stamping on writes (see below)
 - **`defaultAccess`** — fallback CEL access rule applied to operations that omit their own `access`
 - **`[models.*]` schema** — optional server-enforced model declaration. When present, every op edit (and the schema edit itself) is checked against it; see [Schema gate](#schema-gate)
@@ -1131,7 +1131,13 @@ The client library is used at runtime to create database instances, execute oper
 
 ### Listing and fetching databases
 
-`list()` returns DBs where the user has a **direct** permission (owner or manager). Databases reachable only via CEL-gated operations or `DatabaseGroupPermission` are NOT returned by `list()` (use `groups.listDatabases` for group-shared ones). App admins see all DBs in the app. Passing `{ databaseType }` to `list()` is a post-join filter that narrows the set, never widens it.
+`list()` returns DBs where the user has a **direct** permission (owner or manager). Databases reachable only via CEL-gated operations or `DatabaseGroupPermission` are NOT returned by `list()` (use `groups.listDatabases` for group-shared ones). App admins and app owners see all DBs in the app — the same app-wide authority that grants them direct record access, whether they were promoted in-app or hold console access. Passing `{ databaseType }` to `list()` is a post-join filter that narrows the set, never widens it.
+
+**The `permission` field on each row reports capability, not ownership.** For a caller with app-wide authority it is `"owner"` on every row, including databases another user created. To pick out "my" databases, compare `createdBy` against the caller's own user id; testing `permission` for `owner` will match the first row of the type instead, whoever created it.
+
+`list()` is paged at 100 per call and returns the first page as a plain array. Pass `returnPage: true` to get `{ items, hasMore, nextCursor }` and follow `nextCursor` until it is absent (Swift: `listPage(databaseType:owner:limit:cursor:)`). The `databaseType` filter is applied after the page boundary, so a filtered page can be shorter than `limit` while `hasMore` is still true.
+
+`{ owner: <userId> }` narrows the listing to the databases that user created (Swift: `list(databaseType:owner:)`; `?owner=` on the wire; `primitive databases list --owner <user-id>` from the CLI). Like `databaseType` it only narrows: an app admin gets that user's databases, an ordinary member gets the subset of their own grants that user created. An owner with no databases is an empty list, not an error. Cursors are per-listing: replaying one after changing `owner` returns a 400, so start over when the filter changes.
 
 {{ example: databases/db-manage }}
 
@@ -1208,7 +1214,7 @@ type = "string"
 required = true
 ```
 
-**2. Declare the category on the database type's manifest.** An access rule or operation `definition` can read `md.self.<category>.<key>` only for a category the type config names. This declaration is the prerequisite, and it's independent of the category's own `readRule`:
+**2. (Optional) Declare the category on the database type's manifest.** A category an access rule or operation `definition` names directly is inferred and loaded automatically; an explicit `[metadata.self]` block unions with that inferred set, so reach for it to load a category no expression names. Either way the load is independent of the category's own `readRule`:
 
 ```toml
 # config/database-types/project.toml
@@ -1229,7 +1235,9 @@ Stamp create-time values with `initialMetadata` on `databases.create()`; write t
 
 ## Direct Record Operations
 
-Direct record operations require owner or manager permission. For most apps, use registered operations instead.
+Direct record operations are allowed when the caller's effective database permission (direct or group grant) is manager or higher, **or** the caller's app role is `admin` or `owner`, **or** the caller is a console/super admin. A plain app member with no database grant gets `403` — use registered operations for those callers, which is the right default for most apps anyway.
+
+`admin-data/*` is deprecated: it is now an alias of the `records/*` route of the same name and will be removed after the sunset date in its `Sunset` response header. Migrate to `records/*`.
 
 `connect()` returns a `DoDb` handle. Save (upsert), patch (partial update), find a single record, delete, and count all run against it. A `save` is an upsert; pass `ifNotExists` for insert-only, `condition` for a conditional write, and `stringSets` to seed StringSet fields:
 
@@ -1405,7 +1413,7 @@ Owner and manager permissions control **who can manage the database itself** —
 | `owner` | Yes | Yes | Yes | Yes | Yes |
 | `manager` | No (list only) | Yes | Yes | No | Yes |
 
-The database creator is automatically the `owner`. Console admins bypass all checks.
+The database creator is automatically the `owner`. Console admins bypass all checks. An app admin or app owner is owner-equivalent on every database in the app for listing, reading, updating, and record access; deleting a database still needs a direct `owner` grant or console access.
 
 These calls are for administrative access — not for end-user data access:
 
@@ -1691,7 +1699,7 @@ Make the initial-load operation's filter and the subscription's `filter` semanti
 There is no built-in "reconnected" callback. If you need to re-run the initial load after a disconnect, listen for status events on the client itself — `JsBaoClient` extends `Observable`, so `client.on("status", ({ status }) => { ... })` lets you trigger your loader when the WS comes back up.
 {{/lang}}
 {{#lang swift}}
-There is no built-in "reconnected" callback. To re-run the initial load after a disconnect, observe client status — `client.events.on(.status) { (event: StatusChangedEvent) in if event.status == .connected { ... } }` — and re-fire your loader when the socket reconnects. `BaoDataLoader` does exactly this for you: it reloads when the connection flips back to `.connected`.
+There is no built-in "reconnected" callback. To re-run the initial load after a disconnect, observe client status — `for await event in client.stream(for: StatusChangedEvent.self, replayingLatest: true) { if event.status == .connected { ... } }` — and re-fire your loader when the socket reconnects. `replayingLatest: true` delivers the current status immediately, so a loop that starts after the socket connected still sees it. `BaoDataLoader` does exactly this for you: it reloads when the connection flips back to `.connected`.
 {{/lang}}
 
 ### Critical Rules

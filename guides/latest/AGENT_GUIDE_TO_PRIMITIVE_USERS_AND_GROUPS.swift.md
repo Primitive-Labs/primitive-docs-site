@@ -333,8 +333,18 @@ See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-gra
     groupType: "team", groupId: "engineering",
     options: PaginationOptions(limit: 50, cursor: page.cursor)
   )
+
+  // Join profile data in the same call with `include: .profiles`.
+  let withProfiles = try await client.groups.listMembers(
+    groupType: "team", groupId: "engineering",
+    include: .profiles
+  )
+  // withProfiles.items: [GroupMemberInfo(userId, userName?, userEmail?, avatarUrl?, addedAt, addedBy)]
+  // avatarUrl is a URL, or nil if the user has no avatar or the membership
+  // is orphaned (deleted user).
 ```
 
+Pass `include: .profiles` to join each member's profile in the same call. Without it, `GroupMemberInfo.avatarUrl` is `nil` — the field is absent from the default response. With `include: .profiles`, `userName`/`userEmail` become reliably populated and `avatarUrl` is a resolved URL to the uploaded avatar, or `nil` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go nil. `include` is opt-in and purely additive: omitting it returns exactly the pre-existing response shape. The server rejects unknown `include` values with HTTP 400.
 
 ### Remove members
 
