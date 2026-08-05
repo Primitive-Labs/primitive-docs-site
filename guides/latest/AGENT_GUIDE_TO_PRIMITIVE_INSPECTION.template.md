@@ -22,8 +22,8 @@ primitive blob-buckets list                            # buckets in the app (app
 primitive blob-buckets head <bucket> <key>             # object metadata without downloading
 
 # Live connections and sessions
-primitive connections list --user <id>                 # active WebSocket connections
-primitive sessions list --user <id>                    # auth sessions
+primitive connections list --user-id <id>              # active WebSocket connections
+primitive sessions list --user-id <id>                 # auth sessions
 
 # Records and documents
 primitive databases list --owner <user-id>             # databases one user created
@@ -31,6 +31,10 @@ primitive databases records query <database> ...       # read database records
 primitive databases records get <database> <model-name> <record-id>
 primitive databases records count <database> <model-name> [--filter '{...}']
 primitive databases records aggregate <database> <model-name> --op <count|sum|avg|min|max>
+primitive documents records query <document> <model-name> [--filter '{...}']
+primitive documents records get <document> <model-name> <record-id>
+primitive documents records count <document> <model-name> [--filter '{...}']
+primitive documents dump <document-id>                 # every model's records as JSON
 primitive documents export <document-id>               # dump a document's contents
 
 # Metadata
@@ -42,10 +46,10 @@ primitive metadata get <type> <id> <category>          # resource metadata
 Every inspection command honors the same read flags:
 
 - `--app <id>` — target app; falls back to the resolved environment's app.
-- `--json` — the output you parse. Most commands print the endpoint payload as-is; the log views below normalize theirs into the shared item shape described in the next section. It is always a JSON document, never a bare array. `--json` goes to stdout; status, warnings, and progress go to stderr, so a redirected `--json` stream stays a single parseable document.
-- `--limit <n>` / `--cursor <c>` — paged reads. The response envelope is always `{ items, hasMore, nextCursor? }` (`cursor` is a deprecated alias of `nextCursor`, kept for one window). Aggregate reads walk the `nextCursor` chain to the end.
+- `--json` — the output you parse. Most commands print the endpoint payload as-is; the log views below normalize theirs into the shared item shape described in the next section. It is always a JSON document, never a bare array. `--json` goes to stdout; status, warnings, progress, and the `CLI Version: …` banner all go to stderr, so a redirected stdout stays a single parseable document. That holds for the always-JSON commands too — `primitive documents dump <doc> | jq .` parses without a `--json` flag.
+- `--limit <n>` / `--cursor <c>` — paged reads. The response envelope is always `{ items, hasMore, nextCursor? }` — read `nextCursor` and pass it back as `--cursor`. Both `records query` verbs print exactly that envelope, whatever shape the underlying endpoint returns, and neither emits the deprecated `cursor` alias; the paginated log views (workflow runs, webhook events) still add `cursor` as a deprecated alias of `nextCursor`, kept for one window. Aggregate reads walk the `nextCursor` chain to the end.
 
-`list` always requires a **selector** — `--user`, `--owner`, a resource id — so it never enumerates the whole app. The one exception is a genuinely app-scoped resource such as `blob-buckets list`, which lists the app's buckets directly.
+`list` always requires a **selector** — `--user-id`, `--owner`, a resource id — so it never enumerates the whole app. `--user-id` is the spelling on every list and inspection selector; `connections list`, `sessions list` and `tokens list` still accept `--user` as a deprecated alias that prints a notice on stderr. The one exception to the selector rule is a genuinely app-scoped resource such as `blob-buckets list`, which lists the app's buckets directly.
 
 Permission sub-verbs differ by resource on purpose: documents use `permissions grant`/`revoke` (a reader/read-write/owner ladder), databases use `permissions add-manager`/`remove-manager` (a manager/owner ladder). What is uniform is `permissions list` and group nesting — not the mutation verb names.
 

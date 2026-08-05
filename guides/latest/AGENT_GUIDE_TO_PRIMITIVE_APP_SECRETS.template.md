@@ -20,7 +20,7 @@ primitive secrets delete OPENAI_API_KEY
 |---|---|---|
 | Integrations | `requestConfig.defaultHeaders`, `requestConfig.staticQuery` | Per request, when the proxy executes the call |
 | Workflows | Any step-config template string; CEL contexts (`runIf`, `switch` `when`) expose `secrets.*` | Just before the step runs |
-| Inbound webhooks | A webhook's `signingSecret` / `previousSigningSecret` — which must each be a **whole** reference, never a literal (`400` `SIGNING_SECRET_MUST_BE_SECRET_REF`) | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery, or `signing_secret_literal` / `signing_secret_unset` if the stored value is a raw secret or missing |
+| Inbound webhooks | A webhook's `signingSecret` / `previousSigningSecret` — which must each be a **whole** reference, never a literal (`400` `SIGNING_SECRET_MUST_BE_SECRET_REF`) | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery, or `signing_secret_unset` if the stored value is missing. A raw value stored before this rule (`signingSecretStatus: legacy-literal`) still verifies, but updating that webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` until the same write migrates it. A stored value carrying reference syntax that resolves to nothing (`signingSecretStatus: malformed-reference`) does **not** verify — it fails closed like an unresolvable reference, and is blocked from writes the same way |
 | Databases | Operation `access` / per-param `access` CEL; trigger stamp `value` CEL | When the operation executes (secrets load only when the expression references `secrets.`) |
 
 Write the reference without inner spaces — `{{secrets.KEY}}`, uppercase key, max 64 chars. Integration and webhook fields resolve exactly that form (a spaced `{{ secrets.KEY }}` is left as literal text there); workflow step templates additionally accept the spaced form.
@@ -48,6 +48,8 @@ primitive vars set ADMIN_GROUP_ID --value grp_01ABC --summary "Admins group id"
 primitive vars list          # values ARE shown — vars are not secret
 primitive vars delete ADMIN_GROUP_ID
 ```
+
+Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `sync push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. `primitive vars set` upserts by key: an existing key is replaced, not refused.
 
 ### Where `{{ vars.KEY }}` resolves
 

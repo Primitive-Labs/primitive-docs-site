@@ -94,12 +94,12 @@ Input must be **strict JSON**. Trailing commas, `//` or `/* */` comments, single
 `ulid()` (zero-arg) returns a fresh 26-character uppercase Crockford-base32 ULID string — a 48-bit millisecond timestamp prefix plus 80 bits of randomness, matching the `^[0-9A-HJKMNP-TV-Z]{26}$` format the `document.bulkUpdate` step requires for `create` ids. Its purpose is pre-minting record ids when a script builds a `document.bulkUpdate` `operations` array, so cross-record references can be wired without a server round-trip:
 
 ```
-rows.map(|row| #{ id: ulid(), model: "Holding", action: "create", fields: row })
+rows.map(|row| #{ id: ulid(), model: "Holding", action: "create", data: row })
 ```
 
 - Ids from calls within one invocation share the timestamp prefix and differ in the random suffix; there is **no monotonic ordering guarantee** between successive calls.
 - This is the sandbox's one non-deterministic surface (clock + randomness). In a durable workflow run, step-output memoization keeps minted ids stable across that run's retries.
-- For a statically-known number of ids, minting with the <span v-pre>`{{ ulid }}`</span> template helper in the step's `with` table keeps the script itself fully deterministic.
+- For a statically-known number of ids, minting with the `{{ ulid }}` template helper in the step's `with` table keeps the script itself fully deterministic.
 
 ## Per-step limits
 

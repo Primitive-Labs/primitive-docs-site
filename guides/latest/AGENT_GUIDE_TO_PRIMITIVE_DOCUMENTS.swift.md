@@ -475,6 +475,8 @@ struct ItemDetailView: View {
 .onDisappear { deletedSub?.cancel() }
 ```
 
+When the handler needs the event's own timing — a debug timeline, a latency report — use the `withDelivery:` form: `client.observeOnMainActor(SomeEvent.self, withDelivery: { event, delivery in … })`. `delivery.emittedAt` is the instant the event was emitted (a `Date()` taken inside the plain handler also includes the hop onto the main actor), and `delivery.sequence` is a monotonic per-client counter — sort timelines on it, not on timestamps.
+
 ## Data Modeling Decisions
 
 ### Separate Documents When:
@@ -1267,6 +1269,10 @@ The permission and collection reads return the raw server rows — they do **no*
 
 The "accessible documents" set is the **union** of `me.ownedDocuments` and `me.sharedDocuments`: call both and dedupe by document id (the same doc can surface in both).
 
+`me.ownedDocuments` / `ownedDocumentsPage` are **local-first by default**: when the local metadata cache already holds owned documents, the call returns those immediately and refreshes from the server in the background, so a later call is fresh. Pass `MeOwnedDocumentsOptions(waitForLoad: .network)` when a screen must show a server-fresh list (and `.local` to never touch the network). `serverTimeoutMs` bounds any server fetch — 10 s by default, `0` for unbounded — and a fetch that exceeds it throws `JsBaoError(code: .listTimeout)`; `.network` while offline throws `.listUnavailableOffline`. `limit` / `cursor` are ignored on a local path (the cache isn't paginated), so `ownedDocumentsPage` is excluded from the local-first short-circuit — under the default `waitForLoad` the paged form always fetches from the server, and only the cache-only modes (`localOnly`, `refreshFromServer: false`, `.local`) hand it a local page with `cursor == nil`.
+
+`documents.listGroupPermissions(documentId:)` hides the platform's internal `_`-prefixed groups (the `_col-*` groups behind collection sharing). Pass `includeSystem: true` to see them — useful when debugging why a user has access that no visible group grants.
+
 For **writes**, use the typed params factories — `documents.updatePermissions(documentId:params: .email("…", permission: "read-write", sendEmail: false, documentUrl: …))` (or `.user(…)` / `.batch([…])`) and `collections.addMember(collectionId:params: .email("…", permission: .readWrite))` (or `.user(…)`). To cancel a pending email invite on a document, call `documents.removePermission(documentId:, .email("…"))`; alternatively, read the row's `deferredId` via `client.invitations.listDeferredGrants(...)` and call `client.invitations.revokeDeferredGrant(deferredId:type:)` (`.document` for a per-doc invite, `.group` for a collection one). A group's pending entries need no such detour: each `PendingGroupInvitationEntry` from `groups.listPendingInvitations(groupType:groupId:)` carries its `deferredId` directly — revoke with `type: .group`.
 
 ### Sharing Discovery Cheat Sheet
@@ -1357,8 +1363,11 @@ primitive documents permissions list <document-id>
 primitive documents records models <document-id>
 primitive documents records describe <document-id> <model-name>
 
-# Query and count records in a model (--filter is JSON; --limit caps at 100)
+# Query, get, and count records in a model (--filter is JSON, or --filter-file
+# <path> for a JSON/TOML file; --limit caps at 100). `get` on a missing id
+# prints null at exit 0 — a miss is not an error.
 primitive documents records query <document-id> <model-name> --filter '{"status":"open"}' --limit 50
+primitive documents records get <document-id> <model-name> <record-id>
 primitive documents records count <document-id> <model-name>
 
 # Dump every record grouped by model, and read summary statistics
@@ -1368,7 +1377,7 @@ primitive documents stats <document-id>
 
 `records models` and `records describe` read the document's discovered schema — the models a client has written into the document, with each field's type and whether it is indexed, unique, or required. A newly created document with no records yet reports no models.
 
-`records query` returns a page of records as `{ items, hasMore, nextCursor }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records count` returns how many records match a `--filter`. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
+`records query` returns a page of records as `{ items, hasMore, nextCursor? }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records get` returns one record by id, or `null` at exit 0 when there is no such record; `records count` returns how many records match a `--filter`. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. It is always JSON on stdout with nothing else mixed in, so `primitive documents dump <doc> | jq .` parses. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
 
 The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
 
@@ -1387,7 +1396,7 @@ primitive documents records delete <document-id> <model-name> <record-id> -y
 primitive documents records bulk <document-id> --data-file ops.json -y
 ```
 
-`records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "fields" }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
+`records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "data", "precondition"? }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. `data` carries the record fields — the same key `records save` / `records patch` take — and is required and non-empty on `create` and `patch`; `delete` takes none. Any other key in an operation is rejected with a 400 naming the operation index, so a mis-keyed payload fails loudly instead of writing an empty record. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
 
 Grant and revoke a user's access to a document. `grant` takes either `--user-id` or `--email` plus a `--permission` level of `reader` or `read-write`; re-granting for the same user updates the level in place. `revoke` targets a user by id argument or `--email`, and prompts for confirmation unless `-y` is passed.
 

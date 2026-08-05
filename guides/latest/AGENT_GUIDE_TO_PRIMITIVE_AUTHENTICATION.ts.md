@@ -52,7 +52,7 @@ In the starter template this wiring is owned for you by the template's `userStor
   };
 ```
 
-`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured — the latter a `{{secrets.KEY}}` reference to an app secret holding the client secret, per the Configuration guide). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)

@@ -36,7 +36,7 @@ In the starter template this wiring is owned for you by `PrimitiveAppState.initi
 
 {{ example: auth/get-auth-config }}
 
-`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured — the latter a `{{secrets.KEY}}` reference to an app secret holding the client secret, per the Configuration guide). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
 {{#lang swift}}
 `hasApple` reports Sign in with Apple availability (`appleSignInEnabled` plus configured Apple audiences); gate the native `signInWithApple` button on it.
 {{/lang}}

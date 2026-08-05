@@ -365,9 +365,11 @@ primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
 # Admin record introspection. `get` on a missing id prints null at exit 0 — a
 # miss is not an error. Every --filter below also accepts --filter-file <path>
-# (JSON or TOML). Without --group-by, aggregate covers the whole model: the
-# human view prints one number, but --json returns an object keyed by the
-# operation ({"count":2}, {"sum_age":60}).
+# (JSON or TOML). `query --json` prints the CLI's list envelope,
+# `{ items, hasMore, nextCursor? }` — the same shape as `documents records
+# query`. Without --group-by, aggregate covers the whole model: the human view
+# prints one number, but --json returns an object keyed by the operation
+# ({"count":2}, {"sum_age":60}).
 primitive databases records models <id>
 primitive databases records describe <id> <model-name>
 primitive databases records query <id> <model-name> --filter '{"status":"open"}'
