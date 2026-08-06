@@ -930,6 +930,18 @@ The view below is framework glue; the only Primitive calls in it are the `findAl
 
 {{#lang swift}}
 Writes go through record instances and are local-first — applied to the document store immediately and synced in the background (see [`models.toml` + codegen + the model facade](#modelstoml--codegen--the-model-facade) for the save/delete contract). `try record.save(in: documentId)` uses merge semantics: `nil` optional fields are not written, so fields you didn't set are preserved on update.
+
+**Saving an existing record writes only the fields you assigned** since you read it. Fetch–mutate–save is therefore a field-level write, and two devices editing different fields of the same record merge instead of overwriting each other:
+
+```swift
+var task = try TaskRecord.find(id)!   // read: nothing pending
+task.title = "New title"              // only `title` is marked changed
+task = try task.save(in: documentId)  // only `title` is written
+```
+
+Inserting a record the document doesn't have yet writes every field, so copying a record into another document still carries all of it. If the other document ALREADY holds that record, the save is an update — and an unmodified record has nothing to write, so it does nothing. Call `record.markAllChanged()` first when you mean to copy the whole record over it.
+
+`save(in:)` returns the record **as saved** — re-read from the document with no pending changes left, so a field another device changed while you held your copy, and any schema defaults filled in on insert, are present. Assign it back (as above) when you keep using the value, or call `record.discardChanges()` to drop pending edits without writing them. Constructing a record (`TaskRecord(id:title:)`) or decoding one from JSON marks every field it carries as changed; only a record read back through the facade starts clean.
 {{/lang}}
 
 {{#lang ts}}

@@ -527,6 +527,21 @@ wiring; the pieces, all load-bearing:
   `Cannot find package 'ws'`.
 - Script: `"test": "pnpm codegen && vitest run"`.
 
+Environment selection: the app id and server URLs come from the `.env` file
+vitest loads, so the target backend is whatever that file points at. Select
+another one with a `.env.<mode>` file plus vitest's `--mode`, passed with **no
+`--` separator**:
+
+```bash
+PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" pnpm test --mode staging
+```
+
+`pnpm test -- --mode staging` is a silent wrong-environment run: vitest drops
+every argument after a bare `--` (the mode flag and any positional test
+filter), so the suite runs full and green against the default `.env` backend
+and writes its test data there. To assert which environment a run loaded, log
+`import.meta.env.MODE` / `import.meta.env.VITE_API_URL` from a test.
+
 `registerPrimitiveTests(options)` — from `primitive-app/testing`:
 
 | Option | Default | Notes |

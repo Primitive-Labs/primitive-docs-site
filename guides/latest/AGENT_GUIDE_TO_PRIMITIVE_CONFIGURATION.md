@@ -111,7 +111,7 @@ A plain value stored before this rule shipped is a literal, and it keeps working
 
 The server only ever sends `googleClientSecret` back when it holds a reference. A pre-existing literal is real credential material, so it is withheld from every read — `settings show`, `settings pull`, the API — and reported as `googleClientSecretStatus = "legacy-literal"` instead. Google sign-in keeps working on such an app; the setting is simply absent from `app.toml`. `settings show`, `settings pull` and `sync pull` each warn when they read that status, naming the remediation — a pulled `app.toml` cannot be pushed back until the field is migrated. Re-point it at a secret reference and push.
 
-`googleClientSecretStatus = "malformed-reference"` is the case that is **not** working: the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`), so it is neither a pointer nor the secret Google issued, and sign-in fails with `GOOGLE_OAUTH_MISCONFIGURED`. It is withheld from reads for the same reason a literal is. Store the real client secret and point the setting at it.
+`googleClientSecretStatus = "malformed-reference"` is the case that is **not** working: the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space), so it is neither a pointer nor the secret Google issued, and sign-in fails with `GOOGLE_OAUTH_MISCONFIGURED`. It is withheld from reads for the same reason a literal is. Store the real client secret and point the setting at it.
 
 ## Owned scalar fields (clear on absence)
 
@@ -128,7 +128,7 @@ Enum and defaulted fields (`status`, `timeoutMs`, `timezone`, `overlapPolicy`, `
 
 Every command resolves its target environment in order: `--env <name>` flag → `PRIMITIVE_ENV` env var → `defaultEnvironment` in `.primitive/config.json` → the only defined environment → error. Manage environments with `primitive env add|list|show|use|remove`. Tokens are stored per-environment in `.primitive/credentials.json` (gitignored); `.primitive/config.json` is committed.
 
-`primitive env add` writes only the environment entry into `.primitive/config.json` — it seeds no credentials, and project mode does **not** fall back to the global `~/.primitive/credentials.json`. A freshly-added environment therefore starts logged-out: project-scoped commands report "not logged in" until you run `primitive login` for that environment, even when a global `primitive whoami` succeeds. Agents and CI can log in without a browser by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` (see [Headless auth](#headless-auth-ci)).
+`primitive env add` writes only the environment entry into `.primitive/config.json` — it seeds no credentials, and project mode does **not** fall back to the global `~/.primitive/credentials.json`. A freshly-added environment therefore starts logged-out: project-scoped commands report "not logged in" until you run `primitive login` for that environment, even when a global `primitive whoami` succeeds. (The `dev` environment scaffolded by `primitive init` is the exception — init seeds it with the session it authenticated during setup.) Agents and CI can log in without a browser by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` (see [Headless auth](#headless-auth-ci)).
 
 ## Previewing a push
 

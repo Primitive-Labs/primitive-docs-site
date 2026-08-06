@@ -605,7 +605,7 @@ watch(
 ```
 {{/lang}}
 {{#lang swift}}
-The template ([swift-primitive-app-dev](https://github.com/Primitive-Labs/swift-primitive-app-dev)) provides `PrimitiveAppState` + `PrimitiveAuthManager` (`@Published isAuthenticated`/`userId`/`loginState`) and `AuthGateView` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state.
+The template ([primitive-swift-template](https://github.com/Primitive-Labs/primitive-swift-template)) provides `PrimitiveAppState` + `PrimitiveAuthManager` (`@Published isAuthenticated`/`userId`/`loginState`) and `AuthGateView` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state.
 
 ### Layout gate (recommended default)
 
@@ -700,6 +700,8 @@ If you're using the template, this route is already wired in `src/router/routes.
 
 There is **no `primitive test-users` CLI command**. The bypass is server-side: an OTP request for an email shaped like `<base-local>+primitivetest<suffix>@<base-domain>` accepts the magic code `"000000"` instead of the emailed code, but **only when the base address is on the app's `testAccountBaseEmails` whitelist**.
 
+This is the recommended sign-in for local/dev builds as well as CI: sign in through the app's real login UI with a derived address and `"000000"`, so routine development exercises the production auth flows on short-lived, member-scoped tokens.
+
 {{ example: auth/test-user-otp }}
 
 Guardrails:
@@ -708,7 +710,7 @@ Guardrails:
 - Only `+primitivetest<suffix>` derivatives are eligible. The bare base is never a test account.
 - First verify provisions the derived user through the standard signup path and returns the real `isNewUser`, so first-run/new-user flows are testable through the bypass. Signup-mode gates apply as 403s exactly like a normal signup: `INVITATION_REQUIRED` (invite-only, no invitation), `ADDED_TO_WAITLIST` (invite-only with waitlist — the address is added), `DOMAIN_NOT_ALLOWED` (domain mode); an `inviteToken` is honored and provisions with the invitation's role (member-role invitations only — see the reserved-email boundary below).
 - Issued tokens are short-lived (~30 minutes) and carry a `primitiveBypass: true` claim that gets re-checked on every request, so removing the base from the whitelist revokes sessions immediately.
-- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles.
+- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths (e.g. starting a `runAs = "system"` workflow from the client) need a real admin sign-in.
 
 Manage the whitelist with `primitive apps update --test-account-bases …` (max 50 bases per app), or in the web-admin settings UI — both edit the same `testAccountBaseEmails` list.
 

@@ -358,7 +358,7 @@ Every payload also carries `_timing: { total_ms, wae_queries }` — diagnostics 
 | `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
 | `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
 | `events.grouped` — `/events/grouped` | `{ group_by, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
-| `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }] }] }` |
+| `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
 | `workflows.top` — `/workflows/top` | `{ windowDays, limit, workflows: [{ workflowKey, runs, successRate, medianDurationMs, p10, p50, p95, totalTokens }] }` |
 | `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens }] }` |
 | `integrations` — `/integrations` | `{ windowDays, integrations: [{ integrationKey, invocations, errorRate, medianDurationMs, p10DurationMs, p50DurationMs, p95DurationMs }] }` |
@@ -397,9 +397,17 @@ Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upg
 
 ### Error groups
 
-`/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted literals, or timestamps normalize to the same title and share a fingerprint.
+`/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
 
-Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, and `daily` — a per-day `{ day, count }` series (sampling-weighted, ascending, `day` a `YYYY-MM-DD` label). One call covers the whole window, so "today versus the trailing baseline" needs no rolling store.
+Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span followed by `:` — a quoted *value* that merely precedes a colon, like a filename in `Failed to parse "x.txt": ...`, is still templated), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
+
+Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, `daily` — a per-day `{ day, count }` series (sampling-weighted, ascending, `day` a `YYYY-MM-DD` label) — `first_seen` / `last_seen` (ISO-8601), and an `exemplar`. One call covers the whole window, so "today versus the trailing baseline" needs no rolling store.
+
+**The exemplar is how you identify a group.** `normalized_title` is a grouping key with the variable parts replaced by placeholders; `exemplar` is a raw sample of one real failure — `{ message, action, scope_key, step_id, run_id, at }` — so you can go from a spiking group straight to the run that produced it without paging `/analytics/events`. `step_id` and `run_id` are `null` when the failure had none. The whole object is `null` when no sampled row for that fingerprint carried a sample: events written before the exemplar shipped carry none, and a very noisy group can consume the sampling budget and leave a quieter one without one. Treat `exemplar: null` as a normal result, not an error.
+
+**One failure, one group.** A failed step's error is echoed onto the run that it failed, so the run-level event is suppressed when its folded message equals the attributed failed step's — the group is the `workflow_step` one. A run that failed for its own reason (output-schema validation, a launch failure with no step to attribute) still gets its `workflow_run` group. A setup-phase abort is attributed to the synthesized `__setup__` step, so it appears under `source: workflow_step`, `step_id: __setup__` and is **not** returned by a `source is workflow_run` filter.
+
+`status_class` is populated for a workflow failure whose message embeds a status (`{"error":{"code":503,…}}` → `5xx`); integration failures keep the real HTTP status class, including `transport`, which no message text can express.
 
 **The `daily` series is sparse.** A day on which that fingerprint produced no events has no bucket at all, so `daily` is shorter than the window for any intermittent error. Divide by `window_days` (the response echoes it) to get a per-day baseline — dividing by `daily.length` averages over only the days the error fired, which overstates the baseline and suppresses exactly the spike an alert should catch. A window with no failures returns `rows: []`.
 
@@ -411,7 +419,7 @@ Only a bounded set of dimensions is filterable (the exact error code is inside t
 | `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
-Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the workflow query type `errors.groups` and the CLI `primitive analytics errors-groups`.
+Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the workflow query type `errors.groups` and the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).
 
 ### Event row shape
 

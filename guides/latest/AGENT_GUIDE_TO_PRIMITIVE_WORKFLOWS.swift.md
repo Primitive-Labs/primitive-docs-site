@@ -840,7 +840,7 @@ Valid `queryType` values (dotted form, exact strings):
 | --- | --- |
 | `overview.dau` / `overview.wau` / `overview.mau` | `{ value, previous, deltaPct }` — `previous` is the preceding non-overlapping window (the current one ends at query time, so it carries a partial final day); `deltaPct` is a fraction (`0.25` = +25%), and `1` is the sentinel for a zero base |
 | `daily-active` / `rolling-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }] }` |
-| `errors.groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }] }] }` — `daily` is **sparse** (no bucket for a day with no events), so divide by `window_days`, not `daily.length`, for a per-day baseline |
+| `errors.groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar }] }` — `daily` is **sparse** (no bucket for a day with no events), so divide by `window_days`, not `daily.length`, for a per-day baseline. `exemplar` is a raw sample of one failure (`{ message, action, scope_key, step_id, run_id, at }`) or `null` |
 | everything else | see the per-type table in [Analytics](AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.md) |
 
 Every payload also carries a diagnostic `_timing`. `ok` is the engine's uniform step verdict, not a field the query returns.
@@ -1444,6 +1444,61 @@ secret = "{{secrets.PLAID_SECRET}}"        # required — must be a {{secrets.KE
 
 The key endpoint is derived from `environment` in code, so there is no way to point verification at another host: a `keyEndpoint`, `keyEndpointUrl`, `baseUrl` or `host` key in the table is rejected `400` (`PLAID_ENDPOINT_UNSUPPORTED`), as is an environment outside the enum or a literal credential (`CREDENTIAL_MUST_BE_SECRET_REF`). Those three keys are the whole table — any other key is rejected `400` (`PLAID_UNKNOWN_CONFIG_KEY`) rather than stored and ignored, so a setting that would never be checked cannot round-trip through `sync pull`/`push` looking as though it took effect.
 
+### `custom` + `[verification.custom.detachedSignature]`: describe the provider's own scheme
+
+Never reach for `verificationScheme = "none"` because a provider signs differently from the eight built-ins — `none` accepts every request from anyone. Describe the provider's scheme instead. `custom` takes an optional `[verification.custom.detachedSignature]` table that declares how the signature is built; the platform verifies exactly as declared.
+
+```toml
+[webhook]
+key = "acme-events"
+verificationScheme = "custom"
+signingSecret = "{{secrets.ACME_WEBHOOK_SECRET}}"
+toleranceSeconds = 300
+
+[verification.custom.detachedSignature]
+primitive = "hmac-sha256"          # the only primitive available today
+encoding = "base64url"             # hex | base64 | base64url
+signature = { header = "X-Acme-Signature" }        # omit `key` when the whole header is the signature
+# signature = { header = "X-Acme-Signature", key = "v1", prefix = "sha256=" }
+freshness = { from = { header = "X-Acme-Timestamp" }, format = "unixSeconds" }
+dedup = { signedBodyPointer = "/event/id" }        # optional — signature-covered id
+externalEventId = { untrustedHeader = "X-Acme-Delivery" }  # optional — display only
+
+[[verification.custom.detachedSignature.signedPayload]]
+header = "X-Acme-Timestamp"
+[[verification.custom.detachedSignature.signedPayload]]
+literal = "|"
+[[verification.custom.detachedSignature.signedPayload]]
+body = true
+```
+
+That declares HMAC-SHA256 over `<X-Acme-Timestamp>|<raw body>`.
+
+Rules, all enforced when you push rather than on the first live delivery — one function validates and compiles, so a configuration the write path accepted cannot fail structurally at delivery:
+
+| Rule | Rejection |
+|---|---|
+| The parts cover the body exactly once: exactly one `{ body = true }` part, `body` is exactly `true`, and no part names `body` alongside another key | `400 SIGNATURE_BODY_PART_REQUIRED` |
+| A `literal` separates any two variable-length parts — a `header` / `signatureField` part against `{ body = true }`, or two of them in a row. Without a separator the assembled bytes do not say where one part ends and the next begins, and a capture replays with bytes shifted across the boundary under the same signature. Every `literal` is a non-empty string, and a separating one must not overlap itself (no prefix of it is also a suffix): `\|`, `.`, `->` are fine, `::`, `..`, `abab` are not, because a self-overlapping separator matches across the boundary it marks and leaves the same two-way split. Any single character qualifies | `400 SIGNATURE_CONFIG_INVALID` |
+| `freshness.from` must also be one of the `signedPayload` parts — otherwise the value checked for staleness sits outside the signature | `400 FRESHNESS_NOT_SIGNED` |
+| `dedup.signedBodyPointer` is a bounded RFC 6901 pointer: ≤ 8 tokens, ≤ 64 chars each, ≤ 256 total, leading `/` | `400 SIGNATURE_POINTER_INVALID` |
+| `primitive` must be `hmac-sha256`. `ed25519` and `ecdsa-p256` are named in the vocabulary but not available here — use `verificationScheme = "discord"` for Ed25519, `"jwt"` for a JWS | `400 SIGNATURE_PRIMITIVE_UNSUPPORTED` |
+| Every configured header name is an HTTP field-name token; ≤ 8 parts and ≤ 1 KiB of `literal` text (a `header` or `signatureField` part is the sender's text, not yours, and is not counted); a `signatureField` part requires `signature.key`; `signature.key` and a `signatureField` name are ≤ 64 characters and carry no `,` or `=`, and `signature.prefix` is ≤ 64 characters and carries no comma when `signature.key` is set; a part carrying two variant keys where neither is `body`, and unknown keys at any level; the signature header cannot be a signed `{ header }` part and `signature.key` cannot be a `{ signatureField }` part | `400 SIGNATURE_CONFIG_INVALID` |
+
+Those are the write-time parts of the boundary rule; one more is checked per delivery, because it is a property of the delivery rather than of the configuration. A separator only locates the boundary if it does not also occur inside the values beside it, so a delivery whose `header` or `signatureField` value contains a `literal` next to it is refused with `sig_malformed`. With a non-overlapping separator neither value contains, every boundary is the first (or last) occurrence of that separator and the signed bytes read one way. Spell the separator the provider actually uses and expect the provider's own values not to carry it — an `rfc3339` timestamp beside a `.` separator only works for a provider that sends whole seconds, since a fractional second carries a `.` of its own. Some pairings can never verify: `-`, `:`, `T` and `Z` occur in every `rfc3339` timestamp, and `,`, a space and `:` in every `httpDate` one. `primitive webhooks test` refuses to preview a configuration whose timestamp cannot avoid its separator, naming the clash, rather than emitting headers the receiver rejects; where a rendering of the format does avoid it, that is the rendering the preview signs.
+
+`freshness.format` is `unixSeconds`, `unixMilliseconds`, `rfc3339` (offset required) or `httpDate` (IMF-fixdate only — the obsolete RFC 850 and asctime forms are `sig_malformed`). `httpDate` contains a comma, which is the `key=value` grammar's separator, so it can only be read from a header of its own, not a `signatureField`.
+
+`freshness` itself is optional: a provider that signs no timestamp omits it, and that webhook's dedup entries then **never expire** — the `github` rule, for the same reason (nothing bounds a replay but a permanent entry).
+
+`dedup.signedBodyPointer` resolves only after the signature verifies, and only to a non-empty string or a whole number; anything else falls back to `sha256:` of the signed payload, so no delivery is left keyless. `externalEventId.untrustedHeader` populates `meta.externalEventId` and nothing else — no configuration routes a header value into `dedupKey`, so a replay with that header edited is still answered `duplicate`.
+
+Rejection reasons on the declarative path are the existing vocabulary: `sig_missing` (the signature header or a signed header part is absent), `sig_malformed` (the header does not match the declared grammar, an undecodable signature, or a freshness value that fails its format), `sig_expired`, `sig_invalid`, `scheme_misconfigured` (a stored configuration that does not validate — never a silent fall back to the built-in `custom` format). Nothing the sender chooses produces `scheme_misconfigured`: that reason names the operator's configuration, and a configuration the write path accepted has already been checked.
+
+`primitive webhooks test <webhookId>` signs its preview from the declared configuration, so the headers it returns are ones a real delivery accepts. It answers `400 WEBHOOK_TEST_UNSUPPORTED_CONFIG`, naming the blocking part, when it cannot — reachable from a valid configuration by signing over a header an HTTP client may not set (`Host`, `Content-Length`, …); real deliveries from a provider that sets one itself still verify.
+
+Without the table, `custom` is unchanged: `t=<unix>,v1=<hmac hex>` in `X-Webhook-Signature` over `<t>.<body>`, `X-Webhook-Event-Id` as the external id. Other free-form keys under `[verification.custom]` are untouched.
+
 Both credential references must name app secrets that already exist — a create, an update that changes the config, or an update that switches the webhook onto `plaid` is rejected `400` rather than failing later as a `401`. The check is on the config actually changing (or on the scheme moving onto `plaid`), not on the field being sent: re-pushing an unchanged config on an unchanged scheme is accepted even after a referenced secret has been deleted, so one dead reference does not start failing every later `sync push`. That webhook then fails closed at delivery instead, rejecting with a `401` (`secret_unresolved`).
 
 Every signature check the `jwt` scheme makes applies unchanged. The `jwt` settings `plaid` does not carry are `issuer`, `audience` and `eventIdClaim` — none of them is checked on a plaid delivery, and none may be written into `[verification.plaid]` (see above), so a plaid delivery's `externalEventId` is always the body-hash claim and there is no issuer or audience pinning. On top of those checks come the key-resolution outcomes, which appear on the delivery record as their own `rejectionReason` values:
@@ -1468,7 +1523,7 @@ Every key carries a tag naming which of those it is: `sha256:<hex>` for a digest
 
 One `custom` behavior changes with this: the key is now `sha256:<hex>` of `<t>.<body>`, so the signed timestamp is part of it. A sender that retries the same logical event by **re-signing it with a fresh `t`** — the only retry `toleranceSeconds` lets through, and the normal one for a Stripe-style scheme — now produces a different key and fires the workflow a second time, where it used to be suppressed by the shared `X-Webhook-Event-Id`. That is deliberate (a header the signature does not cover cannot decide anything), but if your `custom` sender retries that way, make the workflow idempotent or move the event id into the signed body.
 
-`github` is the one scheme whose dedup entries **never expire**. GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
+`github` is the one built-in scheme whose dedup entries **never expire** (a declarative `custom` configuration with no `freshness` is the other case, for the same reason). GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
 
 On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_not_active` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
 
@@ -1498,14 +1553,23 @@ The reference is stored and returned verbatim (it carries no secret material), s
 
 Switching a webhook onto a scheme that uses no signing secret **clears** `signingSecret`, `previousSigningSecret` and the rotation timestamp; switching back means supplying a reference again (a bare switch back is rejected naming `signingSecret`).
 
-Every read path reports a derived `signingSecretStatus`:
+Every read path reports a derived `signingSecretStatus` — and, since the same classification applies to the grace slot, a `previousSigningSecretStatus` with the identical four values:
 
 | value | meaning |
 |---|---|
 | `reference` | `signingSecret` holds a whole reference and is returned verbatim |
-| `legacy-literal` | the stored value is a raw secret, from before this field became reference-only: it is never returned and `sync pull` writes no `signingSecret` line, but deliveries still verify with it. Writes are what is blocked — any update to the webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` unless that same update supplies a `{{secrets.KEY}}` reference. (Switching to a scheme with no signing secret also clears the literal, but only if the webhook no longer needs to verify senders — `verificationScheme: "none"` accepts every request, signed or not.) `rotate-secret` always migrates and is never blocked |
-| `malformed-reference` | the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, `{{vars.KEY}}`, `whsec_a{{b`). **Not** a working legacy literal: reference text is public — it round-trips into version-controlled TOML — so it is never used as a signing key, and every signed delivery is already rejected `401` (`rejectionReason: secret_unresolved`, `cause: malformed-reference`). Writes are blocked the same way as `legacy-literal`; the remediation is to store the real signing secret and point the field at it |
+| `legacy-literal` | the stored value is a raw secret, from before this field became reference-only: it is never returned and `sync pull` writes no `signingSecret` line, but deliveries still verify with it. Writes are what is blocked — any update to the webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` unless that same update supplies a `{{secrets.KEY}}` reference. (Switching to a scheme with no signing secret also clears the literal, but only if the webhook no longer needs to verify senders — `verificationScheme: "none"` accepts every request, signed or not.) `rotate-secret` is blocked the same way — rotating would move the raw value into the grace slot, where it would keep verifying while the webhook reported itself as migrated — so migrating a literal is a hard cutover with no overlap window |
+| `malformed-reference` | the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, `{{vars.KEY}}`, `whsec_a{{b`), **or** an otherwise-valid reference carrying an invisible character (a zero-width space, a byte-order mark). **Not** a working legacy literal: reference text is public — it round-trips into version-controlled TOML — so it is never used as a signing key, and every signed delivery is already rejected `401` (`rejectionReason: secret_unresolved`, `cause: malformed-reference`). Writes are blocked the same way as `legacy-literal`; the remediation is to store the real signing secret and point the field at it |
 | `unset` | no signing secret. Normal for `none` / `discord` / `jwt` / `plaid`; on a signing scheme it is an unusable webhook — every signed delivery is rejected `401` (`rejectionReason: signing_secret_unset`), because an empty HMAC key is as forgeable as none at all |
+
+A second, orthogonal axis reports what is *wrong with* a stored value, as `signingSecretHealth` / `previousSigningSecretHealth`:
+
+| value | meaning |
+|---|---|
+| `ok` | nothing known to be wrong. Always the value for a `reference`, a `malformed-reference` (which is never used as a key) and `unset` |
+| `weak-literal` | the stored value is a grandfathered literal shorter than 16 characters — too short to be a strong HMAC key. Advisory only: deliveries verify exactly as before, and the value, its length and any prefix of it are never disclosed |
+
+Branch on "is it `ok`?", not on the list of members: this axis is deliberately open and more members may be added, so an unrecognized value should read as "needs attention".
 
 Resolution **fails closed**: if the reference can't be resolved at delivery (secret deleted, or the platform's secret encryption key unset) the request is rejected `401` (`rejectionReason: secret_unresolved`) rather than verifying against the literal reference text; an unresolvable grace-window `previousSigningSecret` reference is dropped rather than passed to the verifier. A `legacy-literal` value is not a reference and does not fail closed — it is the key itself. A `malformed-reference` value is not a key either, and does fail closed.
 
@@ -1518,7 +1582,9 @@ primitive secrets set STRIPE_WEBHOOK_SECRET_2 --value whsec_new...
 primitive webhooks rotate-secret <webhookId> --secret "{{secrets.STRIPE_WEBHOOK_SECRET_2}}"
 ```
 
-`rotate-secret` requires a scheme that uses a signing secret (`400` otherwise), takes a whole reference to an existing key, moves the previous reference into `previousSigningSecret`, sets the rotation timestamp, and returns the serialized webhook. Rotating onto the key already in use is rejected — it would provide no overlap. The previous reference keeps verifying for `secretGracePeriodMs` (24 hours by default).
+`rotate-secret` requires a scheme that uses a signing secret (`400` otherwise), takes a whole reference to an existing key, moves the previous reference into `previousSigningSecret`, sets the rotation timestamp, and returns the serialized webhook. Rotating onto the key already in use is rejected — it would provide no overlap. It is also rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` while the current slot holds a raw value (`legacy-literal` or `malformed-reference`), so nothing withheld ever reaches the grace slot.
+
+The previous reference keeps verifying for `secretGracePeriodMs` (24 hours by default). That window is bounded at 30 days: a larger value is rejected `400` `SECRET_GRACE_PERIOD_OUT_OF_RANGE` on every write surface, and a webhook that already stores a larger one has it capped at the maximum when a delivery is checked — reads report the capped value, so what you see is what is enforced. `0` cuts over the moment the rotation lands. Re-sending an already-stored over-bound value unchanged is accepted, so `sync push` on a webhook configured before the bound is not broken by it.
 
 Each referenced credential consumes one of the app's 100 secret slots, so an app with many signed webhooks needs one key per webhook.
 
