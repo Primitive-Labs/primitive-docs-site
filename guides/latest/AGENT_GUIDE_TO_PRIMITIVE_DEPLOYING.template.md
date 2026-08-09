@@ -151,7 +151,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you.
+Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you. Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 

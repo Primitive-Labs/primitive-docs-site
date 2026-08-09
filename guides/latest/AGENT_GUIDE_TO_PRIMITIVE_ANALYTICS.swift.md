@@ -81,7 +81,7 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
 
 `analytics.logEventAsync` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
 
-**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. The synchronous members of the same names still exist and still work, so existing code keeps compiling, but they are deprecated and go away in the next major release: they hand the work to a background task and return immediately, so two consecutive calls are not ordered against each other and an event logged just before a synchronous `flush()` may miss *that* batch (it goes out with the next one). Prefer the `Async` members in new code. The same policy covers `AnalyticsContext` — the logger handed to LLM calls, obtained from `getLlmAnalyticsContext()` / `getGeminiAnalyticsContext()`: its `logEvent(_:)` is deprecated in favor of `await logEventAsync(_:)`, and a context constructed without a `logEventAsync:` closure falls back to its synchronous logger.
+**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. Awaiting each call is what orders two consecutive events against each other, and what guarantees an event logged before `flushAsync()` goes out with *that* batch. `AnalyticsContext` — the logger handed to LLM calls, read from `client.llmAnalyticsContext` / `client.geminiAnalyticsContext` — follows the same shape: `await context.logEventAsync(_:)`, taking a `[String: JSONValue]`. A context you construct yourself supplies the synchronous `logEvent:` closure and, optionally, a `logEventAsync:` closure; without the latter, `logEventAsync` falls back to the synchronous one and calls it exactly once.
 
 ### Event with Context
 
@@ -145,7 +145,7 @@ Events are buffered and flushed automatically — including when the WebSocket r
 
 The queue auto-flushes every **100ms** (or earlier when batched). `await client.destroy()` cancels the flush timer and triggers a final flush before storage closes, so you don't need a manual flush on teardown.
 
-`flushAsync()` returns once the batch has actually reached the socket — that is the difference from the deprecated synchronous `flush()`, which returns as soon as the send is scheduled.
+`flushAsync()` returns once the batch has actually reached the socket, so awaiting it is how you know an event went out before whatever follows.
 
 ---
 
@@ -175,9 +175,9 @@ Pass `analyticsAutoEvents` to the constructor. All sub-options default to enable
     analyticsAutoEvents: AnalyticsAutoEventsConfig(
       dailyAuth: true,
       returnActive: true,
-      minResumeMs: 5 * 60 * 1000, // gap before another user_returned fires
+      minResume: 5 * 60, // seconds before another user_returned can fire
       syncErrorsEnabled: true,
-      syncErrorsMinIntervalMs: 30_000,
+      syncErrorsMinInterval: 30,
       blobUploadsStart: false,
       blobUploadsSuccess: true,
       blobUploadsFailure: true,
@@ -186,7 +186,7 @@ Pass `analyticsAutoEvents` to the constructor. All sub-options default to enable
   ))
 ```
 
-`AnalyticsAutoEventsConfig` exposes each toggle as a flat field: `dailyAuth`, `returnActive`, `minResumeMs` (ms before another `user_returned` will fire), `syncErrorsEnabled` + `syncErrorsMinIntervalMs`, `blobUploadsStart` / `blobUploadsSuccess` / `blobUploadsFailure`, and `sessionEnd`.
+`AnalyticsAutoEventsConfig` exposes each toggle as a flat field: `dailyAuth`, `returnActive`, `minResume` (a `TimeInterval` — seconds before another `user_returned` will fire), `syncErrorsEnabled` + `syncErrorsMinInterval` (also seconds), `blobUploadsStart` / `blobUploadsSuccess` / `blobUploadsFailure`, and `sessionEnd`.
 
 ---
 
@@ -330,17 +330,19 @@ Supported `FIELD`s and the `OPERATOR`s each accepts:
 
 Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upgrade`. Unknown fields, unsupported operators, or rejected values are silently dropped.
 
+**At most 10 filter params per request.** `/analytics/events`, `/analytics/events/grouped` and `/analytics/errors/groups` answer `400` — `Too many filters: N. Maximum is 10.` — for anything above that, rather than applying the first ten and dropping the rest. The body carries `code: "FILTER_LIMIT_EXCEEDED"`; **branch on that code, not the message**, which interpolates the submitted count and so cannot be matched literally. The count is over the `filter[…][…]` params you send, so a value that gets rejected by the allowlist still counts, and repeating the same field/operator with different values (each param is ANDed separately) counts once per param.
+
 ### Error groups
 
 `/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
 
-Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span followed by `:` — a quoted *value* that merely precedes a colon, like a filename in `Failed to parse "x.txt": ...`, is still templated), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
+Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span that is followed by `:` *and* sits in JSON object position — after `{` or `,`; a quoted span in prose, like `Failed to parse "x.txt": ...` or `User "alice": not found`, is templated even though it precedes a colon), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED` — but not an uppercase id such as `ABC123XYZ` or `DEADBEEFCAFE`, which are templated), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
 
 Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, `daily` — a per-day `{ day, count }` series (sampling-weighted, ascending, `day` a `YYYY-MM-DD` label) — `first_seen` / `last_seen` (ISO-8601), and an `exemplar`. One call covers the whole window, so "today versus the trailing baseline" needs no rolling store.
 
 **The exemplar is how you identify a group.** `normalized_title` is a grouping key with the variable parts replaced by placeholders; `exemplar` is a raw sample of one real failure — `{ message, action, scope_key, step_id, run_id, at }` — so you can go from a spiking group straight to the run that produced it without paging `/analytics/events`. `step_id` and `run_id` are `null` when the failure had none. The whole object is `null` when no sampled row for that fingerprint carried a sample: events written before the exemplar shipped carry none, and a very noisy group can consume the sampling budget and leave a quieter one without one. Treat `exemplar: null` as a normal result, not an error.
 
-**One failure, one group.** A failed step's error is echoed onto the run that it failed, so the run-level event is suppressed when its folded message equals the attributed failed step's — the group is the `workflow_step` one. A run that failed for its own reason (output-schema validation, a launch failure with no step to attribute) still gets its `workflow_run` group. A setup-phase abort is attributed to the synthesized `__setup__` step, so it appears under `source: workflow_step`, `step_id: __setup__` and is **not** returned by a `source is workflow_run` filter.
+**One failure, one group.** A failed step's error is echoed onto the run that it failed, so the run-level event is suppressed when the run's raw error — with only the appended `Caused by:` chain removed — is identical to the attributed failed step's; the group is the `workflow_step` one. The comparison is on the raw text, not the normalized title, so a run that failed with a genuinely different error still gets its own group even when the two normalize alike. A run that failed for its own reason (output-schema validation, a launch failure with no step to attribute) still gets its `workflow_run` group. A setup-phase abort is attributed to the synthesized `__setup__` step, so it appears under `source: workflow_step`, `step_id: __setup__` and is **not** returned by a `source is workflow_run` filter.
 
 `status_class` is populated for a workflow failure whose message embeds a status (`{"error":{"code":503,…}}` → `5xx`); integration failures keep the real HTTP status class, including `transport`, which no message text can express.
 

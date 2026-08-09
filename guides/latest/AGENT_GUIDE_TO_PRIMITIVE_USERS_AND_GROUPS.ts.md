@@ -70,7 +70,9 @@ Primitive provides a built-in user model that every app should leverage. **Do no
 | `appId` | string | The app the user belongs to |
 | `addedAt` | string \| undefined | When the user joined the app |
 
-`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`: `refreshNetwork` (bypass cache once), `refreshIfOlderThanMs`, `waitForLoad` (`"local" | "network" | "localIfAvailableElseNetwork"`), `serverTimeoutMs`.
+`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`.
+
+Its fields: `refreshNetwork` and `refreshIfOlderThanMs` (both refresh *behind* the cached value, so the call returns straight away and the *next* read is current), `waitForLoad` (`"local" | "network" | "localIfAvailableElseNetwork"`), `serverTimeoutMs`. Use `waitForLoad: "network"` when the call must wait for fresh server data.
 
 ### Supplementing user data — not replacing it
 
@@ -160,7 +162,7 @@ The current authenticated user has its own namespace. Use it for "me"-scoped rea
   const profile = await client.me.get({
     waitForLoad: "localIfAvailableElseNetwork", // | "local" | "network"
     refreshIfOlderThanMs: 60_000, // default is 5 minutes
-    refreshNetwork: true, // bypass the cache once
+    refreshNetwork: true, // refresh behind the cached value
     serverTimeoutMs: 5_000,
   });
 

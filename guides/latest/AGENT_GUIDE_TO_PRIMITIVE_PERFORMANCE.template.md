@@ -590,6 +590,7 @@ final class SourceStore: ObservableObject {
   @Published private(set) var source: SourceData?
   private var loadedAt: Date?
   private var inFlight: Task<SourceData, Error>?
+  private var subscription: EventSubscription?
 
   func ensureLoaded() async throws -> SourceData {
     if let source { return source }
@@ -605,17 +606,17 @@ final class SourceStore: ObservableObject {
   func invalidate() { source = nil }
 
   // Wire up DB subscribe once on first use. `subscribe` takes the database id,
-  // a server-registered subscription key, and an options object carrying the
-  // `onChange` callback (plus any `params` forwarded to the subscription's
-  // filter CEL).
+  // a server-registered subscription key, an options value (any `params` are
+  // forwarded to the subscription's filter CEL), and the change callback as a
+  // trailing @Sendable closure. Store the returned EventSubscription: the
+  // subscription ends when the handle is released.
   func observe(dbId: String) throws {
-    _ = try client.databases.subscribe(
+    subscription = try client.databases.subscribe(
       databaseId: dbId,
-      subscriptionKey: "source-changes",
-      options: DatabaseSubscribeOptions(onChange: { [weak self] _ in
-        self?.invalidate()
-      })
-    )
+      subscriptionKey: "source-changes"
+    ) { [weak self] _ in
+      Task { @MainActor in self?.invalidate() }
+    }
   }
 }
 ```

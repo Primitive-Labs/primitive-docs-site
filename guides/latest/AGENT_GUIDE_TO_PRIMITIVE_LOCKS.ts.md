@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Locks
 
-A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a `ttlMs` duration; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
+A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
 
 ## Client SDK Reference
 
@@ -17,7 +17,7 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 
 ### Acquire and release
 
-`acquire` blocks; `timeoutMs` bounds the wait, `ttlMs` sizes the lease. Always release, including on a thrown step:
+`acquire` blocks; the acquire timeout bounds the wait and the TTL sizes the lease. Always release, including on a thrown step:
 
 ```typescript
   const handle = await client.locks
@@ -71,7 +71,7 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 
 ## Sizing the Lease
 
-**The lease does not renew itself.** Size `ttlMs` to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous `ttlMs` or call `renew(handle, { ttlMs })` before the current lease expires. `renew` returning `{ renewed: false, reason: "lease_lost" }` means the lease already lapsed and the key changed hands — stop and re-acquire.
+**The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
 
 ## CLI
 
@@ -146,4 +146,4 @@ A run-scoped lock is honored on **every** execution path: the durable path, `syn
 
 ## Rate Limiting
 
-Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within `timeoutMs` and raises the acquire timeout if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.
+Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within the acquire timeout and raises the acquire-timeout error if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.

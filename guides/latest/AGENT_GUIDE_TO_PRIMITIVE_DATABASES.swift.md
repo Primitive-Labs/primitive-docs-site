@@ -363,13 +363,23 @@ primitive database-types list | get <type> | delete <type> | operations list <ty
 primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
 primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
+# Run a registered operation. Under --json the printed shape is the operation's
+# own: a query — and a pipeline whose returnField names a query step — prints
+# the CLI's list envelope `{ items, hasMore, nextCursor? }`, the same shape as
+# `records query --json`. Everything else prints unchanged: count → {count},
+# aggregate → {result}, mutation → {results}, applyToQuery → {matched,
+# affected, failed, …}, and a `returnField = "all"` pipeline → {steps:{…}} with
+# each step's own keys untouched. --timing adds _timing alongside either shape.
+primitive databases operations execute <id> <op-name> [--params '{...}'] [--limit <n>] [--cursor <c>] [--token <jwt>] [--timing]
+
 # Admin record introspection. `get` on a missing id prints null at exit 0 — a
 # miss is not an error. Every --filter below also accepts --filter-file <path>
 # (JSON or TOML). `query --json` prints the CLI's list envelope,
 # `{ items, hasMore, nextCursor? }` — the same shape as `documents records
 # query`. Without --group-by, aggregate covers the whole model: the human view
-# prints one number, but --json returns an object keyed by the operation
-# ({"count":2}, {"sum_age":60}).
+# prints one number, but --json returns the { result } envelope with the inner
+# object keyed by the operation ({"result":{"count":2}},
+# {"result":{"sum_age":60}}).
 primitive databases records models <id>
 primitive databases records describe <id> <model-name>
 primitive databases records query <id> <model-name> --filter '{"status":"open"}'
@@ -383,6 +393,22 @@ primitive databases records aggregate <id> <model-name> --op avg --field price [
 # removes the key, `patch` stores the value null.
 primitive databases records save <id> <model-name> [record-id] --data '{"status":"open"}'
 primitive databases records patch <id> <model-name> <record-id> --data '{"status":"closed"}'
+
+# Atomic multi-model operations blob — the same file `documents records bulk`
+# takes: { "operations": [{ "model", "action": "create"|"patch"|"delete",
+# "id", "data", "precondition"? }, ...] }. All-or-nothing; reports the same
+# { applied, added, updated, deleted } summary. `create` is a strict create on
+# both surfaces (an existing id fails the batch), and a `precondition` that
+# does not hold rolls the whole batch back. A `null` in a precondition means
+# "present and holding null" on both surfaces — an absent field does not
+# satisfy it. Here a precondition value must be a string or a number other
+# than 0/1: a database compares JSON booleans as 1/0, so `true` cannot be told
+# apart from the number 1, and the CLI rejects those values instead of
+# checking a weaker guard than you wrote (the documents twin compares in JS
+# and accepts them). One reading differs from the
+# documents twin: `deleted` counts delete operations applied (a database delete
+# reports no rows-affected), not records that existed.
+primitive databases records bulk <id> --data-file ops.json -y
 
 # Data migration (records + indexes + constraints; type config excluded — run sync push on target first)
 primitive databases export <id> --output ./out
@@ -1589,8 +1615,7 @@ Databases push changes to connected clients over WebSocket. A subscription answe
 - The **writer's connection** is excluded from fanout, not the writer's **user**. Another connection of the same user (e.g. another tab) still receives the change. Use `isOrigin` / `isOriginUser` to suppress optimistic echoes.
 - Subscriptions require both `access` and `filter` CEL. `access` is checked once at subscribe time with full user/membership context; `filter` runs per change with a narrow context (no memberships, no `database.*`).
 - There is **no replay on reconnect** — the client auto re-issues the subscription, but changes missed while disconnected are gone. Re-load if you need consistency.
-- `subscribe()` returns an `unsub()` function — there is **no** event-emitter API (`.on()` / `.unsubscribe()`). Call `unsub()` on teardown or you leak `ConnectionMapping` rows and dead callbacks.
-
+- `subscribe()` returns an `EventSubscription` — there is **no** event-emitter API (`.on()` / `.unsubscribe()`). Hold it for as long as you want changes and `cancel()` it on teardown; releasing the handle unsubscribes, and holding one past teardown leaks a `ConnectionMapping` row and a live callback.
 ### Registering a subscription
 
 Subscriptions can be managed via TOML config files with `primitive sync push` (recommended) or via the admin HTTP API at `/databases/types/<databaseType>/subscriptions`.
@@ -1697,71 +1722,80 @@ The two phases see different contexts:
 
 ### Subscribing from the client
 
-`subscribe()` returns an `unsub()` function (synchronously). There is no event-emitter API.
+`subscribe()` returns synchronously. There is no event-emitter API.
+
+It returns an `EventSubscription`. **Hold it for as long as you want changes:** the handle unsubscribes when it is released, so a subscription assigned to `_` or dropped at the end of a function stops delivering immediately. `cancel()` ends it early and is idempotent.
+
+The change callback is a trailing `@Sendable` closure, not a field on the options — it runs on the WebSocket delivery thread, so hop to an actor (usually the main actor) before touching UI state. `DatabaseSubscribeOptions` carries only `params: [String: JSONValue]?`.
 
 ```swift
-  let unsub = try client.databases.subscribe(
+  // The change callback is `@Sendable`: it runs on the WebSocket delivery
+  // thread, not the caller's.
+  let subscription = try client.databases.subscribe(
     databaseId: databaseId,
-    subscriptionKey: "my-open-tickets",
-    options: DatabaseSubscribeOptions(onChange: { event in
-      // event.originConnectionId, event.originUserId, event.isOrigin, event.isOriginUser
-      if event.isOrigin {
-        // This same tab wrote it — the UI is already updated optimistically.
-        return
-      }
-      for change in event.changes {
-        // change.changeType: "enter" | "update" | "leave"
-        // change.op decides the shape of change.data (all subject to `select`):
-        //   "save"  → the full row                     "delete" → nil
-        //   "patch" → the patched fields' new values
-        //   "increment" / "addToSet" / "removeFromSet" → the op input
-        //     (amounts / values added or removed), NOT the resulting values —
-        //     derive those from previousData (the pre-write row).
-        if change.op == "delete" {
-          removeTicket(change.id)
-        } else if change.op == "save" {
-          replaceTicket(change.id, change.data)
-        } else if change.op == "patch" {
-          // Merge — assigning change.data would blank every untouched field.
-          mergeTicket(change.id, change.data as? [String: Any] ?? [:])
-        } else {
-          // increment / addToSet / removeFromSet: compute each field's new value.
-          let prev = change.previousData as? [String: Any] ?? [:]
-          var resolved: [String: Any] = [:]
-          for (field, input) in change.data as? [String: Any] ?? [:] {
-            if change.op == "increment" {
-              resolved[field] = (prev[field] as? Double ?? 0) + (input as? Double ?? 0)
-            } else {
-              let current = prev[field] as? [String] ?? []
-              let values = input as? [String] ?? []
-              resolved[field] = change.op == "addToSet"
+    subscriptionKey: "my-open-tickets"
+  ) { event in
+    // event.originConnectionId, event.originUserId, event.isOrigin, event.isOriginUser
+    if event.isOrigin {
+      // This same tab wrote it — the UI is already updated optimistically.
+      return
+    }
+    for change in event.changes {
+      // change.changeType: "enter" | "update" | "leave"
+      // change.op decides the shape of change.data (all subject to `select`):
+      //   "save"  → the full row                     "delete" → nil
+      //   "patch" → the patched fields' new values
+      //   "increment" / "addToSet" / "removeFromSet" → the op input
+      //     (amounts / values added or removed), NOT the resulting values —
+      //     derive those from previousData (the pre-write row).
+      // change.data is an untyped JSON graph — convert it once to a typed row.
+      let data = (change.data as? [String: Any])
+        .flatMap { try? JSONValue.typedRow(from: $0) } ?? [:]
+      if change.op == "delete" {
+        removeTicket(change.id)
+      } else if change.op == "save" {
+        replaceTicket(change.id, data)
+      } else if change.op == "patch" {
+        // Merge — assigning change.data would blank every untouched field.
+        mergeTicket(change.id, data)
+      } else {
+        // increment / addToSet / removeFromSet: compute each field's new value.
+        let prev = (change.previousData as? [String: Any])
+          .flatMap { try? JSONValue.typedRow(from: $0) } ?? [:]
+        var resolved: [String: JSONValue] = [:]
+        for (field, input) in data {
+          if change.op == "increment" {
+            resolved[field] = .number((prev[field]?.numberValue ?? 0) + (input.numberValue ?? 0))
+          } else {
+            let current = prev[field]?.arrayValue ?? []
+            let values = input.arrayValue ?? []
+            resolved[field] = .array(
+              change.op == "addToSet"
                 ? current + values.filter { !current.contains($0) }
                 : current.filter { !values.contains($0) }
-            }
+            )
           }
-          mergeTicket(change.id, resolved)
         }
+        mergeTicket(change.id, resolved)
       }
-    })
-  )
+    }
+  }
 
-  // Return the teardown handle — call it on unmount to stop receiving deltas.
-  return unsub
+  // Hold the handle for as long as you want changes: releasing it
+  // unsubscribes. Call cancel() to stop the deltas early.
+  return subscription
 ```
 
 Parameterized:
 
 ```swift
-  let unsub = try client.databases.subscribe(
+  let subscription = try client.databases.subscribe(
     databaseId: databaseId,
     subscriptionKey: "tickets-by-team",
-    options: DatabaseSubscribeOptions(
-      params: ["teamId": "eng"],
-      onChange: { event in
-        for change in event.changes { handleChange(change) }
-      }
-    )
-  )
+    options: DatabaseSubscribeOptions(params: ["teamId": "eng"])
+  ) { event in
+    for change in event.changes { handleChange(change) }
+  }
 ```
 
 The client auto-reissues `db.subscribe` on WebSocket reconnect — no app code needed.
@@ -1769,15 +1803,18 @@ The client auto-reissues `db.subscribe` on WebSocket reconnect — no app code n
 #### Wrong
 
 ```swift
-// WRONG — there is no event-emitter. `subscribe` takes an `onChange` closure
-// and returns an unsub function (`() -> Void`) synchronously; the returned
-// handle has no `.on(...)` / `.unsubscribe()`.
-let unsub = try client.databases.subscribe(databaseId: databaseId, subscriptionKey: "my-open-tickets", options: opts)
-unsub.on("change", handler)   // ✗ unsub is a function, not an emitter
+// WRONG — there is no event-emitter. `subscribe` takes a trailing @Sendable
+// closure and returns an `EventSubscription` synchronously; the handle has
+// only `cancel()`, no `.on(...)` / `.unsubscribe()`.
+let sub = try client.databases.subscribe(databaseId: databaseId, subscriptionKey: "my-open-tickets") { event in render(event) }
+sub.on("change", handler)   // ✗ EventSubscription is not an emitter
 
-// WRONG — onChange receives a DatabaseChangePayload envelope whose `changes`
-// is an array, not a single record. Iterate `event.changes`.
-DatabaseSubscribeOptions(onChange: { event in render(event) })
+// WRONG — dropping the handle unsubscribes. Store it for the view's lifetime.
+_ = try client.databases.subscribe(databaseId: databaseId, subscriptionKey: "my-open-tickets") { event in render(event) }
+
+// WRONG — the callback receives a DatabaseChangePayload envelope whose
+// `changes` is an array, not a single record. Iterate `event.changes`.
+try client.databases.subscribe(databaseId: databaseId, subscriptionKey: k) { event in render(event) }
 
 // WRONG — in the subscription's filter CEL, record payload fields are nested
 // under `record.data`, not spread on `record`.
@@ -1788,7 +1825,7 @@ filter: "record.data.assigneeId == user.userId"
 
 ### Change envelope shape
 
-The `onChange` closure receives a `DatabaseChangePayload`; each element of its `changes` array is a `DatabaseChangeEvent`. `op` and `changeType` are plain `String`s; `data` / `previousData` are opaque record blobs typed `Any?`.
+The change closure receives a `DatabaseChangePayload`; each element of its `changes` array is a `DatabaseChangeEvent`. `op` and `changeType` are plain `String`s; `data` / `previousData` are opaque record blobs typed `Any?` — convert one to a typed row with `JSONValue.typedRow(from:)` before handing it across an actor boundary.
 
 ```swift
 public struct DatabaseChangePayload {
@@ -1846,7 +1883,7 @@ On WS reconnect the local connection id rotates, so a frame for the writer's own
 
 ### Reconnect & cleanup behavior
 
-- The WS client persists the registry of `(databaseId, subscriptionKey, params, onChange)` tuples and re-issues `db.subscribe` automatically when the socket reopens. No app code needed.
+- The WS client persists the registry of `(databaseId, subscriptionKey, params, change handler)` tuples and re-issues `db.subscribe` automatically when the socket reopens. No app code needed.
 - **No replay** of changes that occurred while disconnected. If you need consistency on reconnect, re-run your initial-load query.
 - The writer's connection is excluded from broadcast via `excludeConnectionId`. The writer's user is NOT excluded — other tabs/devices of the same user receive the change.
 - Auth refresh that does NOT require a hard reconnect leaves subscriptions intact. A hard reconnect re-runs the registry pass (so `access` is re-evaluated against the current user/memberships).
@@ -1855,67 +1892,104 @@ On WS reconnect the local connection id rotates, so a frame for the writer's own
 ### Canonical Pattern: Load + Subscribe
 
 ```swift
-  // Loaded rows arrive as JSONValue, subscription deltas as [String: Any] —
-  // normalize to one representation so deltas can merge into loaded rows.
-  let rowDictionary: (JSONValue) -> [String: Any] = { value in
-    guard let data = try? JSONEncoder().encode(value) else { return [:] }
-    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+// The subscribe callback is `@Sendable` — it runs on the WebSocket delivery
+// thread, not the caller's — so the row cache lives on the main actor and every
+// delta hops to it before the UI reads it.
+@MainActor
+final class LiveTicketCache {
+  private var byId: [String: [String: JSONValue]] = [:]
+  private let render: ([[String: JSONValue]]) -> Void
+
+  init(render: @escaping ([[String: JSONValue]]) -> Void) {
+    self.render = render
   }
+
+  func load(_ rows: [JSONValue]) {
+    for row in rows {
+      guard let id = row["id"]?.stringValue, let fields = row.objectValue else { continue }
+      byId[id] = fields
+    }
+    render(Array(byId.values))
+  }
+
+  func apply(_ changes: [DatabaseChangeEvent]) {
+    for change in changes {
+      if change.op == "delete" {
+        byId.removeValue(forKey: change.id)
+        continue
+      }
+      // change.data is an untyped JSON graph — convert it once to a typed row.
+      let data = (change.data as? [String: Any])
+        .flatMap { try? JSONValue.typedRow(from: $0) } ?? [:]
+      if change.op == "save" {
+        // save delivers the full row.
+        byId[change.id] = data
+        continue
+      }
+      // On a cache miss (the write brought the row into the filter set),
+      // the pre-write row in previousData supplies the base.
+      let previous = (change.previousData as? [String: Any])
+        .flatMap { try? JSONValue.typedRow(from: $0) } ?? [:]
+      var row = byId[change.id] ?? previous
+      for (field, input) in data {
+        if change.op == "patch" {
+          // patch delivers the patched fields' new values — merge them;
+          // assigning change.data would blank the rest.
+          row[field] = input
+        } else if change.op == "increment" {
+          // increment delivers the amounts, not the results — add them.
+          row[field] = .number((row[field]?.numberValue ?? 0) + (input.numberValue ?? 0))
+        } else {
+          // addToSet / removeFromSet deliver the values added or removed —
+          // union or subtract against the current set.
+          let current = row[field]?.arrayValue ?? []
+          let values = input.arrayValue ?? []
+          row[field] = .array(
+            change.op == "addToSet"
+              ? current + values.filter { !current.contains($0) }
+              : current.filter { !values.contains($0) }
+          )
+        }
+      }
+      byId[change.id] = row
+    }
+    render(Array(byId.values))
+  }
+}
+
+// Canonical real-time pattern: load the full current state once with a regular
+// operation, then subscribe for deltas. Keep the operation's filter and the
+// subscription's filter semantically equivalent so the UI doesn't flicker.
+@MainActor
+func liveTickets(
+  client: JsBaoClient,
+  databaseId: String,
+  render: @escaping ([[String: JSONValue]]) -> Void
+) async throws -> EventSubscription {
+  let cache = LiveTicketCache(render: render)
 
   // 1. Initial load — full current state.
   let loaded = try await client.databases.executeOperation(
     databaseId: databaseId, name: "list-my-open-tickets"
   )
-  var byId: [String: [String: Any]] = [:]
-  for ticket in loaded["data"]?.arrayValue ?? [] {
-    if let id = ticket["id"]?.stringValue { byId[id] = rowDictionary(ticket) }
-  }
-  render(Array(byId.values))
+  cache.load(loaded["data"]?.arrayValue ?? [])
 
   // 2. Subscribe for delta updates.
-  let unsub = try client.databases.subscribe(
+  let subscription = try client.databases.subscribe(
     databaseId: databaseId,
-    subscriptionKey: "my-open-tickets",
-    options: DatabaseSubscribeOptions(onChange: { event in
-      for change in event.changes {
-        if change.op == "delete" {
-          byId.removeValue(forKey: change.id)
-          continue
-        }
-        if change.op == "save" {
-          // save delivers the full row.
-          byId[change.id] = change.data as? [String: Any] ?? [:]
-          continue
-        }
-        // On a cache miss (the write brought the row into the filter set),
-        // the pre-write row in previousData supplies the base.
-        var row = byId[change.id] ?? change.previousData as? [String: Any] ?? [:]
-        for (field, input) in change.data as? [String: Any] ?? [:] {
-          if change.op == "patch" {
-            // patch delivers the patched fields' new values — merge them;
-            // assigning change.data would blank the rest.
-            row[field] = input
-          } else if change.op == "increment" {
-            // increment delivers the amounts, not the results — add them.
-            row[field] = (row[field] as? Double ?? 0) + (input as? Double ?? 0)
-          } else {
-            // addToSet / removeFromSet deliver the values added or removed —
-            // union or subtract against the current set.
-            let current = row[field] as? [String] ?? []
-            let values = input as? [String] ?? []
-            row[field] = change.op == "addToSet"
-              ? current + values.filter { !current.contains($0) }
-              : current.filter { !values.contains($0) }
-          }
-        }
-        byId[change.id] = row
-      }
-      render(Array(byId.values))
-    })
-  )
+    subscriptionKey: "my-open-tickets"
+  ) { event in
+    let changes = event.changes
+    // Spelled `_Concurrency.Task` because a generated model named `Task` would
+    // otherwise shadow it — which is easy to hit, since `tasks` is a common
+    // model name.
+    _Concurrency.Task { @MainActor in cache.apply(changes) }
+  }
 
-  // 3. Return teardown — call this on unmount.
-  return unsub
+  // 3. Hold the subscription for as long as the screen is live — releasing it
+  //    unsubscribes.
+  return subscription
+}
 ```
 
 Make the initial-load operation's filter and the subscription's `filter` semantically equivalent. If they diverge, the UI will flicker (records the operation returned but the subscription never updates, or vice versa).
@@ -1929,8 +2003,7 @@ There is no built-in "reconnected" callback. To re-run the initial load after a 
 3. **In `filter`, record fields live under `record.data.*`** — not `record.<fieldName>`. Only `record.modelName`, `record.op`, `record.id` are top-level.
 4. **Writer's connection is excluded server-side, not the writer's user.** Another connection of the same user (e.g. another tab) still receives the change. Use `isOrigin` / `isOriginUser` to suppress optimistic echoes.
 5. **No replay on reconnect.** Re-query on reconnect; the server does not buffer missed changes.
-6. **`unsub()` leaks if not called.** Each `subscribe()` returns an `unsub` function. Call it on view teardown or you accumulate `ConnectionMapping` rows and dead callbacks.
-7. **Workflow mutations fan out too.** A `database.mutate` step wakes up every matching subscription. Workflow/cron writes arrive with `originConnectionId: null` / `originUserId: null` and both `isOrigin` flags `false`.
+6.**Store the `EventSubscription` for the view's lifetime.** Releasing the handle unsubscribes, so a subscription you don't hold stops delivering right away; one you hold past teardown keeps a `ConnectionMapping` row and a live callback until you `cancel()` it.7. **Workflow mutations fan out too.** A `database.mutate` step wakes up every matching subscription. Workflow/cron writes arrive with `originConnectionId: null` / `originUserId: null` and both `isOrigin` flags `false`.
 8. **`select` is privacy-affecting.** Fields not listed never leave the server. Use it instead of trying to scrub fields client-side.
 
 ### Anti-patterns
@@ -1942,9 +2015,8 @@ There is no built-in "reconnected" callback. To re-run the initial load after a 
 - Sending the body field `accessRule` to the HTTP API — the wire-format field name is `access`.
 - Assuming the writer's own mutation comes back through THEIR subscription on the SAME connection — it doesn't. (Other connections of the same user DO receive it.)
 - Relying on replay after disconnect. There is none. Re-load if you need consistency.
-- Forgetting to call the returned `unsub()`. Leaks `ConnectionMapping` rows and registry entries.
-- Subscribing on every render. Subscribe once per view, unsub on unmount.
-- Creating >20 subscriptions per database type. Consolidate.
+- Discarding the returned `EventSubscription` (assigning it to `_`, or letting it go out of scope). The subscription ends the moment the handle is released.
+- Subscribing on every render. Subscribe once per view and hold the handle; `cancel()` it on teardown.- Creating >20 subscriptions per database type. Consolidate.
 
 ### Debugging subscriptions
 

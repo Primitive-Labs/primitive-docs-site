@@ -834,7 +834,7 @@ tab.
 ## Performance
 
 A live chronological timeline of every document-level phase event the inspector
-has seen — `loadedFromSqlite`, `loadedFromServer`, `synced`, `remoteUpdate`,
+has seen — `loadedFromSqlite`, `loadedFromServer`, `synced`, `syncStateChanged`,
 `closed` — with plain-English labels. Summary cards totalize on-disk vs server
 volume and timing. The whole view derives from the continuous event stream, so new
 events appear the instant they arrive; a filter-by-doc dropdown isolates one
@@ -883,7 +883,7 @@ row counts pre/post checkpoint). If the tab looks blank, diag says why — typic
 
 ## Events
 
-The full live event stream from `client.events` as a filterable log: pause,
+The full live client event stream as a filterable log: pause,
 auto-scroll, filter-by-type, text filter. The stream is captured continuously (not
 tab-gated), so switching back to this tab shows you didn't miss anything.
 

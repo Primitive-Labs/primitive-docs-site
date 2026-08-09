@@ -38,7 +38,14 @@ Primitive provides a built-in user model that every app should leverage. **Do no
 | `appId` | string | The app the user belongs to |
 | `addedAt` | string \| undefined | When the user joined the app |
 
-`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`: `refreshNetwork` (bypass cache once), `refreshIfOlderThanMs`, `waitForLoad` (`"local" | "network" | "localIfAvailableElseNetwork"`), `serverTimeoutMs`.
+`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`.
+
+{{#lang ts}}
+Its fields: `refreshNetwork` and `refreshIfOlderThanMs` (both refresh *behind* the cached value, so the call returns straight away and the *next* read is current), `waitForLoad` (`"local" | "network" | "localIfAvailableElseNetwork"`), `serverTimeoutMs`. Use `waitForLoad: "network"` when the call must wait for fresh server data.
+{{/lang}}
+{{#lang swift}}
+Its fields: `refreshNetwork` and `refreshIfOlderThan` (both refresh *behind* the cached value, so the call returns straight away and the *next* read is current), `waitForLoad` (a `WaitForLoadMode`: `.local`, `.network`, `.localIfAvailableElseNetwork`), `serverTimeout`. The two durations are `TimeInterval`s in seconds. Use `waitForLoad: .network` when the call must wait for fresh server data.
+{{/lang}}
 
 ### Supplementing user data — not replacing it
 

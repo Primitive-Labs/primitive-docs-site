@@ -363,13 +363,23 @@ primitive database-types list | get <type> | delete <type> | operations list <ty
 primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
 primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
+# Run a registered operation. Under --json the printed shape is the operation's
+# own: a query — and a pipeline whose returnField names a query step — prints
+# the CLI's list envelope `{ items, hasMore, nextCursor? }`, the same shape as
+# `records query --json`. Everything else prints unchanged: count → {count},
+# aggregate → {result}, mutation → {results}, applyToQuery → {matched,
+# affected, failed, …}, and a `returnField = "all"` pipeline → {steps:{…}} with
+# each step's own keys untouched. --timing adds _timing alongside either shape.
+primitive databases operations execute <id> <op-name> [--params '{...}'] [--limit <n>] [--cursor <c>] [--token <jwt>] [--timing]
+
 # Admin record introspection. `get` on a missing id prints null at exit 0 — a
 # miss is not an error. Every --filter below also accepts --filter-file <path>
 # (JSON or TOML). `query --json` prints the CLI's list envelope,
 # `{ items, hasMore, nextCursor? }` — the same shape as `documents records
 # query`. Without --group-by, aggregate covers the whole model: the human view
-# prints one number, but --json returns an object keyed by the operation
-# ({"count":2}, {"sum_age":60}).
+# prints one number, but --json returns the { result } envelope with the inner
+# object keyed by the operation ({"result":{"count":2}},
+# {"result":{"sum_age":60}}).
 primitive databases records models <id>
 primitive databases records describe <id> <model-name>
 primitive databases records query <id> <model-name> --filter '{"status":"open"}'
@@ -383,6 +393,22 @@ primitive databases records aggregate <id> <model-name> --op avg --field price [
 # removes the key, `patch` stores the value null.
 primitive databases records save <id> <model-name> [record-id] --data '{"status":"open"}'
 primitive databases records patch <id> <model-name> <record-id> --data '{"status":"closed"}'
+
+# Atomic multi-model operations blob — the same file `documents records bulk`
+# takes: { "operations": [{ "model", "action": "create"|"patch"|"delete",
+# "id", "data", "precondition"? }, ...] }. All-or-nothing; reports the same
+# { applied, added, updated, deleted } summary. `create` is a strict create on
+# both surfaces (an existing id fails the batch), and a `precondition` that
+# does not hold rolls the whole batch back. A `null` in a precondition means
+# "present and holding null" on both surfaces — an absent field does not
+# satisfy it. Here a precondition value must be a string or a number other
+# than 0/1: a database compares JSON booleans as 1/0, so `true` cannot be told
+# apart from the number 1, and the CLI rejects those values instead of
+# checking a weaker guard than you wrote (the documents twin compares in JS
+# and accepts them). One reading differs from the
+# documents twin: `deleted` counts delete operations applied (a database delete
+# reports no rows-affected), not records that existed.
+primitive databases records bulk <id> --data-file ops.json -y
 
 # Data migration (records + indexes + constraints; type config excluded — run sync push on target first)
 primitive databases export <id> --output ./out
@@ -1626,7 +1652,6 @@ Databases push changes to connected clients over WebSocket. A subscription answe
 - Subscriptions require both `access` and `filter` CEL. `access` is checked once at subscribe time with full user/membership context; `filter` runs per change with a narrow context (no memberships, no `database.*`).
 - There is **no replay on reconnect** — the client auto re-issues the subscription, but changes missed while disconnected are gone. Re-load if you need consistency.
 - `subscribe()` returns an `unsub()` function — there is **no** event-emitter API (`.on()` / `.unsubscribe()`). Call `unsub()` on teardown or you leak `ConnectionMapping` rows and dead callbacks.
-
 ### Registering a subscription
 
 Subscriptions can be managed via TOML config files with `primitive sync push` (recommended) or via the admin HTTP API at `/databases/types/<databaseType>/subscriptions`.
@@ -1729,7 +1754,9 @@ The two phases see different contexts:
 
 ### Subscribing from the client
 
-`subscribe()` returns an `unsub()` function (synchronously). There is no event-emitter API.
+`subscribe()` returns synchronously. There is no event-emitter API.
+
+It returns an `unsub()` function — call it to stop receiving changes.
 
 ```typescript
   const unsub = client.databases.subscribe(databaseId, "my-open-tickets", {
@@ -1871,7 +1898,7 @@ On WS reconnect the local connection id rotates, so a frame for the writer's own
 
 ### Reconnect & cleanup behavior
 
-- The WS client persists the registry of `(databaseId, subscriptionKey, params, onChange)` tuples and re-issues `db.subscribe` automatically when the socket reopens. No app code needed.
+- The WS client persists the registry of `(databaseId, subscriptionKey, params, change handler)` tuples and re-issues `db.subscribe` automatically when the socket reopens. No app code needed.
 - **No replay** of changes that occurred while disconnected. If you need consistency on reconnect, re-run your initial-load query.
 - The writer's connection is excluded from broadcast via `excludeConnectionId`. The writer's user is NOT excluded — other tabs/devices of the same user receive the change.
 - Auth refresh that does NOT require a hard reconnect leaves subscriptions intact. A hard reconnect re-runs the registry pass (so `access` is re-evaluated against the current user/memberships).
@@ -1950,8 +1977,7 @@ There is no built-in "reconnected" callback. If you need to re-run the initial l
 3. **In `filter`, record fields live under `record.data.*`** — not `record.<fieldName>`. Only `record.modelName`, `record.op`, `record.id` are top-level.
 4. **Writer's connection is excluded server-side, not the writer's user.** Another connection of the same user (e.g. another tab) still receives the change. Use `isOrigin` / `isOriginUser` to suppress optimistic echoes.
 5. **No replay on reconnect.** Re-query on reconnect; the server does not buffer missed changes.
-6. **`unsub()` leaks if not called.** Each `subscribe()` returns an `unsub` function. Call it on view teardown or you accumulate `ConnectionMapping` rows and dead callbacks.
-7. **Workflow mutations fan out too.** A `database.mutate` step wakes up every matching subscription. Workflow/cron writes arrive with `originConnectionId: null` / `originUserId: null` and both `isOrigin` flags `false`.
+6.**`unsub()` leaks if not called.** Each `subscribe()` returns an `unsub` function. Call it on view teardown or you accumulate `ConnectionMapping` rows and dead callbacks.7. **Workflow mutations fan out too.** A `database.mutate` step wakes up every matching subscription. Workflow/cron writes arrive with `originConnectionId: null` / `originUserId: null` and both `isOrigin` flags `false`.
 8. **`select` is privacy-affecting.** Fields not listed never leave the server. Use it instead of trying to scrub fields client-side.
 
 ### Anti-patterns
@@ -1964,8 +1990,7 @@ There is no built-in "reconnected" callback. If you need to re-run the initial l
 - Assuming the writer's own mutation comes back through THEIR subscription on the SAME connection — it doesn't. (Other connections of the same user DO receive it.)
 - Relying on replay after disconnect. There is none. Re-load if you need consistency.
 - Forgetting to call the returned `unsub()`. Leaks `ConnectionMapping` rows and registry entries.
-- Subscribing on every render. Subscribe once per view, unsub on unmount.
-- Creating >20 subscriptions per database type. Consolidate.
+- Subscribing on every render. Subscribe once per view, unsub on unmount.- Creating >20 subscriptions per database type. Consolidate.
 
 ### Debugging subscriptions
 

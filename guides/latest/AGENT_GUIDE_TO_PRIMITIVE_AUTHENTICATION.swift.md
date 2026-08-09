@@ -285,6 +285,8 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
 
 The same `AuthError` codes apply to `magicLinkRequest`/`magicLinkVerify`.
 
+**Don't sign the user out on every failed call.** When a request gets a 401 the client refreshes the token and retries. If the refresh itself can't reach the server, the call no longer fails as an HTTP 401 — it fails as a transport error carrying no HTTP status, because that is a transient outage rather than a rejected credential. Retry it instead of clearing the session. Only a refresh the server actually rejects surfaces as `HttpError(status: 401, message: "Invalid credentials")`, and that is the one to sign out on.
+
 ---
 
 ## Passkeys
@@ -459,7 +461,7 @@ To read or manually set the token:
 
   // Read the current token via the decoded JWT payload, or track it from the
   // authSuccess event.
-  let payload = client.getJwtPayload()
+  let payload = client.jwtPayload
 ```
 
 **Don't:**
@@ -473,7 +475,7 @@ let doc = try await client.openDocument(id)  // before try await client.waitForA
 
 ## JWT Persistence
 
-Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. `getAuthPersistenceInfo()` reports whether persistence is on.
+Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. The client reports whether persistence is on.
 
 ```swift
   let client = JsBaoClient(options: JsBaoClientOptions(
@@ -487,11 +489,11 @@ Optional — opt in through the client's `auth` options so a relaunch reuses the
   ))
 
   try await client.waitForAuthBootstrap()
-  // ["mode": "persisted" | "memory", "prefix": <storageKeyPrefix>]
-  let info = client.getAuthPersistenceInfo()
+  // [String: JSONValue] — ["mode": "persisted" | "memory", "prefix": <storageKeyPrefix>]
+  let info = client.authPersistenceInfo
 ```
 
-The token is persisted through the client's storage provider (SQLite by default); `storageKeyPrefix` namespaces it. The Keychain holds offline-access grants, not the JWT session. `waitForAuthBootstrap()` restores any persisted session, so an authenticated user stays signed in on relaunch. `getAuthPersistenceInfo()` returns `["mode": "persisted" | "memory", "prefix": <storageKeyPrefix>]`. Tokens within ~2 min of expiry are not reused; an expired persisted token triggers a cookie-based refresh on startup and is cleared if that refresh fails. `logout(wipeLocal: true)` clears the persisted JWT.
+The token is persisted through the client's storage provider (SQLite by default); `storageKeyPrefix` namespaces it. The Keychain holds offline-access grants, not the JWT session. `waitForAuthBootstrap()` restores any persisted session, so an authenticated user stays signed in on relaunch. `client.authPersistenceInfo` is a `[String: JSONValue]` of `["mode": "persisted" | "memory", "prefix": <storageKeyPrefix>]`. Tokens within ~2 min of expiry are not reused; an expired persisted token triggers a cookie-based refresh on startup and is cleared if that refresh fails. `logout(wipeLocal: true)` clears the persisted JWT.
 
 ---
 

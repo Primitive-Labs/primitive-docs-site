@@ -192,6 +192,37 @@ access = "md.caller.billing.status in ['trialing', 'active', 'past_due']"
 
 `md.caller` is bindable in **database operation `access`** (including per-param access and batch), the database's own `metadataAccess` rule, DO-trigger `when`/`set`, and **workflow `accessRule`** (`start` and `workflow.call`). With no authenticated caller (anonymous request, or a `runAs:"system"` workflow), `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
 
+### Declaring a path on the rule entry (rule sets)
+
+A config-level `[metadata.paths.*]` manifest applies to every rule in the
+config. On a **rule set**, a single operation can carry its own declaration
+instead: the operation value may be a `{ expr, loads }` table rather than a
+bare CEL string, where `loads.paths` takes the same shape as
+`[metadata.paths.*]`.
+
+```toml novalidate
+[rules.member]
+create = "true"
+
+[rules.member.list]
+expr = "md.caller.billing.status == 'active'"
+
+[rules.member.list.loads.paths.caller]
+rootFrom = "user.userId"
+type = "user"
+categories = ["billing"]
+```
+
+Both forms resolve through the same loader, so `md.<name>` binds identically;
+the table form only keeps a one-rule declaration next to its rule. Bare-string
+and table entries coexist in one category block and `primitive sync`
+round-trips both byte-identically.
+
+Constraints: only `loads.paths` is accepted on a rule entry — `loads.secrets`
+and `loads.vars` are config-level and rejected here. An empty `loads` or
+`loads.paths` collapses back to a bare expression, so the two spellings carry
+identical intent.
+
 ### Database operation substitution
 
 Beyond CEL `access` rules, an operation's `definition` (`filter`/`data`) can substitute a declared category value directly, alongside `$params.*` / `$user.userId` / `$now` / `$steps.*`:

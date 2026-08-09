@@ -1925,12 +1925,13 @@ primitive documents permissions list <document-id>
 primitive documents records models <document-id>
 primitive documents records describe <document-id> <model-name>
 
-# Query, get, and count records in a model (--filter is JSON, or --filter-file
-# <path> for a JSON/TOML file; --limit caps at 100). `get` on a missing id
-# prints null at exit 0 — a miss is not an error.
+# Query, get, count, and aggregate records in a model (--filter is JSON, or
+# --filter-file <path> for a JSON/TOML file; --limit caps at 100). `get` on a
+# missing id prints null at exit 0 — a miss is not an error.
 primitive documents records query <document-id> <model-name> --filter '{"status":"open"}' --limit 50
 primitive documents records get <document-id> <model-name> <record-id>
 primitive documents records count <document-id> <model-name>
+primitive documents records aggregate <document-id> <model-name> --op sum --field qty --group-by symbol
 
 # Dump every record grouped by model, and read summary statistics
 primitive documents dump <document-id>
@@ -1939,7 +1940,7 @@ primitive documents stats <document-id>
 
 `records models` and `records describe` read the document's discovered schema — the models a client has written into the document, with each field's type and whether it is indexed, unique, or required. A newly created document with no records yet reports no models.
 
-`records query` returns a page of records as `{ items, hasMore, nextCursor? }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records get` returns one record by id, or `null` at exit 0 when there is no such record; `records count` returns how many records match a `--filter`. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. It is always JSON on stdout with nothing else mixed in, so `primitive documents dump <doc> | jq .` parses. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
+`records query` returns a page of records as `{ items, hasMore, nextCursor? }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records get` returns one record by id, or `null` at exit 0 when there is no such record; `records count` returns how many records match a `--filter`; `records aggregate` runs one `count`/`sum`/`avg`/`min`/`max` over the matching set, with `--field` required for all but `count` and `--group-by` (repeatable) for per-group rows. Under `--json` it prints the `{ result }` envelope: ungrouped, `result` is an object keyed by the operation (`{"result":{"count":2}}`, `{"result":{"sum_qty":100}}`); grouped, `result` nests by group value with a single operation flattened to a scalar — the same shape `databases records aggregate` returns. `--group-by` takes plain field names only: StringSet facet grouping is a database-only capability and is rejected here with a 400, as are the `sort` and `limit` aggregate options the database endpoint accepts. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. It is always JSON on stdout with nothing else mixed in, so `primitive documents dump <doc> | jq .` parses. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
 
 The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
 

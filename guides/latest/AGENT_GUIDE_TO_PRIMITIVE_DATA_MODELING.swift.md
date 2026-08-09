@@ -160,14 +160,15 @@ Subscribe from the client and pair it with an operation call for the initial sta
 
 ```swift
   let initial = try await client.databases.executeOperation(databaseId: dbId, name: "listMyTickets")
-  let unsub = try client.databases.subscribe(
+  let subscription = try client.databases.subscribe(
     databaseId: dbId,
-    subscriptionKey: "my-open-tickets",
-    options: DatabaseSubscribeOptions(onChange: { event in
-      if event.isOrigin { return } // this tab wrote it
-      applyChanges(event.changes)
-    })
-  )
+    subscriptionKey: "my-open-tickets"
+  ) { event in
+    if event.isOrigin { return } // this tab wrote it
+    applyChanges(event.changes)
+  }
+  // Hold the subscription for as long as you want changes — releasing it
+  // unsubscribes.
 ```
 
 Subscriptions deliver deltas only — always pair with an operation call for the initial state, and use semantically equivalent filters. See the Databases guide for the full frame shape (`originConnectionId`, `originUserId`, `isOrigin`, `isOriginUser`, `changeType`).

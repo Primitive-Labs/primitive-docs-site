@@ -34,6 +34,7 @@ primitive databases records aggregate <database> <model-name> --op <count|sum|av
 primitive documents records query <document> <model-name> [--filter '{...}']
 primitive documents records get <document> <model-name> <record-id>
 primitive documents records count <document> <model-name> [--filter '{...}']
+primitive documents records aggregate <document> <model-name> --op <count|sum|avg|min|max>
 primitive documents dump <document-id>                 # every model's records as JSON
 primitive documents export <document-id>               # dump a document's contents
 
@@ -116,7 +117,7 @@ Under `--json` each item is a `workflow-run` item whose `detail` carries the fai
 | Field | Meaning |
 |---|---|
 | `errorMessage` | The failure message, verbatim. |
-| `errorTitle` | `errorMessage` with ids, numbers, URLs and quoted free-text values replaced by placeholder tokens; JSON keys, quoted `SCREAMING_SNAKE` error enums and a status under a `code` / `status` key are kept, so two upstream errors of the same shape stay distinct. A `Caused by:` chain folds to its **head** message, so `errorTitle` shows the failure, not the chain — the full chain stays in `errorMessage`. Runs that failed for the same reason share one title, so this is the field to group and count on — and it is the same string `primitive analytics errors-groups` titles its groups with, so a spiking group can be grepped straight back to the runs that caused it. Both are derived from the message's first 2,000 characters, so an extremely long message groups by that prefix. |
+| `errorTitle` | `errorMessage` with ids, numbers, URLs and quoted free-text values replaced by placeholder tokens; the keys of a JSON error body, quoted `SCREAMING_SNAKE` error enums and a status under a `code` / `status` key are kept, so two upstream errors of the same shape stay distinct. A `Caused by:` chain folds to its **head** message, so `errorTitle` shows the failure, not the chain — the full chain stays in `errorMessage`. Runs that failed for the same reason share one title, so this is the field to group and count on — and it is the same string `primitive analytics errors-groups` titles its groups with, so a spiking group can be grepped straight back to the runs that caused it. Both are derived from the message's first 2,000 characters, so an extremely long message groups by that prefix. |
 | `failedStepId` | The step that failed the run — the lowest-index step whose status is `failed`. Also in `correlation.stepId`, so it pivots to `runs steps` / `runs error`. |
 | `failedStepKind` | That step's kind (`database.query`, `llm`, …). |
 | `failedStepErrorTitle` | Normalized title of the step's own error, for grouping by step-level cause. |

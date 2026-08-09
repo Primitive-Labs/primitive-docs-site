@@ -175,7 +175,7 @@ Deleting also cancels any in-flight upload for the same `blobId` and clears loca
 The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
 
 ```swift
-  client.setNetworkMode(.offline)
+  client.networkMode = .offline
 
   // Bytes are written to the local cache immediately and queued. upload()
   // resolves without waiting for the network (bytesTransferred is 0).
@@ -191,7 +191,7 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
   await blobs.prefetch(blobIds: blobIds, concurrency: 4)
 
   // Queue processing resumes automatically; listen for .blobsQueueDrained.
-  client.setNetworkMode(.online)
+  client.networkMode = .online
 ```
 
 ---
@@ -215,15 +215,15 @@ Inspect and control the per-document upload queue, and set the client-wide uploa
 
   // Concurrency is set on the client (global, all documents).
   await client.setBlobUploadConcurrencyAsync(5) // min 1; default 2
-  let concurrency = await client.getBlobUploadConcurrencyAsync()
+  let concurrency = await client.blobUploadConcurrency
 ```
 
 Every queue verb is `async`: the upload queue lives behind an actor, so reading
 or changing it is an `await`. The queue members carry the `Async` suffix
 (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`,
-`setBlobUploadConcurrencyAsync(_:)`, …). The synchronous spellings still exist
-but are either deprecated or rejected by the compiler with a rename fix-it —
-use the `Async` names.
+`setBlobUploadConcurrencyAsync(_:)`, …), and the two concurrency readers are
+`async` properties: `await client.blobUploadConcurrency` and
+`await client.documents.uploadConcurrency`.
 
 `downloadUrl(blobId:disposition:attachmentFilename:)` is the exception and stays
 synchronous, so it is safe to call straight from a SwiftUI `body`.

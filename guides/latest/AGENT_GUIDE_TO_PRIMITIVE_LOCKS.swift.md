@@ -1,31 +1,31 @@
 # Agent Guide to Primitive Locks
 
-A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a `ttlMs` duration; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
+A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
 
 ## Client SDK Reference
 
 | Call | Returns | Notes |
 |---|---|---|
-| `client.locks.acquire(key:ttlMs:timeoutMs:)` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `JsBaoError` with `code == .lockTimeout` when `timeoutMs` elapses first. |
-| `client.locks.tryAcquire(key:ttlMs:)` | `LockHandle?` | Single non-blocking attempt; `nil` when the key is held by another caller. |
+| `client.locks.acquire(key:ttl:timeout:)` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `JsBaoError` with `code == .lockTimeout` when `timeout` elapses first. |
+| `client.locks.tryAcquire(key:ttl:)` | `LockHandle?` | Single non-blocking attempt; `nil` when the key is held by another caller. |
 | `client.locks.release(_ handle:)` | `LockReleaseResult` | `released`, plus `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
-| `client.locks.renew(_ handle:ttlMs:)` | `LockRenewResult` | `renewed`, `leaseExpiresAt`, and `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
+| `client.locks.renew(_ handle:ttl:)` | `LockRenewResult` | `renewed`, `leaseExpiresAt`, and `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
 | `client.locks.status(key:)` | `LockStatus` | `held`, plus `heldBy`, `holderKind`, `holderRunId`, `acquiredAt`, `leaseExpiresAt` while held. Reports `held == false` once the lease has expired. |
 | `client.locks.list()` | `LockListResult` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
 
-`LockHandle`: `key`, `handleId`, `leaseExpiresAt`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttlMs` is required on every acquire and is capped at 24h server-side.
+`LockHandle`: `key`, `handleId`, `leaseExpiresAt`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttl` and `timeout` are `TimeInterval`s in **seconds**. `ttl` is required on every acquire and is capped at 24h server-side.
 
 ### Acquire and release
 
-`acquire` blocks; `timeoutMs` bounds the wait, `ttlMs` sizes the lease. Always release, including on a thrown step:
+`acquire` blocks; the acquire timeout bounds the wait and the TTL sizes the lease. Always release, including on a thrown step:
 
 ```swift
   let handle: LockHandle
   do {
     handle = try await client.locks.acquire(
       key: "portfolio-import:\(userId)",
-      ttlMs: 60_000,    // lease long enough to cover the work
-      timeoutMs: 10_000 // give up waiting after 10s
+      ttl: 60,    // seconds — lease long enough to cover the work
+      timeout: 10 // seconds — give up waiting after 10s
     )
   } catch let error as JsBaoError where error.code == .lockTimeout {
     return false // already running
@@ -46,7 +46,7 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 ```swift
   guard let handle = try await client.locks.tryAcquire(
     key: "refresh:\(userId)",
-    ttlMs: 30_000
+    ttl: 30 // seconds
   ) else {
     return // someone else holds it — nothing to do
   }
@@ -73,11 +73,11 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 
 ### The acquire timeout
 
-`JsBaoError` with `code == .lockTimeout` is thrown only by the blocking `acquire(key:ttlMs:timeoutMs:)` when it reaches `timeoutMs` without winning the key. Its `details` carry `key` and `timeoutMs`. Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `nil`.
+`JsBaoError` with `code == .lockTimeout` is thrown only by the blocking `acquire(key:ttl:timeout:)` when it reaches `timeout` without winning the key. Its `details` carry `key` and `timeoutMs` (the elapsed wait in milliseconds, as the server reports it). Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `nil`.
 
 ## Sizing the Lease
 
-**The lease does not renew itself.** Size `ttlMs` to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous `ttlMs` or call `renew(handle, { ttlMs })` before the current lease expires. `renew` returning `{ renewed: false, reason: "lease_lost" }` means the lease already lapsed and the key changed hands — stop and re-acquire.
+**The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
 
 ## CLI
 
@@ -152,4 +152,4 @@ A run-scoped lock is honored on **every** execution path: the durable path, `syn
 
 ## Rate Limiting
 
-Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within `timeoutMs` and raises the acquire timeout if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.
+Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within the acquire timeout and raises the acquire-timeout error if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.

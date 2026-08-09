@@ -476,7 +476,7 @@ const doc = await client.openDocument(id);     // before await client.waitForAut
 
 ## JWT Persistence
 
-Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. `getAuthPersistenceInfo()` reports whether persistence is on.
+Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. The client reports whether persistence is on.
 
 ```typescript
   const client = await initializeClient({
