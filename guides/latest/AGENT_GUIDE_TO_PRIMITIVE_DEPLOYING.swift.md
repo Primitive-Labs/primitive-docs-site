@@ -24,8 +24,10 @@ The Team ID is the single setting required for device, TestFlight, and App Store
 3. Regenerate the xcodeproj:
 
    ```bash
-   xcodegen generate
+   bash scripts/regenerate-project.sh
    ```
+
+   That script is the one entry point for regeneration: it runs `xcodegen generate` and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
 
 After that, device installs and archives both work.
 

@@ -795,7 +795,7 @@ Dates are stored as ISO-8601 strings. Convert for comparisons:
   }
 
   // Query with date comparison
-  let overdue = try Task.query(["dueDate": ["$lt": now]])
+  let overdue = try Task.query(["dueDate": ["$lt": .string(now)]])
 ```
 
 ## Querying Data
