@@ -31,14 +31,14 @@ saveAs = "order"
 
 ### Deleting a script
 
-`primitive scripts delete <script>` removes a script header and cascade-deletes all its `ScriptConfig` versions. It takes a script id or name, prompts for confirmation (`-y`/`--yes` skips it), and accepts `--app` to target an app other than the current one.
-
-Because workflows resolve a script by **name** at run time, deleting one that a live workflow still names would break those steps on their next run. The command guards against this: if an **active** workflow references the script by name, the delete is refused with a 409 whose body names the referencing workflows, and nothing is removed. Pass `--force` to override the guard and delete anyway — leaving those steps to fail their `ref` lookup at run time.
+A script is `transforms/<name>.rhai` in the sync tree, so deleting one is deleting the file and pruning. That removes the script header and cascade-deletes all its `ScriptConfig` versions.
 
 ```bash
-primitive scripts delete normalize-order            # refused if an active workflow names it
-primitive scripts delete normalize-order --force    # delete regardless
+rm config/transforms/normalize-order.rhai
+primitive sync push --prune
 ```
+
+Because workflows resolve a script by **name** at run time, deleting one that a live workflow still names would break those steps on their next run. The server guards against this: if an **active** workflow references the script by name, the delete is refused with a 409 whose body names the referencing workflows. Prune reports that script as blocked, keeps it, and carries on with the rest of the prune — remove or re-point the referencing workflows, then push again.
 
 ## Input and output
 

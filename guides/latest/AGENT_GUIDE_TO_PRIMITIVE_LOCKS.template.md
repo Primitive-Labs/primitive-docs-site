@@ -107,7 +107,7 @@ The lease-sizing rule applies to the acquire/release span exactly as it does on 
 
 ## Run-Scoped Declarative Lock
 
-A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — or `"fail"` — fail fast). Declare it as a `[workflow.lock]` block; only `key` is required:
+A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — `"fail"` — fail fast — or `"ignore"` — do not run and do not fail). Declare it as a `[workflow.lock]` block; only `key` is required:
 
 ```toml
 [workflow.lock]
@@ -118,6 +118,22 @@ onContention = "fail"
 ```
 
 The block is TOML-owned config that round-trips through `primitive sync pull`/`push`; removing it clears the lock.
+
+**What the losing run does** is `onContention`'s whole job:
+
+| Value | The losing run |
+|---|---|
+| `block` (default) | Waits up to `timeoutMs`, then fails with `errorCode: "LOCK_TIMEOUT"`. |
+| `fail` | Fails immediately with `errorCode: "LOCK_CONTENTION"`. |
+| `ignore` | Does not run and does not fail: it settles `status: "skipped"` with `skipReason: "LOCK_CONTENTION"`, carries no error, and emits no error events. |
+
+Pick `fail` when two concurrent runs must never happen and you want the alert. Pick `ignore` when losing the race is expected — a client double-tap, a nightly job that overlaps itself — so it stops reading as a crash in error analytics. An elided run is still stored and listed: `primitive workflows runs list <workflow-id> --status skipped` is the contention-volume view.
+
+Branch on the structured field, never on message text: `errorCode` is on every surface that carries `errorMessage` (the `run-sync` envelope, the run status endpoint, `listRuns`, the `workflowStatus` event) and `skipReason` sits next to `status`. Both are written by the platform from a closed set; an app cannot set or spoof either.
+
+**`ignore` requires `js-bao-wss-client` >= 2.1.0** (or the Swift client at or after the release that ships it). `skipped` is a new value on an existing status enum, so an older client's `waitFor` does not treat it as terminal and waits out its own timeout (15 minutes by default) instead of returning. Upgrade the client before switching a workflow to `ignore`.
+
+Inside a nested `workflow.call`, an elided child is a value rather than an error: the step reads `{ output: null, skipped: true, skipReason: "LOCK_CONTENTION", ok: false }`, the parent run continues, and a downstream step listing that step in `skipWhenSkipped` skips in turn. A `workflow.call` runs inline in the parent's run, so no separate run record — and no `skipped` run status — is involved.
 
 **Size `ttlMs` to cover the worst-case duration of the whole run.** The run holds the lease for its full lifetime with no periodic renewal; ownership is re-verified only when the durable engine replays. A run that executes continuously longer than `ttlMs` — many back-to-back compute or LLM steps with no durable pause to force a replay — can let its lease lapse while still running, at which point a second run can take the key over and both critical sections run concurrently. This is a deliberate tradeoff (the lease, not a heartbeat, is the safety bound), so the lease must be sized generously enough that a run never outlives it.
 

@@ -1033,6 +1033,16 @@ The point-in-time checks return `false` if the client is disconnected or the che
 
 The point-in-time checks accept a `timeout` — a `TimeInterval` in seconds, default `5`. For a cheap synchronous local read — no round-trip — use `documents.isSynced(documentId:)`.
 
+### Connectivity vs network mode
+
+Network **mode** is user intent — `auto` by default, or pinned by `goOffline()` / `goOnline()`. **Reachability** is whether the device currently has a network path. They are separate, and the client never turns one into the other: losing connectivity in `auto` pauses the socket and suppresses reconnect, but the reported mode stays `"auto"`. When the network comes back the client reconnects on its own, still in `auto`.
+
+So test connectivity with `isOnline`, not with the mode:
+
+`client.networkStatus` carries the same `mode` / `isOnline` / `reason` triple, `NetworkModeEvent` fires on both kinds of transition, and `client.isOnline()` is the check to branch on. Drive offline UI from `isOnline`, not from `networkMode == .offline`.
+
+While the device is unreachable the client behaves as it does when offline is pinned: HTTP calls fail fast with `OFFLINE`, reads come from the local cache, and queued blob uploads wait. Nothing is lost — it resumes on reconnect.
+
 ### Updating Document Metadata
 
 Update a document's title, thumbnail, and presentation metadata — see [Update thumbnail / metadata](#update-thumbnail--metadata) above for the compiled call. Each field is optional; omit one to leave it unchanged.
@@ -1090,7 +1100,7 @@ When `sendEmail: true`, the server delivers per-recipient emails:
 - **Existing app members** receive the `document-share` template, populated with the caller-supplied `documentUrl`.
 - **Non-members (deferred grants)** receive the `document-share-deferred` template, populated with an accept URL composed from `app.baseUrl` + the new `inviteToken` (shape `${app.baseUrl}/invite/accept?inviteToken=...`).
 
-Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type with `primitive email-templates set document-share ...` or `primitive email-templates set document-share-deferred ...`.
+Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type by authoring `email-templates/document-share.toml` or `email-templates/document-share-deferred.toml` and running `primitive sync push`.
 
 Repeated email-based calls are idempotent: a second `updatePermissions` call for the same email updates the existing pending `DeferredDocumentPermission` in place rather than creating a duplicate row, so the latest `permission` value wins at signup-time resolution and `client.documents.listPendingInvitations(documentId)` shows one entry per pending recipient.
 

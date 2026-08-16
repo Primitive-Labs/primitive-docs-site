@@ -2,6 +2,33 @@
 
 Guidelines for AI agents configuring Primitive services. Everything Primitive does for an app — auth settings, workflows, prompts, integrations, database types/operations, webhooks, cron triggers, blob buckets, email templates, rule sets — is server-side configuration with two equivalent interfaces: the web Admin Console (interactive) and **TOML files synced via the CLI** (configuration as code). Agents should use the TOML + CLI path.
 
+## TOML is the only write path
+
+Server-side configuration is authored in TOML and applied with `primitive sync push`. The CLI has **no** `create`/`update`/`delete` commands and no configuration-setting flags for these types — if a field belongs to a config object, the file is how you set it. Authoring commands, all local except the push:
+
+```bash
+primitive config fields <type>                    # keys, types, required, defaults for a type (--json for tooling)
+primitive config new <type> <key>                 # scaffold <dir>/<key>.toml from the type's defaults
+primitive config set <object> <path>=<value>...   # set scalars in place, comments and key order preserved
+primitive sync push --only <selector>[,...]     # apply just these objects
+```
+
+- `<type>` is one of `integration`, `webhook`, `cron-trigger`, `blob-bucket`, `prompt`, `workflow`, `transform`, `database-type`, `rule-set`, `group-type-config`, `collection-type-config`, `metadata-category-config`, `email-template`, `app`, `var`.
+- `<object>` on `set` is `<type>/<key>`, `app`, or `vars`; `--only` selectors are `<type>/<key>`, `app`, or `var/<key>`.
+- `set` writes scalars only — edit a table or an array in the file. `true`/`false` and numerics are written with those types; double-quote a value to force a string.
+- `fields`, `new` and `set` make no API call. Nothing reaches the server until a push.
+
+The scripted form of a one-field change is two commands, no here-document:
+
+```bash
+primitive config set workflow/order-intake workflow.status=active
+primitive sync push --only workflow/order-intake
+```
+
+Deleting a config object = delete its file + `primitive sync push --prune`. The single exception is `primitive metadata categories delete`, which survives because prune has no server delete surface for metadata-category configs.
+
+Not configuration, so still direct commands: secrets (`primitive secrets set`), resource creation that mints an id (`apps create`, `databases create`, `collections create`, `groups create`), data operations, and every read/test command.
+
 ## The sync loop
 
 ```bash
@@ -82,7 +109,7 @@ config/
 
 ## App settings (`app.toml`)
 
-App-level settings sync from `app.toml`. Edit the TOML and apply with `primitive settings push` (or a whole-config `sync push` — both operate on the same `app.toml`); `primitive settings pull` writes current server settings into it, `primitive settings diff` shows per-field differences, and `primitive settings show` renders the server-effective settings without touching any file. Change these settings through the TOML path, not with imperative `primitive apps update --flag` calls: those mutate the server directly and drift from the checked-in TOML, so the next push reverts them unless mirrored back. TOML-syncable settings:
+App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive sync push` (or `sync push --only app` for the settings alone); `primitive sync pull --only app` writes current server settings into it, `primitive sync diff --only app` shows per-field differences, and `primitive settings get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
 - `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `allowedDomains` (string array), `testAccountBaseEmails` (string array)
 - `[auth]` — `googleOAuthEnabled`, `googleClientId`, `googleClientSecret` (a `{{secrets.KEY}}` reference — see below), `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `redirectUris` (string array), `[auth.passkeys]` relying-party config
@@ -109,7 +136,7 @@ A plain value stored before this rule shipped is a literal, and it keeps working
 
 `GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a *reference* naming a secret that doesn't exist, or a malformed reference (below): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone, so Primitive lets it through rather than rejecting it outright. Exempt is not unaffected: when the reference resolves the server does send `client_secret` alongside `code_verifier`, and Google requires it for the "Web application" client type the setup guide provisions — so on a dangling reference the native exchange fails at Google instead, as a generic `INVALID_TOKEN`.
 
-The server only ever sends `googleClientSecret` back when it holds a reference. A pre-existing literal is real credential material, so it is withheld from every read — `settings show`, `settings pull`, the API — and reported as `googleClientSecretStatus = "legacy-literal"` instead. Google sign-in keeps working on such an app; the setting is simply absent from `app.toml`. `settings show`, `settings pull` and `sync pull` each warn when they read that status, naming the remediation — a pulled `app.toml` cannot be pushed back until the field is migrated. Re-point it at a secret reference and push.
+The server only ever sends `googleClientSecret` back when it holds a reference. A pre-existing literal is real credential material, so it is withheld from every read — `settings get`, `sync pull`, the API — and reported as `googleClientSecretStatus = "legacy-literal"` instead. Google sign-in keeps working on such an app; the setting is simply absent from `app.toml`. `settings get` and `sync pull` each warn when they read that status, naming the remediation — a pulled `app.toml` cannot be pushed back until the field is migrated. Re-point it at a secret reference and push.
 
 `googleClientSecretStatus = "malformed-reference"` is the case that is **not** working: the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space), so it is neither a pointer nor the secret Google issued, and sign-in fails with `GOOGLE_OAUTH_MISCONFIGURED`. It is withheld from reads for the same reason a literal is. Store the real client secret and point the setting at it.
 
@@ -140,25 +167,25 @@ Every command resolves its target environment in order: `--env <name>` flag → 
 
 ## Out-of-band changes and stale sync state
 
-Push decides create-vs-update per entity from the server id stored in `.primitive-sync.json` (`entities.<entityType>.<entityKey>.id`, at the root of the sync directory; database types and the group/collection/metadata type-config families track the entry without an id — the decision there is on the entry's presence). Changes made outside the sync loop — console edits, ad-hoc CLI creates/deletes — leave that state out of date, and the two directions behave differently:
+Push decides create-vs-update per entity from the server id stored in `.primitive-sync.json` (`entities.<entityType>.<entityKey>.id`, at the root of the sync directory; database types and the group/collection/metadata type-config families track the entry without an id — the decision there is on the entry's presence). Changes made outside the sync loop — console edits — leave that state out of date, and the two directions behave differently:
 
-- **Created out-of-band** — converges for workflows, cron triggers, database types, blob buckets, transform scripts, rule sets, integrations, webhooks, prompts, and group- and collection-type configs: push adopts the existing entity by key and updates it in place instead of failing the create (see [Push failures](#push-failures)).
+- **Created out-of-band** (a console edit) — converges for workflows, cron triggers, database types, blob buckets, transform scripts, rule sets, integrations, webhooks, prompts, and group- and collection-type configs: push adopts the existing entity by key and updates it in place instead of failing the create (see [Push failures](#push-failures)).
 - **Deleted out-of-band** — does not self-heal. The stored id goes stale, and the next push of a changed TOML for that entity issues an update against the missing entity, failing the push with a "not found" error for that entity.
 
 Symptom → fix: `sync push` fails with `Failed to update <entity> <key>: … not found` ⇒ the entity was deleted on the server while its sync-state entry survived. Delete `entities.<entityType>.<entityKey>` from `.primitive-sync.json` and push again — the entity is created fresh (or adopted, for the kinds listed above). A full `sync pull` also rebuilds sync state from the server, but it overwrites every server-backed file with server state (workflow files authored with `[[include]]` fragments are the one exception — pull keeps the fragment form while the server's steps still match its expansion; see the workflows guide) — hand-removing the stale entry is the fix that preserves local TOML edits.
 
-Keep everything in the sync tree — including test, probe, and dev workflows. An entity created ad-hoc shows as "Remote only" in `sync diff` until a `sync pull` folds it (and its sync-state entry) into the tree; from then on it's subject to the staleness above if anything deletes it server-side. Create through TOML + push; when retiring an entity, delete it explicitly (CLI or console), then remove its TOML file *and* its `.primitive-sync.json` entry together.
+Keep everything in the sync tree — including test, probe, and dev workflows. An entity created in the console shows as "Remote only" in `sync diff` until a `sync pull` folds it (and its sync-state entry) into the tree; from then on it's subject to the staleness above if anything deletes it server-side. Retire an entity by deleting its TOML file and running `sync push --prune`, which drops its `.primitive-sync.json` entry with it.
 
-## What sync does NOT carry
+## Every `[workflow]` field round-trips
 
-A few settings are set with dedicated commands rather than TOML (app-level settings that *do* sync are listed under [App settings](#app-settings-app-toml)). Two workflow-level fields are the exception to "TOML round-trips everything": `sync push` sets them only when it **creates** a workflow, never when it updates one already on the server — flip them on an existing workflow with a direct update instead:
+`syncCallable`, `capabilities` and `requiresClientApply` are ordinary `[workflow]` TOML fields — `sync push` forwards each on create **and** on update, so a field can be flipped on a workflow that already exists:
 
 ```bash
-primitive workflows update <id> --sync-callable true     # existing workflow only; the server re-validates against the currently-active steps
-primitive workflows update <id> --capabilities membership   # existing workflow only; comma-separated, "" revokes all
+primitive config set workflow/order-intake workflow.syncCallable=true
+primitive sync push --only workflow/order-intake
 ```
 
-`requiresClientApply` is an ordinary `[workflow]` TOML field — `sync push` forwards it on both create and update — so `primitive workflows update <id> --requires-client-apply false` is a convenience, not the only path.
+`capabilities` is an array, so edit it in the file rather than with `config set`; an empty array revokes every capability.
 
 ## Secrets
 
@@ -172,18 +199,21 @@ primitive secrets delete OPENAI_API_KEY
 
 ## Email templates
 
-Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and workflows can register custom types. Built-in types: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by setting an override and triggered from an `email.send` workflow step. Each type exposes template variables (`{{magicLinkUrl}}`, `{{otpCode}}`, …) substituted at send time.
+Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and workflows can register custom types. Built-in types: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by pushing an override and triggered from an `email.send` workflow step. Each type exposes template variables (`{{magicLinkUrl}}`, `{{otpCode}}`, …) substituted at send time.
 
-Overrides round-trip through `primitive sync` as `email-templates/*.toml`, or manage them imperatively:
+An override is `email-templates/<emailType>.toml` — `[template]` with `emailType` and `subject` required, `htmlBody` and `textBody` optional:
 
 ```bash
-primitive email-templates list                 # all types + override status
-primitive email-templates get magic-link        # current subject + body + variables
-primitive email-templates variables magic-link  # available {{vars}}
-primitive email-templates set magic-link --subject "Sign in to MyApp" --html-file ./magic-link.html --text-file ./magic-link.txt
+primitive config new email-template magic-link     # scaffold the file
+primitive sync push --only email-template/magic-link
+
+primitive email-templates list                   # all types + override status
+primitive email-templates get magic-link         # current subject + body + variables
+primitive email-templates variables magic-link   # available {{vars}}
 primitive email-templates test magic-link        # send a test email
-primitive email-templates delete magic-link      # revert to the built-in default
 ```
+
+Revert to the built-in default by deleting the file and running `primitive sync push --prune`.
 
 ## Headless auth (CI)
 

@@ -34,16 +34,28 @@ Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-
 
 Data-access rules live on operations; **rule sets** govern who may manage groups and collections:
 
-```bash
-primitive rule-sets create "team-management" \
-  --resource-type group \
-  --rules '{
-    "group":  { "create": "true", "edit": "user.userId == group.createdBy", "delete": "user.userId == group.createdBy" },
-    "member": { "create": "isMemberOf(group.groupType, group.groupId)", "edit": "user.userId == group.createdBy", "delete": "user.userId == group.createdBy" }
-  }'
+```toml
+# config/rule-sets/team-management.toml
+[ruleSet]
+name = "team-management"
+resourceType = "group"
+
+[rules.group]
+create = "true"
+edit = "user.userId == group.createdBy"
+delete = "user.userId == group.createdBy"
+
+[rules.member]
+create = "isMemberOf(group.groupType, group.groupId)"
+edit = "user.userId == group.createdBy"
+delete = "user.userId == group.createdBy"
 ```
 
-Bind via the type config: `config/group-type-configs/<type>.toml` / `config/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via its `ruleSetId` (TOML, or `--rule-set-id` on `primitive blob-buckets create`), where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
+```bash
+primitive sync push --only rule-set/team-management
+```
+
+Bind via the type config: `config/group-type-configs/<type>.toml` / `config/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via its `ruleSetId` in TOML, where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
 
 Semantics:
 - **App owners/admins bypass rule sets entirely**; rules apply to regular members.

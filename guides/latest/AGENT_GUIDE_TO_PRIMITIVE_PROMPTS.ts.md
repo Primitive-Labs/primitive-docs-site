@@ -173,7 +173,7 @@ Data: {{ input.config | json }}
 
 ## TOML File Format
 
-Used by `primitive sync push/pull` and `primitive prompts create --from-file`.
+Read and written by `primitive sync pull` / `primitive sync push` — the only path that creates or updates a prompt.
 
 ### Basic structure
 
@@ -207,8 +207,10 @@ outputFormat = "text"            # optional: text (default) | json
 | `displayName`  | Yes      |                                                                                      |
 | `description`  | No       |                                                                                      |
 | `status`       | No       | `draft` (default) \| `active` \| `archived`                                          |
-| `inputSchema`  | No       | JSON Schema as a string (parsed server-side)                                         |
-| `outputSchema` | No       | JSON Schema as a string. **Read by `sync push` / `prompts create --from-file`, but `sync pull` does NOT write it back** |
+| `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
+| `outputSchema` | No       | JSON Schema, same forms. Round-trips: `sync pull` writes it back                     |
+
+`sync push` applies the complete `[prompt]` table: a file with no `outputSchema` key clears any output schema stored on the server. Prompt files written by an older CLI omit that key even when the server has a schema — run `primitive sync pull` once before the first push after upgrading the CLI.
 
 **`[[configs]]`:**
 
@@ -221,10 +223,14 @@ outputFormat = "text"            # optional: text (default) | json
 | `userPromptTemplate` | Yes      |                                                    |
 | `systemPrompt`       | No       |                                                    |
 | `temperature`        | No       | Stored as string; numbers in TOML are accepted     |
+| `topP`               | No       | Nucleus-sampling cutoff; stored as string          |
 | `maxTokens`          | No       | Integer                                            |
 | `outputFormat`       | No       | `text` (default) \| `json`                         |
+| `outputSchema`       | No       | Config-level JSON Schema — the one a workflow `prompt.execute` step uses |
+| `providerConfig`     | No       | Provider-specific options, as a `[configs.providerConfig]` table |
+| `isActive`           | No       | On a NEW prompt, activates this entry after create. Not written by pull |
 
-**Not exposed in TOML** (model fields that exist but aren't read by sync): `topP`, `outputSchema` on the config (prompt-level outputSchema is read on push only). Set these via `primitive prompts configs update` or the API client if needed.
+**Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `sync pull` writes back what the server holds, and `sync push` rejects a key the CLI does not recognize rather than dropping it silently (#2644).
 
 ### Multiple configs
 
@@ -255,7 +261,7 @@ temperature = 0.5
 userPromptTemplate = "Provide a concise summary: {{ input.text }}"
 ```
 
-The first `[[configs]]` becomes the active config when the prompt is created. To activate a different one later: `primitive prompts configs activate <prompt-id> <config-id>`.
+Mark the live config with `active = true` on exactly one `[[configs]]` entry. `sync pull` writes that marker and `sync push` honors it on create AND update, so the committed file always says which config the server is actually running. Two markers is an error rather than a first-wins rule. With no marker, the first entry becomes active when the prompt is created and nothing is re-activated afterwards.
 
 ### Evaluator prompts
 
@@ -305,42 +311,25 @@ Set the active app once: `primitive use <app-id>`. All commands accept `--app <a
 
 Use `--json` for machine-readable output.
 
-### Prompt CRUD
+### Reading prompts
 
 ```bash
 primitive prompts list [app-id] [--status draft|active|archived] [--json]
 primitive prompts get <prompt-id> [--json]
-primitive prompts update <prompt-id> [--name X] [--description X] [--status X] [--input-schema JSON] [--output-schema JSON]
-primitive prompts delete <prompt-id> [-y]          # archive (soft)
-primitive prompts delete <prompt-id> --hard [-y]   # permanent
 ```
 
-#### Create from CLI flags
+### Writing prompts (TOML only)
+
+A prompt is `prompts/<key>.toml`: a `[prompt]` table plus one `[[configs]]` block per named model config, exactly one of which carries `active = true`. There is no create/update/delete command.
 
 ```bash
-primitive prompts create \
-  --key my-prompt \
-  --name "My Prompt" \
-  --provider gemini \
-  --model "models/gemini-3-flash-preview" \
-  --user-template "Generate: {{ input.text }}" \
-  [--system-prompt "..."] \
-  [--temperature 0.7] \
-  [--max-tokens 1000] \
-  [--output-format text|json] \
-  [--input-schema '{...}'] \
-  [--output-schema '{...}']
+primitive config fields prompt                      # every key, type, required, default
+primitive config new prompt summarizer              # scaffold prompts/summarizer.toml
+primitive config set prompt/summarizer prompt.status=active
+primitive sync push --only prompt/summarizer      # apply just this prompt
 ```
 
-Required: `--key`, `--name`, `--model`, `--user-template`. Default `--provider` is `openrouter`.
-
-#### Create from TOML
-
-```bash
-primitive prompts create --from-file ./summarizer.toml
-```
-
-Reads `[prompt]` + the FIRST `[[configs]]` entry. Additional configs are NOT created — for multi-config use `sync push` instead.
+Delete a prompt by removing its file and running `primitive sync push --prune`; its `<key>.tests/` sidecar goes with it.
 
 ### Execute & preview
 
@@ -357,13 +346,14 @@ primitive prompts schema  <prompt-id> [--json]
 
 ```bash
 primitive prompts configs list <prompt-id>
-primitive prompts configs create <prompt-id> --name X --provider X --model X --user-template X [...]
-primitive prompts configs update <prompt-id> <config-id> [--name X] [--model X] [--temperature X] [--system-prompt X] [--user-template X] [--status active|archived]
-primitive prompts configs activate <prompt-id> <config-id>
-primitive prompts configs duplicate <prompt-id> <config-id> [--name X]
+primitive prompts configs get <prompt> <config>   # by key or id, name or id
 ```
 
-`configs create` requires `--name`, `--model`, `--user-template`. Default provider is `openrouter`.
+Configs are read here and written in `prompts/<key>.toml`: each is a
+`[[configs]]` entry with `name`, `provider`, `model`, `userPromptTemplate` and
+the rest of the table below. `active = true` marks the live one,
+`status = "archived"` retires one, and duplicating is copying the block under a
+new `name`. Apply with `primitive sync push --only prompt/<key>`.
 
 ### Test cases
 
@@ -468,18 +458,24 @@ Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are p
 
 ### What `sync pull` actually writes
 
-`serializePrompt` (`cli/src/commands/sync.ts:215`) writes:
+`serializePrompt` takes its key set from the prompt's configuration-object
+definition (`src/config-surface/prompt.ts`, #2644), so pull and push cannot
+disagree about which fields exist:
 
-- `[prompt]`: `key, displayName, description, status, inputSchema`
-- `[[configs]]`: `name, description, provider, model, temperature, maxTokens, outputFormat, systemPrompt, userPromptTemplate`
+- `[prompt]`: `key, displayName, description, status, inputSchema, outputSchema`
+- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig`
 
-It does NOT write: `outputSchema` (prompt or config), `topP`. If you set these and run `pull`, they will be missing from the TOML — round-trip is lossy for those fields.
+A field the server has not set is omitted (there is no TOML `null`), and a JSON
+field TOML cannot represent faithfully — a `null` anywhere inside a schema — is
+written as a JSON string instead of losing the member. A key the server returns
+that this CLI version does not know is named in a warning and left out of the
+file; upgrade the CLI to manage it.
 
 ### What `sync push` does
 
 - Updates existing prompts (matched by `key`) and reconciles configs (matched by `name`).
 - Creates new prompts and additional configs that don't exist on the server.
-- For new prompts, the FIRST `[[configs]]` entry becomes the active config.
+- Activates the `[[configs]]` entry marked `active = true`, on create and on update alike. With no marker, the first entry becomes active on create.
 - Test case TOMLs in `<key>.tests/` are pushed and matched by filename slug.
 - Skips files unchanged since the last sync (use `--force` to bypass).
 - Conflict detection: if a prompt was modified on the server since the last pull, push fails — pull and re-merge.
@@ -527,20 +523,28 @@ Multiple verification types can stack on a single test case. All must pass for t
 ### Create from scratch
 
 ```bash
-cat > my-prompt.toml << 'EOF'
+primitive config new prompt greeting-generator
+```
+
+That writes `prompts/greeting-generator.toml` from the type's defaults. Fill it in:
+
+```toml
 [prompt]
 key = "greeting-generator"
 displayName = "Greeting Generator"
+status = "active"
 
 [[configs]]
 name = "default"
+active = true
 provider = "gemini"
 model = "models/gemini-3-flash-preview"
 temperature = 0.7
 userPromptTemplate = "Generate a friendly greeting for {{ input.name || 'friend' }} who works as a {{ input.occupation || 'professional' }}."
-EOF
+```
 
-primitive prompts create --from-file my-prompt.toml
+```bash
+primitive sync push --only prompt/greeting-generator
 ```
 
 ### Test it
@@ -563,14 +567,19 @@ primitive prompts tests run-all <prompt-id>
 
 ### Compare configs
 
-```bash
-primitive prompts configs create <prompt-id> \
-  --name "creative" \
-  --provider gemini \
-  --model "models/gemini-3-pro-preview" \
-  --temperature 0.9 \
-  --user-template "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
+```toml
+# prompts/<key>.toml — add the candidate alongside the live one
+[[configs]]
+name = "creative"
+provider = "gemini"
+model = "models/gemini-3-pro-preview"
+temperature = 0.9
+userPromptTemplate = "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
+```
 
+```bash
+primitive sync push --only prompt/<key>
+primitive prompts configs list <prompt-id>          # the new config's id
 primitive prompts tests run-all <prompt-id> --config <new-config-id>
 primitive prompts tests runs <prompt-id> --json     # compare runs across configs
 ```
@@ -620,7 +629,7 @@ Both `AppPrompt` (prompt-level) and `AppPromptConfig` (config-level) have an `ou
 - SDK / user REST `POST /prompts/:promptKey/execute` and admin/CLI execute endpoint → use **`prompt.outputSchema`**.
 - Workflow `prompt.execute` step → uses **`config.outputSchema`**.
 
-The TOML `[prompt].outputSchema` field is read on push and applies to the prompt-level field. There is no TOML field that writes `config.outputSchema`; set it via `primitive prompts configs update` if you need it for the workflow path.
+Both are authorable: `[prompt].outputSchema` writes the prompt-level field and `[[configs]].outputSchema` writes the config-level one used by the workflow path.
 
 ---
 
@@ -670,5 +679,5 @@ await client.prompts.execute("p", { variables: { name: "Alice" } });
 6. Evaluator prompts use `{{ output }}` (top-level), NOT `{{ input.output }}`.
 7. `outputSchema` only works with `provider = "gemini"`. With openrouter, use `outputFormat = "json"` + prompt the model.
 8. Test case `--vars` MUST be valid JSON — single-quote in shell, double-quote inside.
-9. `sync pull` is lossy for `outputSchema` and `topP` — set those via the API client/CLI.
+9. `sync pull` writes every authorable field back, including `outputSchema`, `topP` and `providerConfig` — a mistyped key fails the push instead of being dropped.
 10. Both `draft` and `active` prompts execute. `archived` does not. There is no separate "publish" step.

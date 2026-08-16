@@ -1,0 +1,1 @@
+import{_ as a,c as t,o,aj as n}from"./chunks/framework.BlveriQe.js";const p=JSON.parse('{"title":"Changelog","description":"","frontmatter":{},"headers":[],"relativePath":"changelog.md","filePath":"changelog.md"}'),r={name:"changelog.md"};function i(s,e,d,c,l,h){return o(),t("div",null,[...e[0]||(e[0]=[n("",12)])])}const u=a(r,[["render",i]]);export{p as __pageData,u as default};

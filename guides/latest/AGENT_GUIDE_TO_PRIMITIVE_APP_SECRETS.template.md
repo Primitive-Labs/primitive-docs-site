@@ -36,20 +36,25 @@ Integration templates only match uppercase keys — `{{secrets.MY_KEY}}` with `[
 1. **Never inline a credential in TOML** — config files are committed. Reference `{{secrets.KEY}}` and set the value with the CLI.
 2. **Resolve secrets in integration config, not workflow step config.** A workflow step's resolved config is recorded in the run's step output snapshots — a secret templated into `request.headers` becomes readable in run detail. Secrets in the integration's `defaultHeaders`/`staticQuery` resolve after that snapshot and stay invisible. (See the integrations guide.)
 3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value. A key holds exactly one value, so this is a sharp cutover; where a provider gives an overlap window (a webhook signing secret), create a SECOND key and rotate the reference onto it instead.
-4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow renders the missing-path sentinel (or fails the step under `strict = true`); an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook whose referenced key is gone rejects every signed delivery `401`.
+4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow fails the step, naming the key; an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook whose referenced key is gone rejects every signed delivery `401`.
 5. **Budget the 100-key limit.** Every credential a server-side config references is one key — an integration's API key, each signed webhook's signing secret (plus a second key while a rotation window is open), a database rule's token. An app with many signed webhooks needs one key per webhook.
 
 ## Config Vars
 
 The non-secret twin of app secrets: same key format (`^[A-Z][A-Z0-9_]{0,63}$`), same 2 KB value cap, same 100-per-app limit, same declared-only CEL binding, plus a template-resolution form — minus masking and minus save-time validation. Use a var for a plaintext app-wide scalar a rule needs to compare against (a platform-assigned group ID, say); use a secret for anything that grants access to an external system.
 
+Vars are configuration, so they are authored in `vars.toml` and applied with `sync push` — there is no command that writes one directly:
+
 ```bash
-primitive vars set ADMIN_GROUP_ID --value grp_01ABC --summary "Admins group id"
+primitive config set vars ADMIN_GROUP_ID=grp_01ABC
+primitive sync push --only var/ADMIN_GROUP_ID
 primitive vars list          # values ARE shown — vars are not secret
-primitive vars delete ADMIN_GROUP_ID
+primitive vars get ADMIN_GROUP_ID   # one var, as the server has it
 ```
 
-Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `sync push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. `primitive vars set` upserts by key: an existing key is replaced, not refused.
+Delete a var by removing its line from `vars.toml` and pushing — a key the file no longer declares is deleted server-side, no `--prune` needed.
+
+Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `sync push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. A push upserts by key: an existing key is replaced, not refused.
 
 ### Where `{{ vars.KEY }}` resolves
 
@@ -89,7 +94,7 @@ API_HOST = "https://api.example.com"
 - `sync diff` reports var add/remove/modified rows like any other synced entity.
 - **Concurrent-edit guard**: if the server's value drifted since the last local sync (edited from the Admin Console, say), push reports `CONFLICT var: KEY` — with `Local last sync:` / `Server modified:` lines, the same pattern used for every other synced entity type — and exits non-zero. `--force` bypasses the check and overwrites/deletes unconditionally.
 
-There is no client-side read API for vars — `primitive vars list`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.
+There is no client-side read API for vars — `primitive vars list` / `primitive vars get`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.
 
 ## Related guides
 

@@ -359,7 +359,7 @@ autoAddCreator = true          # auto-add creator as member (default: true)
 Beyond sync, the CLI exposes commands for one-off ops (use `--help` for full flags):
 
 ```bash
-primitive database-types list | get <type> | delete <type> | operations list <type>
+primitive database-types list | get <type> | operations list <type>
 primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
 primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
@@ -423,7 +423,7 @@ primitive databases import-csv <database-id> <file.csv> --model <name> \
 
 `databases import` writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run (including a multi-database export dir) at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
 
-`database-types delete <type>` refuses with a 409 when live database instances of that type still exist — delete the instances first (`primitive databases delete <id>`) or pass `--force` to delete the type anyway (this orphans the instances). `-y`/`--yes` only skips the confirmation prompt; it does not bypass the guard. Once the 409 guard passes, the delete cascades: the type's operations and subscriptions are removed first, then the type config row is removed as the commit point — a failure removing a child leaves the whole type intact and the delete is retryable. The response reports the cascade counts: `{ success: true, deletedOperations: number, deletedSubscriptions: number }`.
+Deleting a database type is deleting `database-types/<type>.toml` and running `primitive sync push --prune`. The delete refuses with a 409 when live database instances of that type still exist — delete the instances first (`primitive databases delete <id>`); prune reports the type as blocked and keeps it, and the rest of the prune proceeds. Once the 409 guard passes, the delete cascades: the type's operations and subscriptions are removed first, then the type config row is removed as the commit point — a failure removing a child leaves the whole type intact and the delete is retryable. The response reports the cascade counts: `{ success: true, deletedOperations: number, deletedSubscriptions: number }`.
 
 Generate TypeScript record interfaces and op param/result types from the database-type TOML:
 

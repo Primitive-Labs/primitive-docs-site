@@ -15,10 +15,10 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-08-10",
+    "stampedAt": "2026-08-14",
     "channel": "alpha",
     "packages": {
-      "js-bao-wss-client": "2.0.10",
+      "js-bao-wss-client": "2.1.0",
       "js-bao": "0.5.1",
       "primitive-admin": "1.0.59",
       "primitive-app": "3.0.9"
@@ -1237,6 +1237,28 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.swift.md"
         }
+      ]
+    },
+    {
+      "topic": "changelog",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_CHANGELOG.md",
+      "description": "User-visible platform changes per production release — features, API/CLI changes, notable fixes",
+      "keywords": [
+        "changelog",
+        "release",
+        "releases",
+        "release notes",
+        "what's new",
+        "upgrade",
+        "version",
+        "new features",
+        "deprecations",
+        "breaking changes"
+      ],
+      "useCases": [
+        "Checking what changed before upgrading platform libraries",
+        "Finding new platform capabilities to adopt",
+        "Tracking deprecations that need migration"
       ]
     }
   ]

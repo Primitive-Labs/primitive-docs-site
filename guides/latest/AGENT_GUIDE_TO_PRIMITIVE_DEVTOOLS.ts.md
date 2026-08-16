@@ -548,7 +548,7 @@ and writes its test data there. To assert which environment a run loaded, log
 | `models` | required | The app's model classes, typically `allModels` from `@/models` |
 | `testModules` | required | `import.meta.glob("./**/*.primitive-test.ts")`; each module's default export must be a `TestGroup` or `TestGroup[]` |
 | `appId` / `apiUrl` / `wsUrl` | `process.env.VITE_APP_ID` / `VITE_API_URL` / `VITE_WS_URL` | |
-| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Must derive from a whitelisted test-account base (`primitive apps update <app-id> --test-account-bases "..."`). Use a stable suffix per CI project so the find-or-create provisioner reuses one test user across runs |
+| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Must derive from a whitelisted test-account base (`[app].testAccountBaseEmails` in `app.toml`, applied with `primitive sync push --only app`). Use a stable suffix per CI project so the find-or-create provisioner reuses one test user across runs |
 | `otpCode` | `"000000"` (`PRIMITIVE_TEST_OTP_CODE`) | The test-account OTP bypass code |
 | `testTimeoutMs` | `60_000` | Per-test timeout |
 | `clientOptions` | storage `{ type: "auto" }` | Partial client options; `auto` storage uses better-sqlite3 if installed, memory otherwise — no native deps required |

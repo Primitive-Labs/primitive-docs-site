@@ -88,7 +88,7 @@ Outcome mapping, by source:
 | Source | `ok` | `error` | `pending` | `neutral` |
 |---|---|---|---|---|
 | Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
-| Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | — |
+| Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | `missing`, `skipped` |
 | Workflow step | `completed` | `failed` | — | `skipped` |
 | Webhook | `accepted`, `duplicate`, `handshake`, `workflow_not_active` | `rejected`, `error` | — | — |
 | Activity | — | — | — | always |
