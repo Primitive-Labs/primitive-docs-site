@@ -138,7 +138,7 @@ let token = try await client.handleOAuthCallback(code: code, state: state)
 
 ### Native one-call sign-in (Google / Apple)
 
-`startOAuthFlow` + `handleOAuthCallback` are the raw building blocks. For the native experience use the one-call helpers — each presents the system auth sheet, runs the redirect + code exchange, applies the session token (cause `"google"` / `"apple"`, emitting `.authSuccess` / `.authState`), and re-authenticates the WebSocket. Both return the signed-in `userId` and the server's `isNewUser` flag:
+`startOAuthFlow` + `handleOAuthCallback` are the raw building blocks. For the native experience use the one-call helpers — each presents the system auth sheet, runs the redirect + code exchange, applies the session token (cause `"oauthCallback"` / `"apple"`, emitting `.authSuccess` / `.authState`), and re-authenticates the WebSocket. Both return the signed-in `userId` and the server's `isNewUser` flag:
 
 ```swift
 let google = try await client.signInWithGoogle()   // GoogleSignInResult(userId, isNewUser)
@@ -295,7 +295,7 @@ The client wraps Apple's `AuthenticationServices` in two one-call helpers on `cl
 
 ### Sign in
 
-`signInWithPasskey` runs the discoverable-credential flow — the system sheet lists the passkeys saved for the app, the user picks one, and the call applies the session token (cause `"passkey"`, emitting `.authSuccess` / `.authState`) and re-authenticates the WebSocket. It works without an existing session.
+`signInWithPasskey` runs the discoverable-credential flow — the system sheet lists the passkeys saved for the app, the user picks one, and the call applies the session token (cause `"passkeyAuth"`, emitting `.authSuccess` / `.authState`) and re-authenticates the WebSocket. It works without an existing session.
 
 ```swift
 let result = try await client.auth.signInWithPasskey()   // PasskeySignInResult(user, isNewUser)
@@ -443,10 +443,10 @@ The admin console exposes the same toggles. App code does not need to special-ca
 ```swift
   let signedIn = client.isAuthenticated() // Bool
 
-  // Wait until a userId is available.
+  // Wait for a userId, including one from a sign-in that starts after the call.
   let userId = try await client.waitForUserId(timeout: 5)
 
-  // Wait until authenticated AND offline DBs are ready. Returns the mode.
+  // Wait until signed in. Returns the userId and the network mode.
   let ready = try await client.waitForAuthReady(timeout: 6)
 ```
 

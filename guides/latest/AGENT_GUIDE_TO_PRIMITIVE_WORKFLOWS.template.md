@@ -75,7 +75,7 @@ A run threads one JSON context through every step:
 
 1. **Input**: one JSON object per run — the `start()`/`runSync()` input, the webhook's mapped payload, or the cron trigger's configured input. Validated against `inputSchema` when declared. Top-level scalar properties are coerced to the declared type before the strict check where it's safe: number→`string` via `String()`, numeric string→`number`/`integer` via `Number()` (rejects `""`/NaN), number→`integer` only when integral, `"true"`/`"false"` (case-insensitive)→`boolean`. A non-coercible value (e.g. `"abc"`→number) fails the run with a clear type error. Per-property `coerce: false` opts out; unions/enums/null/nested are not coerced. Applies at every input site (durable run, `start`, `run-sync`, admin preview/run, and `workflow.call` child input), which makes explicit `| string`/`| number` filters at typed call sites optional no-ops.
 2. **Step config is templated at execution time**: steps have no implicit input argument — `{{ ... }}` expressions in config strings resolve against the run context (`input`, `steps.<id>`, `outputs.<saveAs>`, `secrets`, `meta`, forEach vars) just before the step runs (see [Templating](#templating)).
-3. **Output recording**: each step's JSON result is stored as `steps[id]`; `saveAs = "name"` also registers it as `outputs.name` — a stable alias that survives step-id renames. The engine stamps the uniform verdict (`ok`, plus `skipped`/`errored`) on every object entry; array and primitive results pass through unstamped.
+3. **Output recording**: each step's JSON result is stored as `steps[id]`; `saveAs = "name"` also registers it as `outputs.name` — a stable alias that survives step-id renames. The engine stamps the uniform verdict (`ok`, the execution `state`, its `succeeded`/`failed`/`skipped` booleans, plus `errored` on a captured failure) on every object entry; array and primitive results pass through unstamped.
 4. **Final result**: `outputs.output` if any step used `saveAs = "output"`, otherwise the full `outputs` map (see [Output contract](#output-contract)). Every step's input and output stays on the run record.
 
 ## Step types
@@ -249,7 +249,7 @@ Optional: `attachments`, `multipartFields` (for `bodyMode = "multipart"`).
 
 Integration `defaultHeaders` and `staticQuery` resolve `{{secrets.KEY}}` from app secrets — workflow steps cannot put secrets into `request.headers` directly without exposing them in step output snapshots. Put secrets in the integration config.
 
-The integration's own `accessRule` gates this step. `fromWorkflow()` is true here and false for a direct client call, so `accessRule = "fromWorkflow()"` (or `fromWorkflow('<this-workflow-key>')`) is the usual rule for a workflow-only integration. A `runAs: "system"` run binds no user, so a `user.*` or `isMemberOf(...)` rule is false for it and there is no admin bypass. An integration with **no** stored rule refuses the step in both run modes — the step fails non-retryably with `Integration access denied`. See the integrations guide's caller-access section.
+The integration's own `accessRule` gates this step (the `prompt.execute` step is gated the same way by the prompt's `accessRule` — #2652). `fromWorkflow()` is true here and false for a direct client call, so `accessRule = "fromWorkflow()"` (or `fromWorkflow('<this-workflow-key>')`) is the usual rule for a workflow-only integration. A `runAs: "system"` run binds no user, so a `user.*` or `isMemberOf(...)` rule is false for it and there is no admin bypass. An integration with **no** stored rule refuses the step in both run modes — the step fails non-retryably with `Integration access denied`. See the integrations guide's caller-access section.
 
 ### `database.query` / `mutate` / `count` / `aggregate` / `pipeline` / `applyToQuery`
 
@@ -1041,7 +1041,9 @@ runIf = "input.shouldRun"                        # truthy
 runIf = "outputs.text.length < 1000"             # comparison
 runIf = "steps.check.isMember && input.amount > 0"
 runIf = "steps.previous.ok"                      # uniform verdict on every object result
-runIf = "!steps.fetch.skipped"
+runIf = "!steps.fetch.skipped"                   # booleans are always present, never absent
+runIf = "steps.fetch.succeeded && steps.fetch.output.count > 0"   # guard, then read
+runIf = "steps.charge.failed"                    # reacts to a captured failure"
 ```
 
 CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
@@ -1251,31 +1253,38 @@ Every **object** entry in `steps[id]` carries a reserved verdict namespace along
 
 | Field | When set |
 |---|---|
+| `state: string` | On every object result. One of `"succeeded"`, `"failed"`, `"skipped"` — the step's execution outcome, derived from the fields below (`skipped` wins over `ok`) |
+| `succeeded`, `failed`, `skipped` | On every object result, as booleans mirroring `state`. Always PRESENT (`false` rather than absent), so `!steps.x.skipped` and `steps.x.succeeded && steps.x.output...` are safe on any entry |
 | `ok: boolean` | On every object result. `true` if the step ran and the runner classified it as successful; `false` for skipped, errored, or kind-specific failures (e.g. an `integration.call` that returned HTTP 5xx) |
-| `skipped: true` | The step's `runIf` evaluated falsy, or a step listed in its `skipWhenSkipped` was itself skipped. The runner did NOT execute. |
 | `errored: true` | The step threw but was captured by `continueOnError = true` |
 | `error`, `errorDetails` | Companion fields populated when `errored: true` |
 | `code`, `status` | Companion fields populated when `errored: true` **and** the failure was classified (e.g. `CONDITION_NOT_MET` / `409`). Absent when the failure carried no classification, so only branch on `steps.<id>.code` where a classified failure is the case you are testing for |
 
-`ok`, `skipped`, `errored`, `error`, and `errorDetails` are written by the engine and override any same-named field the runner would have produced. Downstream `runIf` and templates can rely on them whenever the step's result is an object — skipped and errored steps always are:
+`state`, `succeeded`, `failed`, `ok`, `skipped`, `errored`, `error`, and `errorDetails` are written by the engine and override any same-named field the runner would have produced. Downstream `runIf` and templates can rely on them whenever the step's result is an object — skipped and errored steps always are:
 
 ```toml novalidate
 runIf = "steps.fetch.ok"
-runIf = "!steps.fetch.skipped && !steps.fetch.errored"
+runIf = "!steps.fetch.skipped"
+runIf = "steps.fetch.failed"                # any failure, including one with no response body
+runIf = "steps.fetch.state == 'skipped'"
 ```
 
-When a step reads `steps.<upstream>.output.*` and that upstream can be skipped, a skipped upstream leaves no `output` key and an unguarded multi-segment read throws `No such key: output`. Two structural fixes: guard the read with safe navigation (`steps.fetch.?output.?items`), or declare `skipWhenSkipped = ["fetch"]` so the dependent auto-skips whenever `fetch` skips — its `runIf` is never evaluated. The skip is transitive and reacts only to `skipped: true` (an upstream that errored under `continueOnError` does not trigger it). List only earlier step ids; a save-time warning flags an unguarded skippable read or a `skipWhenSkipped` entry naming an unknown or forward step id.
+`state: "failed"` covers every way a step can fail while the run continues: a thrown failure captured by `continueOnError` (timeouts and transport errors included — no response body needed), a kind-specific failure such as an HTTP 5xx or a `body.error`, a `runIf` CEL error captured the same way, and a `forEach` with at least one errored iteration. Because the booleans are always present, testing `has(steps.x.skipped)` tells you nothing — test the value.
+
+The same verdict rides on steps executed during a `compensate` block, including compensation steps that skip or fail, so a later compensation step can branch on `steps.<earlier>.failed`.
+
+When a step reads `steps.<upstream>.output.*` and that upstream can be skipped, a skipped upstream leaves no `output` key and an unguarded multi-segment read throws `No such key: output`. Three structural fixes: lead with the upstream's verdict (`steps.fetch.succeeded && steps.fetch.output.count > 0` — the guard is `false`, not absent, so `&&` absorbs the read), guard the read with safe navigation (`steps.fetch.?output.?items`), or declare `skipWhenSkipped = ["fetch"]` so the dependent auto-skips whenever `fetch` skips — its `runIf` is never evaluated. The skip is transitive and reacts only to `skipped: true` (an upstream that errored under `continueOnError` does not trigger it). List only earlier step ids; a save-time warning flags an unguarded skippable read or a `skipWhenSkipped` entry naming an unknown or forward step id.
 
 ## Access control
 
-`accessRule` is a CEL expression. Evaluated when:
+`accessRule` is a CEL expression. **A caller workflow with no rule denies every non-admin start** (#2652 — existing workflows included); `accessRule = "true"` restores open access, and a create without one is refused with `accessRule is required (use "true" for a workflow any app member may start)`. A refused start answers `403 { errorCode: "WORKFLOW_ACCESS_DENIED" }` on all three paths, with the cause (`no access rule` vs `denied`) only in the worker log. Evaluated when:
 - A client calls `workflows.start()`.
 - A `workflow.call` step invokes the workflow from another workflow.
 
 NOT evaluated for inbound webhook or cron triggers (those bypass it entirely — a webhook handles its own auth, e.g. a Stripe signature). A webhook- or cron-triggered workflow must be `runAs: "system"` (see [Execution identity](#execution-identity-runas-system-workflows)), and a system workflow takes **no** `accessRule` — the rule is never evaluated on a system run, so a non-empty one is rejected at save/push time (see below). What prevents direct client invocation of a webhook workflow is the system-invocation gate plus the webhook's signature verification. Reserve `accessRule` for `runAs: "caller"` workflows, where it genuinely gates who may start a run.
 
 Behavior:
-- No rule → any authenticated app member can start.
+- No rule → **denied** for every caller but an app admin or owner (#2652; set `"true"` to allow any app member).
 - `admin`/`owner` always bypass.
 - Otherwise, evaluate against `user.userId`, `user.role`, plus `hasRole(role)`, `isMemberOf(groupType, groupId)`, `memberGroups(groupType)`.
 

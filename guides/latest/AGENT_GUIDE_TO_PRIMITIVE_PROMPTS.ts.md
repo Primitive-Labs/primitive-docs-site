@@ -183,6 +183,8 @@ key = "my-prompt"                # required, unique per app, kebab-case
 displayName = "My Prompt"        # required
 description = "What it does"     # optional
 status = "draft"                 # optional: draft (default) | active | archived
+accessRule = "true"              # REQUIRED at create (#2652): CEL deciding who may execute.
+                                 # Absent/empty = every non-admin execution denied.
 inputSchema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
 
 [[configs]]
@@ -462,7 +464,7 @@ Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are p
 definition (`src/config-surface/prompt.ts`, #2644), so pull and push cannot
 disagree about which fields exist:
 
-- `[prompt]`: `key, displayName, description, status, inputSchema, outputSchema`
+- `[prompt]`: `key, displayName, description, status, accessRule, inputSchema, outputSchema`
 - `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig`
 
 A field the server has not set is omitted (there is no TOML `null`), and a JSON
