@@ -12,7 +12,7 @@ A script converges on the same shape as managed prompts:
 - Versioned **`ScriptConfig`** rows each hold a Rhai body plus that config's `limits`.
 - The active body is the `ScriptConfig` that `activeConfigId` points at.
 
-You never edit these records directly. A script body lives in your sync directory as `transforms/<name>.rhai`, where `<name>` (the filename without `.rhai`) is the script's unique name. `primitive sync push` mirrors the file to the server — creating a new `ScriptConfig` and activating it — and `primitive sync pull` writes it back. Authoring is sync-only: no CLI command writes a script body. The `primitive scripts` command is read/inspect, test-case management, and deletion on top of that — list scripts, inspect a script's versions, create or run its test cases (see [Testing](#testing)), and delete a script and its versions (see [Deleting a script](#deleting-a-script)).
+You never edit these records directly. A script body lives in your config directory as `transforms/<name>.rhai`, where `<name>` (the filename without `.rhai`) is the script's unique name. `primitive config push` mirrors the file to the server — creating a new `ScriptConfig` and activating it — and `primitive config pull` writes it back. Authoring is sync-only: no CLI command writes a script body. The `primitive scripts` command is read/inspect, test-case execution, and deletion on top of that — list scripts, inspect a script's versions, run its test cases (which are authored as TOML beside the body, see [Testing](#testing)), and delete a script and its versions (see [Deleting a script](#deleting-a-script)).
 
 ### Live resolution at run time
 
@@ -35,7 +35,7 @@ A script is `transforms/<name>.rhai` in the sync tree, so deleting one is deleti
 
 ```bash
 rm config/transforms/normalize-order.rhai
-primitive sync push --prune
+primitive config push --prune
 ```
 
 Because workflows resolve a script by **name** at run time, deleting one that a live workflow still names would break those steps on their next run. The server guards against this: if an **active** workflow references the script by name, the delete is refused with a 409 whose body names the referencing workflows. Prune reports that script as blocked, keeps it, and carries on with the rest of the prune — remove or re-point the referencing workflows, then push again.
@@ -126,6 +126,9 @@ maxOutputBytes = 65536
 | `maxStringSize` | Length of any output string |
 | `maxCallDepth` | Rhai call-stack depth |
 | `maxLogBytes` | Cumulative log output |
+| `maxInputBytes` | Serialized `with` table size, default 262,144 bytes (256KB) — **not** lowerable via a step's `limits` table (it isn't one of the fields `[steps.limits]` accepts); a step that exceeds it fails non-retryably with `input ctx is <n> bytes; limit is 262144` |
+
+Keep script inputs small: project payload-bearing columns out of query results and pass plucked scalar arrays (ids, timestamps) rather than full records when a downstream script only needs a few fields — batch-processing patterns that pipe a query step's `data` straight into a map script hit the input cap at a few hundred payload-bearing rows.
 
 ## Errors
 
@@ -152,22 +155,28 @@ Each execution records per-step telemetry at `steps.<id>.scriptMetrics` — a si
 
 Determinism is what makes scripts testable: same input, same output, no hidden state.
 
-Test a script directly with `primitive scripts tests` — fix the input variables and assert on the returned JSON. A test case names a script, carries input `--vars`, and expresses expectations with `--pattern` (a regex over the output), `--contains` (a JSON array of required substrings), and/or `--json-subset` (a JSON object the result must include); `--config` pins the case to a specific version:
+A test case is a TOML file beside the script body — `transforms/<name>.tests/<case>.toml` — applied by `primitive config push`. It fixes the input variables and expresses expectations with `expectedOutputPattern` (a regex over the output), `expectedOutputContains` (JSON text: an array of required substrings), and/or `expectedJsonSubset` (JSON text: an object the result must include); `configName` pins the case to a specific version:
+
+```toml
+# transforms/normalize-order.tests/drops-zero-qty.toml
+[test]
+name = "drops zero-qty"
+inputVariables = '{"raw":{"items":[{"qty":0}]},"currency":"USD"}'
+expectedOutputContains = '["USD"]'
+```
 
 ```bash
 primitive scripts list
-primitive scripts tests create normalize-order --name "drops zero-qty" \
-  --vars '{"raw":{"items":[{"qty":0}]},"currency":"USD"}' --contains '["USD"]'
+primitive config push --only transform/normalize-order
 primitive scripts tests run-all normalize-order
 ```
 
-Test cases round-trip through sync in the `transforms/<name>.tests/*.toml` layout, so they live beside the script body in your sync directory.
+`primitive config fields transform` lists the sidecar's keys. Deleting a case is removing its file and running `primitive config push --prune`.
 
-You can also drive a script end-to-end from the workflow that uses it, with workflow test cases that assert on `steps.<id>.output`:
+You can also drive a script end-to-end from the workflow that uses it, with a workflow test case (`workflows/<key>.tests/<case>.toml`) that asserts on `steps.<id>.output`:
 
 ```bash
-primitive workflows tests create <workflow-id> --name "normalize: drops zero-qty" \
-  --vars '{"currency":"USD"}'
+primitive config push --only workflow/<key>
 primitive workflows tests run-all <workflow-id>
 ```
 

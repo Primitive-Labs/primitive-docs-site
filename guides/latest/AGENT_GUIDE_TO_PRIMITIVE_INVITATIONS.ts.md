@@ -83,7 +83,7 @@ An app's access mode decides who can sign up:
 
 ```bash
 primitive config set app app.mode=public     # | invite-only | domain
-primitive sync push --only app
+primitive config push --only app
 ```
 
 In `domain` mode, the allowed domains are carried on the app's `allowedDomains` list. Deferred grants are re-validated against this list at resolution time (see [Domain re-validation](#domain-mode-apps)).
@@ -160,7 +160,7 @@ By default only admins/owners can invite. Two app fields control member invitati
 | `memberInvitationsEnabled` | If `true`, users with role `"member"` can create invitations |
 | `memberInvitationLimit` | Max active (non-accepted, non-expired) invitations per member |
 
-Set both in the `[invitations]` table of `app.toml` — `enabled` and `limit` (`0` = unlimited) — and apply with `primitive sync push --only app`.
+Set both in the `[invitations]` table of `app.toml` — `enabled` and `limit` (`0` = unlimited) — and apply with `primitive config push --only app`.
 
 `quota()` returns `{ used: 0, limit: 0, remaining: 0, unlimited: false }` for a member when `memberInvitationsEnabled` is `false` — treat that as "no quota, hide the button." Admins/owners always get `unlimited: true` and are exempt from the limit. Members can only invite at `role: "member"`; passing `"admin"`/`"owner"` is rejected.
 

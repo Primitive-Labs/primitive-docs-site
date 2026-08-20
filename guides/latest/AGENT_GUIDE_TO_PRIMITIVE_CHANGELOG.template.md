@@ -26,5 +26,5 @@ User-visible changes in each production release of the Primitive platform, newes
 - Users who linked a second sign-in provider are no longer locked out of the first.
 - A just-created document appears in the creator's owned-documents list immediately.
 - Group-membership reads paginate fully instead of silently truncating for users with many memberships.
-- CLI: date-time field values are serialized correctly on `primitive sync push`, and workflow lock configuration (`[workflow.lock]`) survives sync push and pull.
+- CLI: date-time field values are serialized correctly on `primitive config push`, and workflow lock configuration (`[workflow.lock]`) survives config push and pull.
 - Swift client: `waitForWriteConfirmation` and `waitForInSync` wait for the write to actually be confirmed, and reconnect backoff no longer overflows during long outages.

@@ -63,6 +63,19 @@ Documents must be opened before querying or modifying data within them.
 
 Documents are ready to be queried once the `.open()` call finishes. Applications should wait for all required documents to be opened and show a loading state until then, then track document-specific readiness explicitly. `open()` is idempotent — calling it on an already-open document is a no-op. Handle open failures explicitly: surface an error or redirect; don't silently continue.
 
+When an open needs server state to satisfy its `waitForLoad` — `network`, or `localIfAvailableElseNetwork` with no local copy — the call fails fast with a coded error instead of waiting on a sync that cannot happen:
+
+| Code | When |
+|---|---|
+| `DOCUMENT_UNAVAILABLE_OFFLINE` | `waitForLoad: network` while the network mode is offline |
+| `NETWORK_REQUIRES_AUTOSTART` | `waitForLoad: network` with `enableNetworkSync: false` — nothing would ever start the sync being waited for |
+| `NO_LOCAL_AND_NO_NETWORK` | `localIfAvailableElseNetwork` with no local copy and the document's sync left to the caller |
+| `CONNECTION_DISABLED` | the WebSocket is neither up nor able to come up — no token, or the state a logout / auth failure leaves behind |
+| `NETWORK_TIMEOUT` | the open waited out its availability budget (`availabilityWait`, default 30 seconds) without the sync completing — it throws rather than returning a possibly-empty document |
+
+A failed open does not leave the document registered as open — handle the error and retry the open itself.
+Thrown as `JsBaoError` with the matching `code` — narrow with `isJsBaoError(err)` and branch on `err.code`, not on the message text.
+
 Open only the documents you need to query or want real-time updates from — every open document syncs continuously. Don't open documents you don't need, and close ones you're done with (see [Closing Documents](#closing-documents)).
 
 Track readiness with an `isReady` ref.
@@ -1483,7 +1496,7 @@ When `sendEmail: true`, the server delivers per-recipient emails:
 - **Existing app members** receive the `document-share` template, populated with the caller-supplied `documentUrl`.
 - **Non-members (deferred grants)** receive the `document-share-deferred` template, populated with an accept URL composed from `app.baseUrl` + the new `inviteToken` (shape `${app.baseUrl}/invite/accept?inviteToken=...`).
 
-Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type by authoring `email-templates/document-share.toml` or `email-templates/document-share-deferred.toml` and running `primitive sync push`.
+Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type by authoring `email-templates/document-share.toml` or `email-templates/document-share-deferred.toml` and running `primitive config push`.
 
 Repeated email-based calls are idempotent: a second `updatePermissions` call for the same email updates the existing pending `DeferredDocumentPermission` in place rather than creating a duplicate row, so the latest `permission` value wins at signup-time resolution and `client.documents.listPendingInvitations(documentId)` shows one entry per pending recipient.
 
@@ -1786,12 +1799,13 @@ For per-context CEL rules using `collectionType` + `contextId` (and the `hasColl
 primitive collections create "Q1 Reports" --description "Quarterly reports"
 primitive collections create "Q1 Reports" --initial-metadata '{"settings":{"visibility":"class-only"}}'
 primitive collections list
-primitive collections docs {add|remove|list} <collection-id> [<document-id>]
+primitive collections documents {add|remove|list} <collection-id> [<document-id>]
 primitive collections share <collection-id> --group team/engineering --permission read-write
 primitive collections unshare <collection-id> --group team/engineering
+primitive collections members list <collection-id>
 primitive collections members add <collection-id> <user-id> --permission reader
 primitive collections members remove <collection-id> <user-id>
-primitive collections access <collection-id>
+primitive collections access <collection-id>   # combined groups + members view
 ```
 
 ### Building a "Members + Pending" UI
@@ -1968,6 +1982,10 @@ primitive documents stats <document-id>
 The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
 
 ```bash
+# Create a document — prints the minted document id (add --json for the full response)
+primitive documents create "Quarterly Report"
+primitive documents create "Quarterly Report" --owner user@example.com
+
 # Create or replace a record (--id optional — a unique id is generated when omitted;
 # --upsert-on <field> updates the record whose field value matches instead)
 primitive documents records save <document-id> <model-name> --data '{"name":"gear","qty":5}'
@@ -1980,9 +1998,16 @@ primitive documents records delete <document-id> <model-name> <record-id> -y
 
 # Apply an ordered multi-model operations blob atomically
 primitive documents records bulk <document-id> --data-file ops.json -y
+
+# Delete the whole document — records, Yjs update history, blobs, aliases, permissions
+primitive documents delete <document-id> -y
 ```
 
 `records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "data", "precondition"? }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. `data` carries the record fields — the same key `records save` / `records patch` take — and is required and non-empty on `create` and `patch`; `delete` takes none. Any other key in an operation is rejected with a 400 naming the operation index, so a mis-keyed payload fails loudly instead of writing an empty record. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
+
+`documents create` goes through the same `POST /documents` endpoint every client uses. Ownership follows the token: an app-user token — member, admin, or owner — always creates the document owned by the caller (`--owner` is ignored for those tokens); a super-admin or assigned-console-admin token acts through an admin shadow app user, which owns the document unless `--owner` names another user. `--owner` takes a user id or an email (resolved before anything is created); a user not in the app fails the command without creating a document.
+
+`documents delete` is the document-level verb, not a record one: the server runs the same cascade the client SDK's `documents.delete()` triggers — Yjs state and update history, blob records and objects, aliases, user and group permissions, invitations, and collection memberships. It prompts unless `-y` is passed and refuses a user's root document. Deletion is authorized by the server: the document's owner, the app owner, and super-admin or assigned-console-admin tokens delete directly; everyone else — including app-role admins — can delete only when a containing collection's `document.delete` rule allows it. Refusals are surfaced verbatim at exit 1.
 
 Grant and revoke a user's access to a document. `grant` takes either `--user-id` or `--email` plus a `--permission` level of `reader` or `read-write`; re-granting for the same user updates the level in place. `revoke` targets a user by id argument or `--email`, and prompts for confirmation unless `-y` is passed.
 

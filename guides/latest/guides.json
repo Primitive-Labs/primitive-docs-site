@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-08-14",
+    "stampedAt": "2026-08-20",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "2.1.0",
@@ -988,7 +988,7 @@
         "config",
         "sync",
         "TOML",
-        "primitive sync",
+        "primitive config",
         "push",
         "pull",
         "diff",

@@ -67,7 +67,7 @@ Use when each workspace is a sharing unit and every member of that workspace nee
 ### Database — registered operation with CEL access
 
 ```toml
-# config/database-types/project.toml
+# config/database-type-configs/project.toml
 [[operations]]
 name = "listMyTasks"
 type = "query"
@@ -107,7 +107,7 @@ Both fire server-side before the write reaches storage. Clients cannot bypass th
 
 ### Database — real-time subscription
 
-Subscriptions are declared on the type config and apply to every database of that type. Push them with `primitive sync push`.
+Subscriptions are declared on the type config and apply to every database of that type. Push them with `primitive config push`.
 
 ```toml
 [[subscriptions]]

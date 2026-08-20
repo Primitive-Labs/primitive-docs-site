@@ -67,13 +67,13 @@ Database setup has two phases: **configuration** (via CLI and TOML config files)
 
 ### 1. Configure database types and operations via CLI
 
-Initialize a sync directory and create config files:
+Initialize a config directory and create config files:
 
 ```bash
-primitive sync init
+primitive config init
 ```
 
-Create a database type config with operations in `config/database-types/project.toml`:
+Create a database type config with operations in `config/database-type-configs/project.toml`:
 
 ```toml
 [type]
@@ -129,12 +129,12 @@ type = "string"
 required = true
 ```
 
-Files written before migration may encode `definition`/`params` as single-line JSON strings — the server treats the encodings identically; see [Operation types](#operation-types) and `primitive sync migrate-toml` for converting a file.
+Files written before migration may encode `definition`/`params` as single-line JSON strings — the server treats the encodings identically; see [Operation types](#operation-types) and `primitive config migrate-toml` for converting a file.
 
 Push configuration to the server:
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 ### 2. Use databases in app code
@@ -164,21 +164,34 @@ Construct the client, then create a database and call its registered operations:
 
 ## Configuring with the CLI
 
-All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive sync` command, which keeps configuration version-controlled alongside your code. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and the `--dir` override.
+All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive config` command, which keeps configuration version-controlled alongside your code. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and the `--dir` override.
 
-Database configs live under these paths in the sync directory:
+Database configs live under these paths in the config directory:
 
 ```
-database-types/*.toml           # Database type configs + operations
+database-type-configs/*.toml    # Database type configs + operations
 rule-sets/*.toml                # Access rule sets (CEL rules)
 group-type-configs/*.toml       # Group type configs
 ```
 
-`primitive sync migrate-toml` rewrites database-type and workflow files to native TOML tables — a purely local rewrite, semantically identical on the server, that converts JSON-string fields to native tables: `definition`/`params` in database-type files (see [Operation types](#operation-types) for the two forms and the fallback rules) and `inputSchema`/`outputSchema` in workflow files. Pass `--dry-run` to preview the rewrite without writing files.
+**Renamed:** this directory was `database-types/` and its selector was
+`database-type`. Both now carry the `-config(s)` suffix their siblings use, and
+the old spellings are gone rather than aliased. A checkout made before the
+rename keeps working after one manual move — `config pull`, `push` and `diff`
+print the resolved paths and the exact move command when they find the old
+directory (a plain `git mv` rename, or a move of its files when the new
+directory already exists), and `config push --prune` refuses to run until it is
+moved, because
+prune would otherwise read every previously managed type as locally deleted.
+The move is a push no-op: the synced state is unchanged, so the first push
+after it applies nothing. Re-run `primitive databases codegen` afterwards to
+restamp the generated files' header.
+
+`primitive config migrate-toml` rewrites database-type and workflow files to native TOML tables — a purely local rewrite, semantically identical on the server, that converts JSON-string fields to native tables: `definition`/`params` in database-type files (see [Operation types](#operation-types) for the two forms and the fallback rules) and `inputSchema`/`outputSchema` in workflow files. Pass `--dry-run` to preview the rewrite without writing files.
 
 ### Database type config files
 
-Each file in `database-types/` defines a database type with its triggers and operations.
+Each file in `database-type-configs/` defines a database type with its triggers and operations.
 
 **TOML quoting tip:** CEL expressions containing apostrophes (e.g., `isMemberOf('class-teachers', database.id)`) must use triple-quoted strings in TOML, because single-quoted TOML strings don't support escaping. Use `'''...'''` for literal strings or `"""..."""` for basic strings:
 
@@ -195,7 +208,7 @@ access = "isMemberOf('team', database.metadata.teamId)"
 
 Note: Double-quoted strings (`"..."`) also work for CEL with single quotes inside, since TOML only requires escaping the quote character that delimits the string.
 
-**File:** `config/database-types/project.toml`
+**File:** `config/database-type-configs/project.toml`
 
 ```toml
 [type]
@@ -359,7 +372,7 @@ autoAddCreator = true          # auto-add creator as member (default: true)
 Beyond sync, the CLI exposes commands for one-off ops (use `--help` for full flags):
 
 ```bash
-primitive database-types list | get <type> | operations list <type>
+primitive database-type-configs list | get <type> | operations list <type>
 primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--cel-context '{...}'] [--initial-metadata '{...}'] | delete <id>
 primitive databases cel-context update <id> --data '{"teamId":"team-1"}'
 
@@ -410,7 +423,7 @@ primitive databases records patch <id> <model-name> <record-id> --data '{"status
 # reports no rows-affected), not records that existed.
 primitive databases records bulk <id> --data-file ops.json -y
 
-# Data migration (records + indexes + constraints; type config excluded — run sync push on target first)
+# Data migration (records + indexes + constraints; type config excluded — run config push on target first)
 primitive databases export <id> --output ./out
 primitive databases import ./out --overwrite [--dry-run] [--batch-size 5000] [--stop-on-error]
 
@@ -423,7 +436,7 @@ primitive databases import-csv <database-id> <file.csv> --model <name> \
 
 `databases import` writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run (including a multi-database export dir) at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
 
-Deleting a database type is deleting `database-types/<type>.toml` and running `primitive sync push --prune`. The delete refuses with a 409 when live database instances of that type still exist — delete the instances first (`primitive databases delete <id>`); prune reports the type as blocked and keeps it, and the rest of the prune proceeds. Once the 409 guard passes, the delete cascades: the type's operations and subscriptions are removed first, then the type config row is removed as the commit point — a failure removing a child leaves the whole type intact and the delete is retryable. The response reports the cascade counts: `{ success: true, deletedOperations: number, deletedSubscriptions: number }`.
+Deleting a database type is deleting `database-type-configs/<type>.toml` and running `primitive config push --prune`. The delete refuses with a 409 when live database instances of that type still exist — delete the instances first (`primitive databases delete <id>`); prune reports the type as blocked and keeps it, and the rest of the prune proceeds. Once the 409 guard passes, the delete cascades: the type's operations and subscriptions are removed first, then the type config row is removed as the commit point — a failure removing a child leaves the whole type intact and the delete is retryable. The response reports the cascade counts: `{ success: true, deletedOperations: number, deletedSubscriptions: number }`.
 
 
 Generate Swift record structs and op param/result types from the database-type TOML:
@@ -432,7 +445,7 @@ Generate Swift record structs and op param/result types from the database-type T
 primitive databases codegen --lang swift -o ./Generated/Databases
 ```
 
-Codegen reads the database-type TOML from the auto-resolved sync directory (`.primitive/sync/<env>/<appId>/`); pass `--sync-dir <path>` only when overriding it. With no `-o`, generated files land in `<sync-dir>/database-types/generated/`. It emits one `<type>.generated.swift` per database type. Every symbol for a type is nested under a caseless `public enum <Type>` namespace — one record `struct` per model, a per-op `<Op>Params` struct, a per-op `<Op>Result` typealias, and an `Ops` factory struct plus a static `<Type>.ops(client, databaseId:)`. Because a Swift package compiles all `<type>.generated.swift` files into one module, the namespace is what keeps two database types that each define an op named `list` from colliding: they emit `Orders.ListParams` and `Invoices.ListParams`, never a bare `ListParams`. Each generated file is `import JsBaoClient`. (This nesting is a breaking change from the earlier flat symbols — `SaveAccountParams` → `Portfolio.SaveAccountParams`, `portfolioOps(...)` → `Portfolio.ops(...)`; regenerate and update call sites after upgrading.)
+Codegen reads the database-type TOML from the auto-resolved config directory (`.primitive/sync/<env>/<appId>/`); pass `--dir <path>` only when overriding it. With no `-o`, generated files land in `<config-dir>/database-type-configs/generated/`. It emits one `<type>.generated.swift` per database type. Every symbol for a type is nested under a caseless `public enum <Type>` namespace — one record `struct` per model, a per-op `<Op>Params` struct, a per-op `<Op>Result` typealias, and an `Ops` factory struct plus a static `<Type>.ops(client, databaseId:)`. Because a Swift package compiles all `<type>.generated.swift` files into one module, the namespace is what keeps two database types that each define an op named `list` from colliding: they emit `Orders.ListParams` and `Invoices.ListParams`, never a bare `ListParams`. Each generated file is `import JsBaoClient`. (This nesting is a breaking change from the earlier flat symbols — `SaveAccountParams` → `Portfolio.SaveAccountParams`, `portfolioOps(...)` → `Portfolio.ops(...)`; regenerate and update call sites after upgrading.)
 
 **Codegen enum / required typing.** A field or op param restricted to a fixed set of string values becomes a nested `String`-backed enum on the struct (e.g. `Portfolio.Account.StatusValue` with cases `active` / `closed` / `pending_review` raw-valued to `"pending-review"`), so invalid values fail to compile (enum params are also validated server-side). Params an operation marks `required` are emitted as non-optional stored properties; the rest are optional with a `nil` default. A wire key that isn't a valid Swift identifier (`display-name`, `record-id`) is mapped through a generated `CodingKeys` enum, so JSON decoding stays correct.
 
@@ -457,6 +470,21 @@ try await ops.saveAccount(Portfolio.SaveAccountParams(accountNumber: "AC-1"))
 
 Outside the factory, call the same overload directly with explicit type parameters: `try await client.databases.executeOperation(databaseId: databaseId, name: "listAccounts", params: Portfolio.ListAccountsParams()) as DBQueryResult<Portfolio.Account>`.
 
+**Typed subscription calls.** When the type declares `[[subscriptions]]` blocks, the namespace also exposes a static factory `<Type>.subscriptions(client, databaseId:)` — `Portfolio.subscriptions` beside `Portfolio.ops` — returning the nested `<Type>.Subscriptions` struct with one throwing method per subscription, keyed by the subscription key. Each method takes the same `DatabaseSubscribeOptions` as the untyped `subscribe` plus a typed `onChange`, delegates to the client's `databases.subscribe(databaseId:subscriptionKey:rowType:options:onChange:)` overload, and returns the `EventSubscription` handle — hold it for as long as you want changes; releasing it unsubscribes:
+
+```swift
+let subs = Portfolio.subscriptions(client, databaseId: databaseId)
+// Hold the handle: releasing it unsubscribes.
+let handle = try subs.openAccounts { payload in
+    for change in payload.changes {
+        // change.data is a Portfolio.OpenAccountsRow?, not Any
+        print(change.op, change.data?.accountNumber ?? "-")
+    }
+}
+```
+
+Each subscription gets its own `<Sub>Row` struct (`Portfolio.OpenAccountsRow`) carrying the declared model's fields — narrowed to the `select` projection when one is declared, with enum fields referencing the record struct's nested enums — and `onChange` receives a `TypedDatabaseChangePayload<Row>`: `changes[].data` / `changes[].previousData` decode into the row, and the payload keeps the untyped payload's origin metadata (`isOrigin`, `isOriginUser`, `originConnectionId`, `originUserId`). Every row field is **optional**, deliberately unlike the record struct: a change frame carries only the fields the write touched (`patch`, `increment`, and the set ops send just the delta; `save` merges), narrowed further by `select`, so a non-optional field would claim a value the frame need not carry. Decoding never throws — a `delete` frame's absent `data`, or a blob that does not decode into the row, arrives as `nil` with the frame still delivered, and `change.raw` holds the untyped event for anything the row cannot express. A model with no `[models.*]` schema has nothing to narrow, so its rows stay open (`[String: JSONValue]`). When a subscription key normalizes to a Swift name that collides with another generated symbol, codegen fails the run with a hint naming the rename rather than emitting colliding code. An app already holding an untyped payload can type it after the fact with `TypedDatabaseChangePayload(decoding:as:)`. See [Real-Time Subscriptions](#real-time-subscriptions) for the subscription API, TOML shape, and what each `op` puts in `data`.
+
 ## Database Types
 
 A **database type** is a named configuration shared across many databases. It provides:
@@ -472,7 +500,7 @@ A **database type** is a named configuration shared across many databases. It pr
 
 Swift `executeOperation` can call **any** registered operation regardless of its `type` (it returns `JSONValue`). Operation *management* is narrower: Swift's `DatabaseOperationType` enum — used by `createOperation` / `listOperations` — models only `query`, `mutation`, `count`, and `aggregate`. Define and manage `pipeline` and `applyToQuery` operations through TOML and the `primitive` CLI rather than the typed Swift management API.
 
-Real-time subscriptions are also part of the type config — see [Real-Time Subscriptions](#real-time-subscriptions). One subscription definition serves every database of that type. Define them as `[[subscriptions]]` blocks in the same TOML file; `primitive sync push` manages them alongside operations.
+Real-time subscriptions are also part of the type config — see [Real-Time Subscriptions](#real-time-subscriptions). One subscription definition serves every database of that type. Define them as `[[subscriptions]]` blocks in the same TOML file; `primitive config push` manages them alongside operations.
 
 ### Triggers
 
@@ -571,10 +599,10 @@ An operation can override the default by setting its own `access`. Without `defa
 A database type can carry an optional schema — one or more `[models.<Name>.fields.<field>]` blocks in the same TOML file as the type config. When a schema is present, the server enforces consistency between ops and the schema in both directions:
 
 - **Op-edit gate.** Creating or editing an operation runs every static `modelName` and field reference in `filter` / `projection` / `sort` / `data` / `access` / mutation `condition` against the schema. References that don't resolve fail with HTTP 422 `OPERATION_REFERENCES_UNDEFINED` (the response payload lists each unresolved ref).
-- **Schema-edit gate.** Editing or deleting the schema runs every op the push leaves behind against the proposed new schema — an op the same `primitive sync push` rewrites is checked as rewritten, and one it deletes is not checked at all, so removing a model and updating every operation that referenced it is a single push. If an op that survives the push would break, the edit fails with HTTP 422 `SCHEMA_BREAKS_OPERATIONS`. If any op contains references the gate can't statically resolve (see "Dynamic references" below), the edit fails with HTTP 422 `SCHEMA_HAS_UNCHECKABLE_OPS` until you re-run with `primitive sync push --accept-warnings`. Deleting the schema entirely (removing all `[models.*]` blocks from the local file) is rejected with HTTP 409 `OPS_EXIST` while any operations are still registered.
+- **Schema-edit gate.** Editing or deleting the schema runs every op the push leaves behind against the proposed new schema — an op the same `primitive config push` rewrites is checked as rewritten, and one it deletes is not checked at all, so removing a model and updating every operation that referenced it is a single push. If an op that survives the push would break, the edit fails with HTTP 422 `SCHEMA_BREAKS_OPERATIONS`. If any op contains references the gate can't statically resolve (see "Dynamic references" below), the edit fails with HTTP 422 `SCHEMA_HAS_UNCHECKABLE_OPS` until you re-run with `primitive config push --accept-warnings`. Deleting the schema entirely (removing all `[models.*]` blocks from the local file) is rejected with HTTP 409 `OPS_EXIST` while any operations are still registered.
 
 ```toml
-# config/database-types/inventory.toml
+# config/database-type-configs/inventory.toml
 [type]
 databaseType = "inventory"
 
@@ -611,7 +639,7 @@ Adding the `[models.product.fields.*]` blocks above means any future `[[operatio
 primitive databases schema generate <database-type>
 ```
 
-It calls a server-side endpoint that inspects existing ops + introspects the live database, infers field types where it can, and splices a `[models.*]` block into the local `config/database-types/<type>.toml` file (just before the first `[[operations]]` block). The scaffold is enriched so the output is directly pushable: in addition to sampling live records, it infers field types from how operation params are used, marks fields that operation params require as `required = true`, and emits string enum constraints for fields whose params restrict them to a fixed value set. Review the result — the generator still guesses from observed values, and you may need to fix what it got wrong — then run `primitive sync push` (or `primitive sync push --dry-run` first) to attach it.
+It calls a server-side endpoint that inspects existing ops + introspects the live database, infers field types where it can, and splices a `[models.*]` block into the local `config/database-type-configs/<type>.toml` file (just before the first `[[operations]]` block). The scaffold is enriched so the output is directly pushable: in addition to sampling live records, it infers field types from how operation params are used, marks fields that operation params require as `required = true`, and emits string enum constraints for fields whose params restrict them to a fixed value set. Review the result — the generator still guesses from observed values, and you may need to fix what it got wrong — then run `primitive config push` (or `primitive config push --dry-run` first) to attach it.
 
 **Schemaless types.** A type without any `[models.*]` block is unchanged from the pre-gate behavior — ops are accepted without static consistency checks. Once you add a schema, the consistency invariant holds: the schema-edit gate prevents removing it while ops remain, so future op edits stay aligned with the schema.
 
@@ -816,9 +844,9 @@ type = "string"
 required = true
 ```
 
-`sync pull` writes new files in this form. Files written before migration may instead carry a single-line **JSON-string encoding** (`definition = '{"operations":[...]}'`, with `params` as an object keyed by param name) — the server treats the two identically, and `sync pull` preserves whichever form each operation already uses (per op, so mixed files stay mixed). Convert a file with `primitive sync migrate-toml` (add `--dry-run` to preview); it's a purely local rewrite. A value TOML cannot represent — a `null` (or `undefined`) anywhere in the value, including inside an array — stays a JSON string for that field on emit, with a log line naming the operation; the rest of the file stays native. Mixed-type arrays (a `$and` gate mixing a `$steps.*` reference with a filter object, say) carry natively — see [Settings record pattern](#settings-record-pattern).
+`config pull` writes new files in this form. Files written before migration may instead carry a single-line **JSON-string encoding** (`definition = '{"operations":[...]}'`, with `params` as an object keyed by param name) — the server treats the two identically, and `config pull` preserves whichever form each operation already uses (per op, so mixed files stay mixed). Convert a file with `primitive config migrate-toml` (add `--dry-run` to preview); it's a purely local rewrite. A value TOML cannot represent — a `null` (or `undefined`) anywhere in the value, including inside an array — stays a JSON string for that field on emit, with a log line naming the operation; the rest of the file stays native. Mixed-type arrays (a `$and` gate mixing a `$steps.*` reference with a filter object, say) carry natively — see [Settings record pattern](#settings-record-pattern).
 
-`sync push` accepts both forms and warns (does not block) on an unrecognized filter operator — the supported set is `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`, `$startsWith`, `$endsWith`, `$containsText`, plus logical `$and`/`$or`.
+`config push` accepts both forms and warns (does not block) on an unrecognized filter operator — the supported set is `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`, `$startsWith`, `$endsWith`, `$containsText`, plus logical `$and`/`$or`.
 
 #### Query — read records
 
@@ -985,7 +1013,7 @@ required = true
 Two failure modes to know:
 
 - `"upsertOn": "$params.email"` gets **value-substituted** like any other definition string, so the server receives the email *value* as the field name and rejects with `upsertOn field 'alice@example.com' must be present in data and not null/empty`.
-- `upsertOn` requires a **unique index** on the field — declare `unique = true` on the field in the type schema. Databases created from the type provision the index automatically; a static `upsertOn` naming a field that isn't declared `unique = true` is rejected at push time. When you push a schema that newly declares a field `unique = true` (or `indexed = true`), the server back-provisions that index across every existing database of the type — the `sync push` / type-PATCH response carries a `reindexFanout` handle (`{ runId, instanceCount, statusUrl }`) you can poll at `.../databases/types/<type>/reindex-status?runId=...` for `{ status, total, completed, failed }`. Opt out with `?reindexInstances=false`. To back-provision a single database by hand (or after opting out), run `primitive databases reindex <database-id> --from-schema` (idempotent). Without the index, saves fail with `upsertOn field '<field>' does not have a registered unique index`.
+- `upsertOn` requires a **unique index** on the field — declare `unique = true` on the field in the type schema. Databases created from the type provision the index automatically; a static `upsertOn` naming a field that isn't declared `unique = true` is rejected at push time. When you push a schema that newly declares a field `unique = true` (or `indexed = true`), the server back-provisions that index across every existing database of the type — the `config push` / type-PATCH response carries a `reindexFanout` handle (`{ runId, instanceCount, statusUrl }`) you can poll at `.../databases/types/<type>/reindex-status?runId=...` for `{ status, total, completed, failed }`. Opt out with `?reindexInstances=false`. To back-provision a single database by hand (or after opting out), run `primitive databases reindex <database-id> --from-schema` (idempotent). Without the index, saves fail with `upsertOn field '<field>' does not have a registered unique index`.
 
 #### Count — count matching records
 
@@ -1283,7 +1311,7 @@ required = true
 **2. (Optional) Declare the category on the database type's manifest.** A category an access rule or operation `definition` names directly is inferred and loaded automatically; an explicit `[metadata.self]` block unions with that inferred set, so reach for it to load a category no expression names. Either way the load is independent of the category's own `readRule`:
 
 ```toml
-# config/database-types/project.toml
+# config/database-type-configs/project.toml
 [type]
 databaseType = "project"
 
@@ -1618,12 +1646,12 @@ Databases push changes to connected clients over WebSocket. A subscription answe
 - `subscribe()` returns an `EventSubscription` — there is **no** event-emitter API (`.on()` / `.unsubscribe()`). Hold it for as long as you want changes and `cancel()` it on teardown; releasing the handle unsubscribes, and holding one past teardown leaks a `ConnectionMapping` row and a live callback.
 ### Registering a subscription
 
-Subscriptions can be managed via TOML config files with `primitive sync push` (recommended) or via the admin HTTP API at `/databases/types/<databaseType>/subscriptions`.
+Subscriptions can be managed via TOML config files with `primitive config push` (recommended) or via the admin HTTP API at `/databases/types/<databaseType>/subscriptions`.
 
 **Via TOML (recommended)** — add `[[subscriptions]]` blocks to your database type config file:
 
 ```toml
-# config/database-types/support-desk.toml
+# config/database-type-configs/support-desk.toml
 [type]
 databaseType = "support-desk"
 
@@ -1646,7 +1674,7 @@ filter = "record.data.teamId == params.teamId"
 teamId = { type = "string", required = true }
 ```
 
-`primitive sync push` creates new subscriptions, updates changed ones, and deletes keys present on the server but missing from the TOML. `primitive sync pull` round-trips subscriptions back into `[[subscriptions]]` blocks.
+`primitive config push` creates new subscriptions, updates changed ones, and deletes keys present on the server but missing from the TOML. `primitive config pull` round-trips subscriptions back into `[[subscriptions]]` blocks.
 
 **Via admin HTTP API** — POST/PUT/DELETE directly against `/databases/types/<databaseType>/subscriptions` from a server-side client that holds admin permission:
 
@@ -2184,7 +2212,7 @@ For team-based and group-based access patterns, see the [Users and Groups guide]
 
 For mutable application settings (feature flags, visibility toggles, etc.), store them as a regular database record rather than in `database.metadata`. Use a pipeline to read the settings record and incorporate its values into subsequent query filters via `$steps.*`:
 
-**In `config/database-types/classroom.toml`:**
+**In `config/database-type-configs/classroom.toml`:**
 
 ```toml
 [[operations]]
@@ -2227,7 +2255,7 @@ This pipeline first reads the settings record, then uses `$steps.settings.first.
 
 Operations that scope data to the calling user using `$user.userId`:
 
-**In `config/database-types/app_data.toml`:**
+**In `config/database-type-configs/app_data.toml`:**
 
 ```toml
 [[operations]]
@@ -2299,6 +2327,6 @@ Any field starting with `_` (underscore) is reserved for internal use. The inter
 | Records not found after save | Querying wrong `modelName` | Model names are case-sensitive collection identifiers |
 | 422 `OPERATION_REFERENCES_UNDEFINED` on op create/edit | The op references a model or field not present in the type's `[models.*]` schema | Check the response's `refs` list; either fix the typo, or add the field to the schema. See [Schema gate](#schema-gate) |
 | 422 `SCHEMA_BREAKS_OPERATIONS` on schema edit | A schema change would invalidate at least one op the push keeps as-is | Response lists the breaking ops + unresolved refs. Either reshape the schema, or rewrite/delete those ops in the same push — the gate reads them as the push leaves them |
-| 422 `SCHEMA_HAS_UNCHECKABLE_OPS` on schema edit | At least one op has dynamic refs (e.g. `modelName = "$params.kind"`) the gate can't statically verify against the new schema | Confirm the dynamic refs are still consistent and re-run with `primitive sync push --accept-warnings` to commit |
+| 422 `SCHEMA_HAS_UNCHECKABLE_OPS` on schema edit | At least one op has dynamic refs (e.g. `modelName = "$params.kind"`) the gate can't statically verify against the new schema | Confirm the dynamic refs are still consistent and re-run with `primitive config push --accept-warnings` to commit |
 | 409 `OPS_EXIST` on schema deletion | Removing the schema (`schema: null` via the API, or stripping all `[models.*]` blocks from the local file) is blocked while operations remain | Delete the registered operations first, then remove the schema |
 | 413 `SCHEMA_TOO_LARGE` on schema edit | The inline schema exceeds the per-type cap | Trim the schema or split the model surface across multiple types |

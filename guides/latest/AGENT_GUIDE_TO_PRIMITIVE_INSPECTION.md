@@ -12,6 +12,9 @@ primitive workflows runs steps <workflow-id> <run-id>  # every step run of one r
 primitive workflows runs status <workflow-id> <run-id> # one run's status + step results
 primitive workflows runs failures <workflow-id>        # failed runs only, with cause and failed step
 
+# `runs steps` / `runs status` work on an in-flight run: finished steps so far
+# plus a `running` row for the step executing now, finalized in place when it ends.
+
 # The other log views
 primitive integrations logs <integration-id>           # outbound calls: status, timing, actor
 primitive webhooks events <webhook-id>                 # inbound deliveries and how they were handled
@@ -89,7 +92,7 @@ Outcome mapping, by source:
 |---|---|---|---|---|
 | Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
 | Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | `missing`, `skipped` |
-| Workflow step | `completed` | `failed` | — | `skipped` |
+| Workflow step | `completed` | `failed`, `error_captured` | — | `skipped`, `running` |
 | Webhook | `accepted`, `duplicate`, `handshake`, `workflow_not_active` | `rejected`, `error` | — | — |
 | Activity | — | — | — | always |
 

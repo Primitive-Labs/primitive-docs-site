@@ -14,7 +14,7 @@ This guide is verified against `js-bao-wss` source. Anything not described here 
 
 - Admin defines an `AppIntegration` (per-app, keyed by `integrationKey`) with a `requestConfig` that pins the `baseUrl`, `allowedMethods`, and `allowedPaths`.
 - Credentials are stored as **App Secrets** (`primitive secrets set KEY --value ...`), then referenced from `defaultHeaders` or `staticQuery` via `{{secrets.KEY}}` templates.
-- Non-secret config values are stored as **Config Vars** (a key in `vars.toml`, applied with `sync push`), referenced the same way via `{{vars.KEY}}` templates — see "Vars vs Secrets" below.
+- Non-secret config values are stored as **Config Vars** (a key in `vars.toml`, applied with `config push`), referenced the same way via `{{vars.KEY}}` templates — see "Vars vs Secrets" below.
 - Clients call `client.integrations.call({ integrationKey, method, path, ... })`. The platform routes through `POST /app/{appId}/api/integrations/{integrationKey}/proxy`.
 - Workflows can call integrations via the `integration.call` step.
 
@@ -147,9 +147,9 @@ Enforcement:
 **Migrating an existing integration.** Integrations that predate this field have no rule stored and therefore deny every member call and every workflow step, `runAs: "system"` included. Set a rule on each:
 
 ```bash
-primitive sync pull                  # writes integrations/<key>.toml
+primitive config pull                  # writes integrations/<key>.toml
 # add accessRule to [integration] — "true" restores the previous open behavior
-primitive sync push
+primitive config push
 ```
 
 Removing `accessRule` from an existing integration's TOML CLEARS the stored rule on the next push, which locks the integration down — it never opens it up. Creating a new integration without one is refused: `400 accessRule is required`.
@@ -195,7 +195,7 @@ Config vars resolve in the same fields via `{{vars.KEY}}` — same key constrain
 
 ```bash
 primitive config set vars ACCOUNT_ID=acct_123
-primitive sync push --only var/ACCOUNT_ID
+primitive config push --only var/ACCOUNT_ID
 ```
 
 ```toml
@@ -349,7 +349,7 @@ Newly-pushed integrations land in `status = "draft"`. Drafts can be exercised vi
 
 ```bash
 primitive config set integration/weather-api integration.status=active
-primitive sync push --only integration/weather-api
+primitive config push --only integration/weather-api
 ```
 
 ### 6. `responsePassthrough` has no effect
@@ -382,13 +382,13 @@ primitive integrations get <integration-id> [--json]
 An integration is `integrations/<key>.toml`. There is no create/update/delete command — author the file and push it.
 
 ```bash
-primitive config fields integration                  # every key, type, required, default
-primitive config new integration weather-api         # scaffold integrations/weather-api.toml
+primitive config fields integration              # every key, type, required, default
+primitive config create integration weather-api  # scaffold integrations/weather-api.toml
 primitive config set integration/weather-api integration.status=active
-primitive sync push --only integration/weather-api # apply just this one
+primitive config push --only integration/weather-api # apply just this one
 ```
 
-Delete an integration by removing its file and running `primitive sync push --prune`.
+Delete an integration by removing its file and running `primitive config push --prune`.
 
 ### Test (admin only — bypasses status check)
 
@@ -424,17 +424,39 @@ Values are AES-encrypted at rest using `APP_SECRETS_ENCRYPTION_KEY`. Max 100 sec
 
 ```bash
 primitive vars list [--app <app-id>] [--json]
-primitive config set vars ACCOUNT_ID=acct_123     # edits vars.toml, no API call
-primitive sync push --only var/ACCOUNT_ID       # applies it
+primitive config set vars ACCOUNT_ID=acct_123  # edits vars.toml, no API call
+primitive config push --only var/ACCOUNT_ID    # applies it
 ```
 
 Delete a var by removing its line from `vars.toml` and pushing. Values are plaintext (never encrypted, never masked). Max 100 vars per app, max 2 KB per value.
 
 ### Test Cases (regression suite for an integration)
 
+Test cases are authored in TOML, one file per case, and applied by `config push`.
+They live in a sidecar directory beside the integration:
+
+```toml
+# integrations/stripe.tests/basic.toml
+[test]
+name = "Basic"
+description = "GET /get returns 200"
+inputVariables = '{"method":"GET","path":"/get"}'
+# configName pins the case to a named config; leave empty for the active one.
+configName = ""
+expectedOutputPattern = ""
+expectedOutputContains = '["\"ok\":true"]'
+expectedJsonSubset = '{}'
+```
+
+`primitive config fields integration` lists every key. Fixture files for a case
+go in `integrations/stripe.tests/basic/` and upload with the same push. Clearing
+a field is blanking it (`""`, `[]`, `{}`) and pushing; deleting a case is
+removing its file and running `primitive config push --prune`.
+
+Run and inspect them from the CLI:
+
 ```bash
 primitive integrations tests list <id>
-primitive integrations tests create <id> --name "Basic" --input '{"method":"GET","path":"/get"}'
 primitive integrations tests run <id> <test-case-id>
 primitive integrations tests run-all <id>
 primitive integrations tests run-all <id> --test-cases 01ABC,01DEF
@@ -509,7 +531,7 @@ The step pulls App Secrets and resolves `{{secrets.KEY}}` the same way the user-
 | `active` | Yes | Yes |
 | `archived` | No (404) | Yes |
 
-Deleting an integration — remove its TOML file, then `primitive sync push --prune` — sets it `archived`. A hard delete, which removes the row permanently, is available over the API and in the console.
+Deleting an integration — remove its TOML file, then `primitive config push --prune` — sets it `archived`. A hard delete, which removes the row permanently, is available over the API and in the console.
 
 ## Files on Disk (sync mode)
 

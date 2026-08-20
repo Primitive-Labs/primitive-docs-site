@@ -43,18 +43,18 @@ Integration templates only match uppercase keys — `{{secrets.MY_KEY}}` with `[
 
 The non-secret twin of app secrets: same key format (`^[A-Z][A-Z0-9_]{0,63}$`), same 2 KB value cap, same 100-per-app limit, same declared-only CEL binding, plus a template-resolution form — minus masking and minus save-time validation. Use a var for a plaintext app-wide scalar a rule needs to compare against (a platform-assigned group ID, say); use a secret for anything that grants access to an external system.
 
-Vars are configuration, so they are authored in `vars.toml` and applied with `sync push` — there is no command that writes one directly:
+Vars are configuration, so they are authored in `vars.toml` and applied with `config push` — there is no command that writes one directly:
 
 ```bash
 primitive config set vars ADMIN_GROUP_ID=grp_01ABC
-primitive sync push --only var/ADMIN_GROUP_ID
-primitive vars list          # values ARE shown — vars are not secret
-primitive vars get ADMIN_GROUP_ID   # one var, as the server has it
+primitive config push --only var/ADMIN_GROUP_ID
+primitive vars list                # values ARE shown — vars are not secret
+primitive vars get ADMIN_GROUP_ID  # one var, as the server has it
 ```
 
 Delete a var by removing its line from `vars.toml` and pushing — a key the file no longer declares is deleted server-side, no `--prune` needed.
 
-Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `sync push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. A push upserts by key: an existing key is replaced, not refused.
+Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `config push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. A push upserts by key: an existing key is replaced, not refused.
 
 ### Where `{{ vars.KEY }}` resolves
 
@@ -77,7 +77,7 @@ A rule reads it as `vars.<KEY>`, bound only to declared keys — an undeclared `
 
 ### Syncing vars: `vars.toml`
 
-Unlike secrets — which never appear in TOML, by design — config vars round-trip through `primitive sync` as a flat `vars.toml` at the sync directory root (sibling to `app.toml`, **not** a subdirectory): a plain top-level `KEY = "value"` table, no `[vars]` header, keys sorted:
+Unlike secrets — which never appear in TOML, by design — config vars round-trip through `primitive config` as a flat `vars.toml` at the config directory root (sibling to `app.toml`, **not** a subdirectory): a plain top-level `KEY = "value"` table, no `[vars]` header, keys sorted:
 
 ```toml
 # Per-environment non-secret config vars.
@@ -89,9 +89,9 @@ ADMIN_GROUP_ID = "grp_01ABC"
 API_HOST = "https://api.example.com"
 ```
 
-- `sync pull` writes it; a failed fetch leaves the existing `vars.toml` untouched rather than clobbering it with an empty file.
-- `sync push` upserts changed keys and hard-deletes keys removed from the file, printing `Unsetting var KEY` for each; a missing/failed `vars.toml` read never mass-deletes.
-- `sync diff` reports var add/remove/modified rows like any other synced entity.
+- `config pull` writes it; a failed fetch leaves the existing `vars.toml` untouched rather than clobbering it with an empty file.
+- `config push` upserts changed keys and hard-deletes keys removed from the file, printing `Unsetting var KEY` for each; a missing/failed `vars.toml` read never mass-deletes.
+- `config diff` reports var add/remove/modified rows like any other synced entity.
 - **Concurrent-edit guard**: if the server's value drifted since the last local sync (edited from the Admin Console, say), push reports `CONFLICT var: KEY` — with `Local last sync:` / `Server modified:` lines, the same pattern used for every other synced entity type — and exits non-zero. `--force` bypasses the check and overwrites/deletes unconditionally.
 
 There is no client-side read API for vars — `primitive vars list` / `primitive vars get`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.

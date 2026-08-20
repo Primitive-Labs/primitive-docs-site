@@ -373,7 +373,7 @@ Each entry carries a `deferredId` — cancel that invitation by revoking the def
 
 ## Group Type Configuration
 
-Group types are configured via TOML config files and the `primitive sync` command (version-controlled alongside your code).
+Group types are configured via TOML config files and the `primitive config` command (version-controlled alongside your code).
 
 **File:** `config/group-type-configs/team.toml`
 
@@ -394,13 +394,13 @@ A group type config reads `md.self.<category>.<key>` in its rule set with **no d
 Push to the server:
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 **Defaults & gotchas:**
 - `autoAddCreator` defaults to `true` **only when a group type config exists** for the type. With **no config at all**, no auto-add happens.
 - A group type with **no config** falls back to built-in default rules. Per-op fallback also applies: when a configured rule set leaves a `(category, op)` pair undefined, that op resolves against the defaults too. The defaults: `group.create = "true"` (any signed-in member); `group.edit/delete` and `member.create/edit/delete` are creator-only (`user.userId == group.createdBy`); `group.get` and `member.list` allow the creator OR any direct group member (`isMemberOf(group.groupType, group.groupId)`).
-- A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive sync push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
+- A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive config push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
 
 See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#configuring-with-the-cli) for the full sync workflow (`init`, `pull`, `diff`, `push`).
 
@@ -562,7 +562,7 @@ autoAddCreator = true
 Push both configs:
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 ### Rule CEL context
@@ -643,7 +643,7 @@ Test a rule set with a simulated request, or debug against a real user's live me
   });
 ```
 
-`result.trace` shows every `isMemberOf`/`memberGroups`/`hasRole` call and its result. To update rule sets, edit the TOML file and run `primitive sync push`.
+`result.trace` shows every `isMemberOf`/`memberGroups`/`hasRole` call and its result. To update rule sets, edit the TOML file and run `primitive config push`.
 
 ## Rule Sets for Collection Management
 
@@ -719,7 +719,7 @@ collectionType = "class-reports"
 ruleSetName    = "class-reports-rules"
 ```
 
-Then push with `primitive sync push`. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
+Then push with `primitive config push`. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
 
 ### Migrating `contextId` to a metadata category
 
@@ -833,7 +833,7 @@ Use groups to model relationships between users.
 
 **Setup** (via CLI config):
 
-**File:** `config/database-types/classroom.toml` (excerpt)
+**File:** `config/database-type-configs/classroom.toml` (excerpt)
 
 ```toml
 [[operations]]

@@ -290,6 +290,8 @@ primitive analytics workflows --limit 5
 primitive analytics prompts --limit 5
 ```
 
+Per-subject analytics live under the top-level `analytics` noun — `analytics workflows`, `analytics prompts` and `analytics integrations` are the only homes for them; no subject noun carries its own analytics group. `analytics workflows` ranks workflows by runs; the REST API exposes no app-wide workflow overview, so there is no CLI command for one either.
+
 `--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
 
 ---

@@ -117,7 +117,7 @@ timeoutMs = 30000
 onContention = "fail"
 ```
 
-The block is TOML-owned config that round-trips through `primitive sync pull`/`push`; removing it clears the lock.
+The block is TOML-owned config that round-trips through `primitive config pull`/`push`; removing it clears the lock.
 
 **What the losing run does** is `onContention`'s whole job:
 
@@ -133,7 +133,7 @@ Branch on the structured field, never on message text: `errorCode` is on every s
 
 **`ignore` requires `js-bao-wss-client` >= 2.1.0** (or the Swift client at or after the release that ships it). `skipped` is a new value on an existing status enum, so an older client's `waitFor` does not treat it as terminal and waits out its own timeout (15 minutes by default) instead of returning. Upgrade the client before switching a workflow to `ignore`.
 
-Inside a nested `workflow.call`, an elided child is a value rather than an error: the step reads `{ output: null, skipped: true, skipReason: "LOCK_CONTENTION", ok: false }`, the parent run continues, and a downstream step listing that step in `skipWhenSkipped` skips in turn. A `workflow.call` runs inline in the parent's run, so no separate run record — and no `skipped` run status — is involved.
+Inside a nested `workflow.call`, an elided child is a value rather than an error: the step reads `{ output: null, skipped: true, skipReason: "LOCK_CONTENTION", ok: false }`, the parent run continues, and a downstream step listing that step in `skipWhenSkipped` skips in turn. The child call is also recorded as its own run of the child workflow — an elided one lands with `status: "skipped"` and the calling run in `meta.parentRunId`, so `runs list <child-key> --status skipped` sees contention through `workflow.call` too.
 
 **Size `ttlMs` to cover the worst-case duration of the whole run.** The run holds the lease for its full lifetime with no periodic renewal; ownership is re-verified only when the durable engine replays. A run that executes continuously longer than `ttlMs` — many back-to-back compute or LLM steps with no durable pause to force a replay — can let its lease lapse while still running, at which point a second run can take the key over and both critical sections run concurrently. This is a deliberate tradeoff (the lease, not a heartbeat, is the safety bound), so the lease must be sized generously enough that a run never outlives it.
 

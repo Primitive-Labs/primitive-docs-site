@@ -107,13 +107,13 @@ preset = "authenticated"                    # public | authenticated | admin-onl
                                             # is governed entirely by the rule set (see below)
 ```
 
-The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive sync` reads from `config/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive sync push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
+The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `config/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
 
 Scaffold and apply it:
 
 ```bash
-primitive config new blob-bucket avatars          # writes the file from the type's defaults
-primitive sync push --only blob-bucket/avatars  # applies just this bucket
+primitive config create blob-bucket avatars       # writes the file from the type's defaults
+primitive config push --only blob-bucket/avatars  # applies just this bucket
 ```
 
 ### Access presets
@@ -153,7 +153,7 @@ From the CLI, a bucket's settings are TOML: `preset` switches the access model (
 
 ```bash
 primitive config set blob-bucket/avatars bucket.preset=admin-only
-primitive sync push --only blob-bucket/avatars
+primitive config push --only blob-bucket/avatars
 ```
 
 ### TTL tiers

@@ -323,14 +323,14 @@ The scenario's preflight checks all three prerequisites through the CLI's
 effective-settings view before it builds:
 
 ```bash
-primitive settings get --json   # must list your base under testAccountBaseEmails,
+primitive apps get --json   # must list your base under testAccountBaseEmails,
                                  # report otpEnabled: true, and have a signup
                                  # mode that admits the test address
 ```
 
 With OTP disabled the same email button sends a magic link instead of prompting
 for a code, so `otpEnabled` is a hard requirement. Set these in `app.toml` and apply with
-`primitive sync push --only app`. Then:
+`primitive config push --only app`. Then:
 
 ```bash
 export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
@@ -345,7 +345,7 @@ with `This app is invite-only. You've been added to the waitlist.`
 
 Two ways through:
 
-- Set `mode = "public"` in `app.toml` and run `primitive sync push --only app`.
+- Set `mode = "public"` in `app.toml` and run `primitive config push --only app`.
 - Stay invite-only and pre-invite the test address. This genuinely works — an
   unaccepted, unexpired invitation for the address satisfies the gate, and OTP
   verify then consumes it. Invite the **exact** address, lowercase
@@ -370,7 +370,7 @@ PRIMITIVE_SMOKE_PREFLIGHT_ONLY=1 scripts/smoke-test.sh ui_signin
 ```
 
 It exits 0 when everything is in place and otherwise names the exact setting to
-fix. That includes the case where `primitive settings get` itself fails (CLI
+fix. That includes the case where `primitive apps get` itself fails (CLI
 not logged in, app id unresolvable, API error): the preflight reports
 `could not read settings (is the CLI logged in and pointed at this app?)`
 instead of failing with no explanation.

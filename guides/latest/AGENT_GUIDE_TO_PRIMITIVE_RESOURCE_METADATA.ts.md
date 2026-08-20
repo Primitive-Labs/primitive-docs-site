@@ -26,7 +26,7 @@ maxLength = 120
 ```
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 - **Field types:** `string`, `number`, `boolean`, `date`, `id`, `stringset`. `enum` (string array) is valid only on a `string` field; other supported constraints are `required`, `maxLength`, `maxCount`.
@@ -34,7 +34,7 @@ primitive sync push
 - **Category name `attrs` is reserved** — it's the read-only projected category (see **`md.self.attrs`** below), not a category you define.
 - **Limits:** up to 100 keys per category, 16 KB per category item.
 - **`readRule`/`writeRule` context:** `user.userId`, `user.role` (the caller), `resource.resourceType`, `resource.resourceId` (also bound as `resource.id`), `resource.category` — plus `workflow.workflowKey` when the call originates from a `metadata.write`/`metadata.read` step (so `fromWorkflow('key')` works). When the subject is a `database`, `workflow`, or `collection`, the rule can also read the resource's own columns via **`resource.attrs.<column>`** — `database`: `databaseId`, `databaseType`, `createdBy`; `workflow`: `workflowId`, `workflowKey`, `runAs`, `createdBy`; `collection`: `collectionId`, `collectionType`, `contextId`, `name`, `createdBy`. The canonical use is creator bootstrap: `writeRule = "user.userId == resource.attrs.createdBy"`. The subject row loads lazily (a rule that never references `resource.attrs` issues no extra read) and the binding fails closed: any other resource type, an unmapped column, or a missing row denies. The membership helpers `isMemberOf`/`memberGroups`/`hasRole` are also wired, so a rule can be group-scoped (`isMemberOf('class-teachers', resource.id)`) instead of only self-scoped; memberships load once, only when the rule references a membership helper (`hasRole` needs no load — it reads only `user.role`). `hasCollectionAccess` is rejected at save time in a category rule (collection-scoped only; it can never resolve here). An **app-level** owner or admin always bypasses both rules; a resource-level permission (e.g. a database's `owner`/`manager` grant) never bypasses — the rule itself is what authorizes resource-scoped callers. Omitting either rule defaults to deny.
-- **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`/`resolve`); the CLI's `primitive metadata categories list`/`get` inspect the definitions read-only, and `primitive metadata categories delete <resource-type> <category>` (admin-gated) removes a definition. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
+- **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`/`resolve`); the CLI's `primitive metadata-category-configs list`/`get` inspect the definitions read-only (the `metadata` noun carries value verbs only), and a definition is removed by deleting its `metadata-category-configs/<resourceType>.<category>.toml` and running `primitive config push --prune` — there is no delete verb. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
 - **A category rule can declare its own `metadataManifest`** (same `self`/`paths`/`secrets` shape as any other owning config) so it can reach declared secrets or a traversal path's source category — see "A category rule's own manifest" below. Without one, the rule still gets inferred `md.self` reads but binds no `secrets`/`vars`.
 
 ## Values: read, write, batch read, list, delete, resolve
@@ -88,10 +88,18 @@ primitive metadata get-batch --requests '[{"resourceType":"user","resourceId":"0
 primitive metadata list user 01HXY...                # all stored categories (CLI reads as admin → shows everything)
 primitive metadata delete user 01HXY... profile      # idempotent
 primitive metadata resolve user billing stripeCustomerId cus_ABC   # reverse lookup; miss prints "Not found" and exits 0
-primitive metadata categories list                   # read-only inspection of category definitions
-primitive metadata categories get user profile      # adds the full schema JSON
-primitive metadata categories delete user profile --yes   # admin-gated; deletes the definition, NOT its values (--yes required in non-interactive/agent contexts; prompts otherwise)
+primitive metadata-category-configs list             # read-only inspection of category definitions
+primitive metadata-category-configs get user profile # adds the full schema JSON
 ```
+
+Deleting a definition is deleting its file plus a pruning push. **Not** `--only`: a selector has to be declared by a file still on disk, so naming the definition you just deleted aborts the push with `No local file declares…`. Run the unscoped pruning push (`--dry-run` first to see the plan):
+
+```bash
+rm config/metadata-category-configs/user.profile.toml
+primitive config push --prune --yes
+```
+
+(`--only 'metadata-category-config/user#profile'` scopes a push that *applies* that file — its key is the `resourceType#category` pair the file declares, NOT its dotted file name.)
 
 - Batch: up to 50 resources, 200 expanded resource/category pairs per call — over either limit fails the **whole** call with `400 BATCH_TOO_LARGE` (checked before any read). Within limits the call is always `200`; per-item problems (missing category → `404 NOT_FOUND`, denied `readRule` → `403 FORBIDDEN`) surface inside `results[].categories[cat]`, never as a call-level failure.
 - Errors on single read/write: `404 NOT_FOUND` (no such category on that resource type), `403 FORBIDDEN` (`readRule`/`writeRule` denied), `400` (schema validation failure, or writing the reserved `attrs` category → `RESERVED_CATEGORY`).
@@ -204,7 +212,7 @@ categories = ["billing"]
 
 Both forms resolve through the same loader, so `md.<name>` binds identically;
 the table form only keeps a one-rule declaration next to its rule. Bare-string
-and table entries coexist in one category block and `primitive sync`
+and table entries coexist in one category block and `primitive config`
 round-trips both byte-identically.
 
 Constraints: only `loads.paths` is accepted on a rule entry — `loads.secrets`
