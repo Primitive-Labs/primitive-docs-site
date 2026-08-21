@@ -11,7 +11,6 @@ This guide is the source of truth for what's actually in `src/workflows/`. Examp
 key = "my-workflow"               # required, unique per app
 name = "My Workflow"              # required
 description = "..."               # optional
-status = "draft"                  # draft | active | archived
 accessRule = "hasRole('admin')"  # optional CEL
 runAs = "caller"                  # caller (default) | system — see Execution identity
 capabilities = ["membership"]    # system-only opt-in grants
@@ -47,7 +46,7 @@ A schema may also be a discriminated union: a top-level `oneOf` whose members ar
 Workflow-level fields the engine actually reads:
 `perUserMaxRunning`, `perUserMaxQueued`, `perAppMaxRunning` (default 25), `perAppMaxQueued` (default 10000), `queueTtlSeconds` (default 43200), `dequeueOrder`, `accessRule`, `runAs` (default `caller` — see "Execution identity" below), `capabilities` (system-only grants), `inputSchema`, `outputSchema`, `requiresClientApply` (default `true` — see "Client apply" below), `syncCallable` (default `false` — see "Synchronous invocation" below). `config push` forwards every one of these — `name`, `description`, `status`, `accessRule`, `runAs`, queue settings, schemas, `requiresClientApply`, `syncCallable`, `capabilities`, step list — on both a fresh create and a push to an existing workflow. The file is the whole picture: what it declares is what the workflow has after the push, and an empty `capabilities` array revokes every grant.
 
-**What it does not declare, it removes.** A push to an existing workflow sends every `[workflow]` field, so deleting a line converges the server rather than leaving the old value live: `description`, `accessRule`, `runAs`, `capabilities`, `inputSchema`, `outputSchema`, `[workflow.lock]` and `syncCallable` are **cleared**, and `status`, the five queue limits, `dequeueOrder` and `requiresClientApply` are **reset to their defaults** (`draft`, 4, 100, 25, 10000, 43200, `fifo`, `true`). `name` is the exception — it is required, so a `[workflow]` table without a non-empty `name` fails the push locally, naming the file. Pull before editing a workflow you did not author locally; a workflow edited in web-admin since your last sync is reported as a push conflict (a modified-timestamp check, overridable with `--force`) rather than silently overwritten. That check rides the update request, so it covers the files a push sends — a workflow unchanged since your last sync is skipped without a request, and `primitive config diff` is what shows its drift.
+**What it does not declare, it removes.** A push to an existing workflow sends every `[workflow]` field, so deleting a line converges the server rather than leaving the old value live: `description`, `accessRule`, `runAs`, `capabilities`, `inputSchema`, `outputSchema`, `[workflow.lock]` and `syncCallable` are **cleared**, and the five queue limits, `dequeueOrder` and `requiresClientApply` are **reset to their defaults** (4, 100, 25, 10000, 43200, `fifo`, `true`). `status` is on neither list: availability is server-owned (#2803), so a push never sends it and a file that still carries the key fails the push. `name` is the exception — it is required, so a `[workflow]` table without a non-empty `name` fails the push locally, naming the file. Pull before editing a workflow you did not author locally; a workflow edited in web-admin since your last sync is reported as a push conflict (a modified-timestamp check, overridable with `--force`) rather than silently overwritten. That check rides the update request, so it covers the files a push sends — a workflow unchanged since your last sync is skipped without a request, and `primitive config diff` is what shows its drift.
 
 An unrecognized key in the `[workflow]` table — or an unrecognized top-level table beside it (a workflow file carries `[workflow]`, `[[steps]]`, `[[configs]]`, `[metadata]`, `secrets`, `vars`, `[expr.cel]` and `include`, and nothing else) — is an error, not a shrug: `config push` names the file and the offending key or table and applies nothing, so a typo fails locally instead of being silently dropped. The mirror case is a CLI older than the server — `config pull` names every `[workflow]` key the server returned that this CLI version does not know and leaves it out of the file, rather than writing a key the next push would reject. Nothing is dropped without a message, and the round trip stays safe: push only sends what it knows, so the server keeps its stored values for the rest.
 
@@ -454,6 +453,16 @@ kind = "document.save"
 runIf = "outputs.tracker.documentId == null"
 # ... create the user's tracker document
 ```
+
+### Document writes obey the model's declared field types
+
+Every document write — `save`/`patch` in both modes, and `bulkUpdate` — type-checks each supplied value against the model's declared field types inside the write transaction, before anything is persisted:
+
+- **Convertible → converted.** The `1`/`0` a database read yields for a `boolean` column (SQLite has no boolean type — the common case when `records` comes straight from `database.query`) is stored as `true`/`false`; a numeric string in a `number` field becomes a number; a number in a `string` field is stringified. Same conversion table as `inputSchema` and database-operation params.
+- **Not convertible → non-retryable step failure** naming the model, field, declared type and offending value. `"maybe"` or `2` in a `boolean` field, an object in a `number` field. The rejection rolls back its own transaction: a single write and a `bulkUpdate` write nothing, while a batch `records` write is one transaction per 100-record chunk, so a failure in a later chunk leaves earlier chunks committed.
+- **Untouched:** `null`, fields the model doesn't declare, and `stringset` payloads (arrays / `{ $add, $remove, $clear }`) — but an array or op-object aimed at a declared *scalar* field is a type error. `date` fields take an ISO-8601 date string (`"2026-08-14"`, optionally with a time — including the space-separated `"2026-08-14 12:30:00"` a SQL read yields) *or* an epoch number, and nothing else: `"not-a-date"` fails, and so does a string only a locale parser understands (`"08/14/2026"`, `"August 14, 2026"`) or a day the calendar doesn't have (`"2026-02-30"`).
+- Enforcement reads the model schema embedded in the document, so a model no client has saved yet has nothing to enforce.
+- **Not only workflow steps.** The contract sits in the shared server-direct write path, so the document-records REST API reaches it too — `POST` / `PATCH` / `DELETE documents/:documentId/records/:model` and `records/bulk`, which the `primitive documents records` commands drive. Those now answer **400**, naming the field, for an unconvertible value they previously accepted and stored (`2` or `"maybe"` in a `boolean` field), so a script corrupting a record that way starts failing instead; a convertible value still succeeds, so a script feeding a `1` into a `boolean` field keeps its `200` and now stores `true`. Collaborative client writes over the live connection are unaffected: they apply document updates directly and never enter this path.
 
 ### `document.save` / `patch` / `delete` — batch mode (`records` / `recordIds`)
 
@@ -1131,7 +1140,11 @@ runIf = "steps.fetch.succeeded && steps.fetch.output.count > 0"   # guard, then 
 runIf = "steps.charge.failed"                    # reacts to a captured failure"
 ```
 
-CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, `vars`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+
+`vars` is the app's full config-vars map — the same values `{{ vars.KEY }}` renders in a step's config, with no `vars = [...]` declaration required in the workflow. (Declared secrets are the opposite: `secrets` in a guard binds ONLY the keys the workflow's manifest declares, never the full app-secret map.) A guard reading a key the app doesn't hold throws `No such key: KEY`, so test presence first with `'KEY' in vars` or `vars.?KEY` when the var may not exist yet.
+
+The map is loaded once per engine invocation and bound into both guards and templates, so the two always agree within an invocation. A parallel `forEach` (`concurrency > 1`) runs each batch as its own durable child that loads its own snapshot: a var edited while such a step is in flight can be visible to one batch and not another, and each batch's own value governs which of its items run.
 
 ### Named guards (`expr.*`)
 
@@ -1628,9 +1641,9 @@ One `custom` behavior changes with this: the key is now `sha256:<hex>` of `<t>.<
 
 `github` is the one built-in scheme whose dedup entries **never expire** (a declarative `custom` configuration with no `freshness` is the other case, for the same reason). GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
 
-On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_not_active` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
+On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_inactive` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
 
-One delivery outcome is a `503`: `Failed to record webhook delivery`, when the platform verified the delivery but could not write the `accepted` row that carries its dedup key. The workflow is **not** started in that case. That row is the only durable record that the delivery ran, so dispatching without it would leave the delivery replayable — for the whole window, and permanently on `github` — and a `503` asks the sender to retry, which is the resolution: the retry re-runs the whole path and either records the delivery and dispatches it, or fails the same way. Size your provider's retry policy to cover it. Unlike the `202` for `workflow_not_active`, this one *wants* the retry. It applies only where a dedup key was actually due: a delivery whose target workflow doesn't exist yet, and a `none` webhook with `deduplicationEnabled: false`, keep their previous best-effort logging and still dispatch.
+One delivery outcome is a `503`: `Failed to record webhook delivery`, when the platform verified the delivery but could not write the `accepted` row that carries its dedup key. The workflow is **not** started in that case. That row is the only durable record that the delivery ran, so dispatching without it would leave the delivery replayable — for the whole window, and permanently on `github` — and a `503` asks the sender to retry, which is the resolution: the retry re-runs the whole path and either records the delivery and dispatches it, or fails the same way. Size your provider's retry policy to cover it. Unlike the `202` for `workflow_inactive`, this one *wants* the retry. It applies only where a dedup key was actually due: a delivery whose target workflow doesn't exist yet, and a `none` webhook with `deduplicationEnabled: false`, keep their previous best-effort logging and still dispatch.
 
 Any credential inside a `[verification.*]` table must be a `{{secrets.KEY}}` reference, and the reference must be the WHOLE value — the table is stored in cleartext, so a literal would be readable, and so would the literal half of a mixed value like `"sk_live_abcd{{secrets.SUFFIX}}"`. A write carrying either is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`). A `{{secrets.KEY}}` reference is returned verbatim on every read path, so a compliant table survives a `pull` → `push` round trip unchanged. A literal written before this rule existed is **not**: every read path (`GET`, the admin API, and therefore `config pull`) returns it as `[redacted]`. Pushing a file that still holds `[redacted]` is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`) — including on an edit that changed something else entirely — until the real value is moved into the app secret store and the table references it.
 
@@ -1693,7 +1706,7 @@ Each referenced credential consumes one of the app's 100 secret slots, so an app
 
 Receive endpoint: `POST /app/{appId}/webhook/{webhookKey}`. The platform verifies the signature per `verificationScheme`, then starts `workflowKey` with the event payload as input; `inputMapping` (e.g. `"data.object"`) extracts a nested path first. A webhook-triggered workflow is `runAs: "system"`, so what stops a client from starting it directly with a crafted payload is the system-invocation gate (members get a 403) plus the signature verification — not `accessRule`, which a system workflow doesn't evaluate on the trigger (see [Access control](#access-control)).
 
-CLI: `primitive webhooks list | get | create | update | delete | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_not_active`); `--json` adds each delivery's `dedupKey`. `active` and `paused` are the settable statuses (`create` and `update` reject anything else, and `create` defaults to `active`); `archived` is reserved for delete and only appears on read — `list --status` filters by `active`, `paused`, or `archived`.
+CLI: `primitive webhooks list | get | disable | enable | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_inactive`); `--json` adds each delivery's `dedupKey`. **Availability is server-owned (#2803)**: `status` is not a TOML key and is refused on every create/update body (admin and tenant alike), a new or pushed webhook is always `active`, and `disable`/`enable` are its only writers. `archived` is written by delete and only appears on read — `list --status` filters by `active`, `inactive` (which also matches a legacy stored `paused`), or `archived`.
 
 An app holds at most **50 webhooks**, counting archived ones — the count is what bounds every per-webhook budget (body cap, delivery rows, remote-JWKS key fetches) for the app as a whole. A create past it is rejected `400` `WEBHOOK_LIMIT_REACHED` on both the tenant and admin APIs (never a `409`, so `config push` cannot mistake it for a key conflict), and `primitive config push` checks up front how many webhooks the `webhooks/` directory would create and refuses, before writing anything, a push that would leave the app past the limit. Only creates count against it: an app at (or already over) the limit can still push its existing config — webhooks, workflows, databases and vars alike. Apps already over the limit keep working; only new creates are refused. An API or console delete archives, so it does **not** free a slot. `primitive config push --prune` does: it is the one prune path that hard-deletes instead of archiving, so a webhook whose TOML you deleted is removed permanently, freeing its slot and releasing its `key` for reuse — deliberate (an archiving prune would burn a slot per cycle with no way to reclaim it from `sync`) but irreversible, and unlike every other pruned resource type. A hard delete does not delete the webhook's delivery rows, but its id stops resolving, so `primitive webhooks events <id>` on it answers "not found" — read the history first. The tenant `GET /app/{appId}/api/webhooks` returns active webhooks only; use `primitive webhooks list --status archived` (or the admin list, which applies no status filter) to see the archived rows that are still holding slots.
 
@@ -1703,7 +1716,7 @@ An app holds at most **50 webhooks**, counting archived ones — the count is wh
 
 `webhooks verify <webhook-id> --header 'Name: value' [--header …] (--body '<text>' | --body-file <path>)` runs the webhook's configured verifier over a delivery you captured and reports the verdict, the scheme, and the rejection reason — the same vocabulary `webhooks events` shows. Exit `0` when the signature verifies, non-zero otherwise. `--body-file` is read as raw bytes and sent base64-encoded when they are not valid UTF-8, so the verifier sees exactly the captured bytes. Nothing is delivered, and the check is deliberately absent from `webhooks events`, which stays the record of real deliveries. It answers SIGNATURE verification only: status and IP allowlist are checked before verification and handshake rules and deduplication after it, so `verified: true` does not promise the delivery would have dispatched. `none` is refused rather than answered — it checks no signature. Over the API: `POST /admin/api/apps/{appId}/webhooks/{webhookId}/verify` with `{ headers, rawBody }` or `{ headers, bodyBase64 }` (exactly one body form; `headers` as a flat object or ordered `[name, value]` pairs). A bad signature is a `200` verdict; a `400` (`WEBHOOK_VERIFY_BODY_INVALID`, `WEBHOOK_VERIFY_HEADERS_INVALID`, `WEBHOOK_VERIFY_SCHEME_UNSUPPORTED`) means the request itself was malformed.
 
-A `workflow_not_active` delivery means the bound workflow was draft or archived when the event arrived: the request is acked with HTTP 202 `{ received: true }` (so the sender doesn't retry) but the workflow is **not dispatched**. Activate the workflow and resend — these events are excluded from deduplication, so the resend isn't dropped as a duplicate. Binding a webhook to a not-yet-active workflow succeeds and returns a non-blocking `warning` carrying `WORKFLOW_NOT_ACTIVE`.
+A `workflow_inactive` delivery means the bound workflow was out of service when the event arrived: the request is acked with HTTP 202 `{ received: true }` (so the sender doesn't retry) but the workflow is **not dispatched**. Run `primitive workflows enable <key>` and resend — these events are excluded from deduplication, so the resend isn't dropped as a duplicate. Binding a webhook to an inactive workflow succeeds and returns a non-blocking `warning` carrying `WORKFLOW_INACTIVE`.
 
 ## Cron triggers
 
@@ -1761,7 +1774,7 @@ The TOML key `key` maps to the API field `triggerKey`. The field name is `cron` 
     rootInput: { digestType: "daily" }, // NOT `input`
     inputMapping: { firedAt: "{{now}}" }, // merged over rootInput; {{now}} = fire time
   });
-  // trigger.triggerId is a ULID — use it for get/update/pause/test/delete.
+  // trigger.triggerId is a ULID — use it for get/update/disable/test/delete.
 ```
 
 From the CLI, a trigger is TOML plus a push — `config create` scaffolds the file from the type's defaults:
@@ -1802,7 +1815,7 @@ await client.cronTriggers.create({
 | `rootInput` | No | JSON object, merged into workflow input. |
 | `inputMapping` | No | JSON object, merged AFTER `rootInput`. Supports `{{now}}` substitution. |
 | `description` | No | Free text. |
-| `state` | Update only | `"active"` / `"paused"` / `"archived"`. Set on update; create always starts `"active"`. |
+| `status` | Read only | `"active"` / `"inactive"` / `"archived"`. Server-owned: create always produces `"active"`, `disable`/`enable` are the only writers, and delete writes `"archived"`. It is not settable through `update`. |
 
 ### Cron expression syntax
 
@@ -1825,7 +1838,7 @@ Supported per field: `*`, exact (`5`), range (`5-10`), step on wildcard (`*/5`),
 | First of every month | `0 0 1 * *` |
 | Every 15 min, business hours, Mon–Fri | `*/15 9-17 * * 1-5` |
 
-Invalid expressions are rejected at create time. If the cron later becomes unparseable (rare), the trigger transitions to `state: "error_paused"` with `lastError` set; alarms stop until you call `resume`.
+Invalid expressions are rejected at create time. If the cron later becomes unparseable (rare), the trigger goes to `status: "inactive"` with `lastError` set; alarms stop until you call `enable`.
 
 ### Workflow input shape
 
@@ -1849,12 +1862,12 @@ run.meta.manual     // true if started via cronTriggers.test()
 ```typescript
   await client.cronTriggers.list();                       // excludes archived
   await client.cronTriggers.get(triggerId);               // includes runtime.scheduledAlarmAt
-  await client.cronTriggers.update(triggerId, {           // change cron/timezone/state etc.
+  await client.cronTriggers.update(triggerId, {           // change cron/timezone etc.
     cron: "0 8 * * *",
     timezone: "America/New_York",
   });
-  await client.cronTriggers.pause(triggerId);             // cancels the pending alarm
-  await client.cronTriggers.resume(triggerId);            // clears lastError, reschedules
+  await client.cronTriggers.disable(triggerId);           // cancels the pending alarm
+  await client.cronTriggers.enable(triggerId);            // clears lastError, reschedules
   await client.cronTriggers.test(triggerId);              // fire NOW; does not touch schedule
   await client.cronTriggers.delete(triggerId);            // soft delete (archive)
 ```
@@ -1865,8 +1878,8 @@ run.meta.manual     // true if started via cronTriggers.test()
 primitive cron-triggers list
 primitive cron-triggers get <trigger-id>          # includes runtime.scheduledAlarmAt
 primitive cron-triggers test <trigger-id>         # fire now; does NOT affect schedule
-primitive cron-triggers pause <trigger-id>
-primitive cron-triggers resume <trigger-id>
+primitive cron-triggers disable <trigger-id>
+primitive cron-triggers enable <trigger-id>
 ```
 
 Deleting a trigger from the CLI is deleting `cron-triggers/<key>.toml` and running `primitive config push --prune`. Editing one is editing that file. `pause`/`resume` are operational rather than configuration: they write a runtime field that is deliberately not a TOML key, so a later push cannot resume a trigger you paused, and `config diff` reports it as "operationally disabled; configuration unchanged" rather than as drift.
@@ -1890,14 +1903,13 @@ There is no `triggerSource` filter on `workflows.listRuns()`. Cron runs are iden
 
 ### Debugging cron triggers
 
-Trigger states:
+Trigger status:
 
 - `active` — scheduled, alarm armed.
-- `paused` — manual pause; alarm cancelled until `resume`.
-- `error_paused` — set automatically when a fire fails hard (the target workflow is **not found**, or a binding/runtime error), when the cron expression becomes unparseable, or after 50 consecutive skips against a **not-active** target. `lastError` is populated (carrying `WORKFLOW_NOT_FOUND` or `WORKFLOW_NOT_ACTIVE`). Call `resume` to clear and reschedule.
-- `archived` — soft-deleted; never returns from list.
+- `inactive` — out of service; the alarm is cancelled until `enable`. Either an operator ran `disable`, or the platform stopped it automatically — when a fire fails hard (the target workflow is **not found**, or a binding/runtime error), when the cron expression becomes unparseable, or after 50 consecutive skips against a target with **no active configuration**. In the automatic cases `lastError` says which (carrying `WORKFLOW_NOT_FOUND` or `WORKFLOW_NO_ACTIVE_CONFIG`); `enable` clears it and reschedules.
+- `archived` — soft-deleted; never returns from list. `enable` refuses it: re-create the trigger by pushing its file again.
 
-A target workflow that is draft or archived (**not active**) does NOT error-pause on the first fire: the fire is skipped and rescheduled, `lastError` is set to `WORKFLOW_NOT_ACTIVE`, and `consecutiveNotActiveCount` increments. It auto-recovers once the workflow is activated (the counter resets and `lastError` clears); only after 50 consecutive not-active skips does it escalate to `error_paused`. A target that is **not found**, by contrast, error-pauses immediately.
+A target workflow that is **inactive** does NOT take the trigger out of service: the fire is skipped and rescheduled indefinitely, and `lastError` is set to `WORKFLOW_INACTIVE`. Taking a workflow out of service is deliberate, so the trigger waits rather than punishing the operator with a second thing to undo; it auto-recovers once `primitive workflows enable <key>` runs. A target that is active but has **no resolvable configuration** still advances `consecutiveNotActiveCount` and stops the trigger after 50 consecutive skips, and one that is **not found** stops it immediately.
 
 `skippedCount` increments when `overlapPolicy: "skip"` blocks a fire because the prior run is still active — distinct from `consecutiveNotActiveCount`.
 
@@ -1962,15 +1974,14 @@ Both invocation methods are generic: `start<I>(options)` types the `input`, and 
 
 ## Workflow lifecycle
 
-A workflow needs `status = "active"` AND one of (active configuration | published revision) before clients can run it.
+A workflow needs to be `active` AND have one of (active configuration | published revision) before clients can run it. Availability is one server-owned `status` — `active | inactive` — and is **not** a TOML key: every created or pushed workflow is active, and `primitive workflows disable <key>` / `enable <key>` (or the console's action) are its only writers. A file that still carries a `[workflow] status` line fails `config push` with a message naming the verb.
 
 | Status | Active config/revision? | Client can run? | CLI preview? |
 |---|---|---|---|
-| `draft` | either | no | yes |
 | `active` | yes (required) | yes | yes |
-| `archived` | – | no | no |
+| `inactive` | either | no (`409 WORKFLOW_INACTIVE`) | yes — preview is a diagnostic |
 
-Setting `status = "active"` without an active config or revision returns: `Cannot activate workflow without a configuration`.
+`primitive workflows enable` on a workflow with no active config or revision returns: `Cannot activate workflow without a configuration`. A row stored before this model may still carry `draft` or `archived`; both read `inactive`.
 
 Delete a workflow by removing `workflows/<key>.toml` and running `primitive config push --prune`. That is a **soft delete**: the workflow is archived and its `workflowKey` stays reserved, so re-creating a workflow under the same key fails with `workflowKey already exists (held by an archived workflow <id>)`. A hard delete — which frees the key and cascades to the workflow's configurations, runs, step runs, and test cases — is available over the API and in the console.
 
@@ -1995,7 +2006,7 @@ A workflow with no active configuration is one created before the model existed.
 
 ### Run status vocabulary
 
-A **run**'s status (distinct from the workflow's `draft`/`active`/`archived` status above) is always one of nine values. The same set is used by `getStatus`, `listRuns`, `terminate`, the `workflowStatus` event, the CLI, and the persisted run record.
+A **run**'s status (distinct from the workflow's `active`/`inactive` availability above) is always one of nine values. The same set is used by `getStatus`, `listRuns`, `terminate`, the `workflowStatus` event, the CLI, and the persisted run record.
 
 | Status | Terminal? | Meaning |
 |---|---|---|
@@ -2033,12 +2044,11 @@ primitive config push
 # Authoring (TOML only — there is no workflows create/update/delete)
 primitive config fields workflow                    # every [workflow] key, type, required, default
 primitive config create workflow order-intake       # scaffold workflows/order-intake.toml
-primitive config set workflow/order-intake workflow.status=active
 primitive config push --only workflow/order-intake  # apply just this workflow
 # Delete: remove workflows/<key>.toml, then `primitive config push --prune`
 
 # Reading
-primitive workflows list [--status active] [--json]
+primitive workflows list [--status active|inactive] [--json]
 primitive workflows get <workflow-id>
 
 # Inspect / reset iterate-users iterations
@@ -2550,7 +2560,7 @@ Only persist a separate database row when you need durable history beyond the wo
 | Symptom | Likely cause |
 |---|---|
 | `404 WORKFLOW_NOT_FOUND` on start/run-sync | No workflow with that key in this app context |
-| `409 WORKFLOW_NOT_ACTIVE` ("Workflow '<key>' is not active") | The workflow exists but its status is draft/archived — activate it with `status = "active"` |
+| `409 WORKFLOW_INACTIVE` ("Workflow '<key>' is inactive") | The workflow exists but is out of service — run `primitive workflows enable <key>` |
 | `400 WORKFLOW_NO_ACTIVE_CONFIG` | Active status but no active config/revision — run `primitive config push` |
 | `400 WEBHOOK_LIMIT_REACHED` on a webhook create | The app holds 50 webhooks, archived ones included. Deleting a webhook's TOML and running `primitive config push --prune` frees a slot; an API or console delete only archives and does not. |
 | `409 WEBHOOK_KEY_EXISTS` on a webhook create | The app already has a webhook with that `key` — an archived one still holds it; hard-delete to release it. `primitive config push` converges on this `409` by adopting the existing webhook and updating it in place, so it surfaces only on direct API calls. |

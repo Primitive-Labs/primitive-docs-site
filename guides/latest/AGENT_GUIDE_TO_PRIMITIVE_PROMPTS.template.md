@@ -14,19 +14,20 @@ Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` a
 
 ---
 
-## Status Lifecycle (matters less than you'd think)
+## Availability
 
-| Status     | Executable from workflow | Executable from client SDK / CLI |
-| ---------- | ------------------------ | --------------------------------- |
-| `draft`    | Yes                      | Yes                               |
-| `active`   | Yes                      | Yes                               |
-| `archived` | No                       | No                                |
+A prompt's availability is one server-owned `status` — `active | inactive` — and it is **not** a TOML key. Every created or pushed prompt is active; `primitive prompts disable <key>` takes one out of service and `primitive prompts enable <key>` puts it back (the console has the matching action). A file that still carries a `[prompt] status` line fails `config push` with a message naming the verb.
 
-Default for new prompts is `draft`. **Both `draft` and `active` execute, from workflows and from the client SDK/CLI alike.** The status gate lives at the shared execution chokepoint (`src/services/prompt-execution.ts`) that both the client route and the workflow step call through, so `archived` prompts are refused everywhere with a `400` ("not executable"), not just from workflows.
+| Status     | Executable from a workflow | Executable from the client SDK / REST | `primitive prompts execute` |
+| ---------- | -------------------------- | ------------------------------------- | --------------------------- |
+| `active`   | Yes                        | Yes                                   | Yes                         |
+| `inactive` | No                         | No (`400 PROMPT_NOT_EXECUTABLE`)      | Yes — it is the diagnostic  |
 
-The config `status` field is separate. A config defaults to `status = "active"`. The same chokepoint checks config status too, so an archived config is refused ("not executable") from every path — workflow, SDK, REST, and CLI.
+A prompt stored before this model may still carry `draft` or `archived`; both read `inactive`, so a legacy draft prompt no longer executes at the member endpoint. `primitive prompts execute` is the documented way to trial an inactive prompt before enabling it.
 
-> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). Archived prompts return `400`, not 404. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll get a 400 ("No configuration found for this prompt"), not 404.
+The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` retires that named version, and the resolve path refuses it.
+
+> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). An inactive prompt is a `400`, not a `404`. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll also get a 400 ("No configuration found for this prompt").
 
 ---
 
@@ -148,6 +149,12 @@ Use `| json` when you need to embed objects in larger strings:
 Data: {{ input.config | json }}
 ```
 
+### The direct LLM proxy is deprecated and off by default
+
+`client.llm.*` / `client.gemini.*` (the `llm/chat`, `gemini/generate`, `gemini/generate-raw`, `gemini/count-tokens` routes) are the *old* way to reach a model. They spend the app's LLM credit with no rule saying who may do it, so the whole surface is **off by default**: while `[app] directLlmEnabled` is not `true` in `app.toml`, every one of those four routes answers `403 { code: "DIRECT_LLM_DISABLED" }` — to app admins and owners as well, since it is a spend gate, not a role gate. The routes are deprecated and are **removed in the next major server release**.
+
+Use a managed prompt (`client.prompts.execute`) or a workflow LLM step instead. Neither goes through the switch: they run whatever it is set to, gated by their own `accessRule`.
+
 ### Don't do this
 
 ```
@@ -177,7 +184,6 @@ Read and written by `primitive config pull` / `primitive config push` — the on
 key = "my-prompt"                # required, unique per app, kebab-case
 displayName = "My Prompt"        # required
 description = "What it does"     # optional
-status = "draft"                 # optional: draft (default) | active | archived
 accessRule = "true"              # REQUIRED at create: CEL deciding who may execute.
                                  # Absent/empty = every non-admin execution denied.
 inputSchema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
@@ -203,7 +209,6 @@ outputFormat = "text"            # optional: text (default) | json — request/r
 | `key`          | Yes      | Unique per app                                                                       |
 | `displayName`  | Yes      |                                                                                      |
 | `description`  | No       |                                                                                      |
-| `status`       | No       | `draft` (default) \| `active` \| `archived`                                          |
 | `accessRule`   | Yes at create | CEL deciding who may execute. Absent/empty = every non-admin execution denied with `403 { errorCode: "PROMPT_ACCESS_DENIED" }`; `"true"` allows any app member |
 | `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
 | `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back                     |
@@ -314,7 +319,7 @@ Use `--json` for machine-readable output.
 ### Reading prompts
 
 ```bash
-primitive prompts list [app-id] [--status draft|active|archived] [--json]
+primitive prompts list [app-id] [--status active|inactive] [--json]
 primitive prompts get <prompt-id> [--json]
 ```
 
@@ -325,7 +330,6 @@ A prompt is `prompts/<key>.toml`: a `[prompt]` table plus one `[[configs]]` bloc
 ```bash
 primitive config fields prompt                  # every key, type, required, default
 primitive config create prompt summarizer       # scaffold prompts/summarizer.toml
-primitive config set prompt/summarizer prompt.status=active
 primitive config push --only prompt/summarizer  # apply just this prompt
 ```
 
@@ -704,4 +708,4 @@ try await client.prompts.execute(promptKey: "p", options: ExecutePromptOptions(v
    `outputFormat` does **not** decide what a workflow gets: a `prompt.execute` step declares `expect = "json"` (or `"text"`, the default) to fix the type of its `content`. Pair the step's declaration with whatever constrains YOUR provider — `outputFormat = "json"` on openrouter, `outputSchema` on gemini (where `outputFormat` only normalizes the response).
 8. A test case's `test.inputVariables` is JSON **text** in the sidecar TOML (`prompts/<key>.tests/<case>.toml`) — a single-quoted TOML string holding a valid JSON object.
 9. `config pull` writes every authorable field back, including `outputSchema`, `topP` and `providerConfig` — a mistyped key fails the push instead of being dropped.
-10. Both `draft` and `active` prompts execute. `archived` does not. There is no separate "publish" step.
+10. Availability is `primitive prompts disable`/`enable`, never a TOML key — there is no separate "publish" step, and everything you push is live.

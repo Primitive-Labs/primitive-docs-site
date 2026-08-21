@@ -65,15 +65,30 @@ Two deliberate divergences from secrets, both worth tracking explicitly:
 1. **Never redacted.** A var resolved into a header/query value is not marked sensitive and is not masked in admin logs or the test-mode request preview — only a value substituted from `{{secrets.*}}` becomes `[redacted]`. Vars are non-secret and stay visible everywhere.
 2. **Not validated at save time.** Saving/updating an integration whose `defaultHeaders`/`staticQuery` reference a nonexistent `{{secrets.KEY}}` fails with a 400 naming the missing key. The same integration referencing a nonexistent `{{vars.KEY}}` saves successfully — the reference simply resolves to the literal `{{vars.KEY}}` placeholder at call time (the same behavior secrets fall back to only if the key is deleted *after* save).
 
-### Declared-only in CEL
+### Declared-only in CEL — with one carve-out
 
-Declare a var for CEL access the same way as a secret, in the owning config's top-level manifest:
+Declare a var for CEL access in the owning config's top-level manifest:
 
 ```toml
 vars = ["ADMIN_GROUP_ID"]
 ```
 
-A rule reads it as `vars.<KEY>`, bound only to declared keys — an undeclared `vars.KEY` is absent at evaluation (denies closed), exactly like `secrets.*`. Vars bind in workflow CEL contexts (`runIf`, `switch` `when`, predicate expressions on batch/collect steps), database operation `access`/per-param `access`, database trigger CEL, and trigger stamp `value` expressions. This CEL path is independent of the template-resolution form above — a config can use either or both.
+A rule reads it as `vars.<KEY>`, bound only to declared keys. That declared-only rule governs database operation `access`/per-param `access`, database trigger CEL, trigger stamp `value` expressions, and every `accessRule` (workflows, prompts, integrations).
+
+**Workflow guard CEL is the carve-out.** A step's `runIf`, a `forEach` step's per-iteration `runIf` and `successWhen`, a `switch` case's `when`, a compensation step's guard, and any named `expr.*` definition all bind the app's **full** config-vars map, with no `vars = [...]` declaration — the same values `{{ vars.KEY }}` renders in that workflow's step config. Vars are non-secret by construction and the workflow author already reads the whole map through templating in the same file, so there is nothing for a declaration to protect there.
+
+`secrets.*` is NOT carved out. A guard reading `secrets.KEY` still sees only the manifest-declared keys, never the full app-secret map, in every context.
+
+An undeclared key does not "deny closed" — its behavior depends on the site:
+
+| Site | Reading a key that isn't bound |
+|---|---|
+| `runIf` (step, `forEach`, compensation) | throws `No such key: KEY`; the wrapped error carries the `in`-operator hint and fails the step (or is captured by `continueOnError`) |
+| `switch` case `when` | throws `No such key: KEY` as an ordinary step failure (no runIf hint) |
+| `forEach` `successWhen` | the error is logged and the iteration is classified `succeeded` — a broken classifier never fails the run |
+| database `access`, trigger CEL, stamps, `accessRule` | the key is unbound, so the rule errors and the access is refused |
+
+Test presence first when a key may be missing: `'KEY' in vars` is false rather than throwing, and `vars.?KEY` returns an optional. This CEL path is independent of the template-resolution form above — a config can use either or both.
 
 ### Syncing vars: `vars.toml`
 

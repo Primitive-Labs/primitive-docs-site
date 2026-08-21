@@ -41,8 +41,6 @@ Integrations are defined in TOML with two sections: `[integration]` and `[reques
 key = "integration-key"              # Required. Unique per app, lowercased on lookup.
 displayName = "Display Name"         # Required.
 description = "Optional description" # Optional.
-status = "draft"                     # Optional. "draft" | "active" | "archived" (default "draft").
-                                     #   draft/archived integrations CANNOT be called by clients.
 accessRule = "true"                  # REQUIRED at creation. CEL expression deciding who may
                                      #   invoke this integration. "true" = any app member.
                                      #   Empty/absent = DENY everyone but app admins/owners.
@@ -96,7 +94,6 @@ value = "fine-tune"
 | `integration.key` | string | Yes | — | Lowercased on lookup. Unique per app. |
 | `integration.displayName` | string | Yes | — | |
 | `integration.description` | string | No | — | |
-| `integration.status` | string | No | `"draft"` | Only `"active"` is callable by clients. |
 | `integration.accessRule` | string | **Yes** | — | CEL rule for WHO may call it. Empty/absent = deny all but app admins/owners. See [Caller access control](#caller-access-control). |
 | `integration.timeoutMs` | int | No | `300000` | Aborts upstream after this long (504 `UPSTREAM_TIMEOUT`). |
 | `requestConfig.baseUrl` | string | Yes | — | `http://`, `https://`, or `test://`. |
@@ -233,7 +230,6 @@ primitive secrets set OPENAI_API_KEY --value sk-new-...
 [integration]
 key = "open-ai"
 displayName = "Open AI"
-status = "draft"
 timeoutMs = 300_000
 
 [requestConfig]
@@ -285,7 +281,6 @@ forwardQueryParams = ["q"]   # Only let clients control the search term.
 [integration]
 key = "postman-echo"
 displayName = "Postman Echo"
-status = "draft"
 timeoutMs = 30_000
 
 [requestConfig]
@@ -350,13 +345,13 @@ Authorization = "Bearer sk-abc123..."
 Authorization = "Bearer {{secrets.OPENAI_API_KEY}}"
 ```
 
-### 5. Forgetting to flip status to `active`
+### 5. Writing `status` into the TOML
 
-Newly-pushed integrations land in `status = "draft"`. Drafts can be exercised via `primitive integrations test` but **not** via `client.integrations.call()` — clients get HTTP 404 / `INTEGRATION_NOT_FOUND`.
+`status` is server-owned and is not a key of `[integration]`. A file that still carries the line fails `config push` with a message naming the verb. Every pushed integration is callable straight away; take one out of service — and put it back — out of band:
 
 ```bash
-primitive config set integration/weather-api integration.status=active
-primitive config push --only integration/weather-api
+primitive integrations disable weather-api
+primitive integrations enable weather-api
 ```
 
 ### 6. `responsePassthrough` has no effect
@@ -380,7 +375,7 @@ primitive use <app-id>           # Persist current app
 ### Reading integrations
 
 ```bash
-primitive integrations list [--status draft|active|archived] [--json]
+primitive integrations list [--status active|inactive|archived] [--json]
 primitive integrations get <integration-id> [--json]
 ```
 
@@ -391,7 +386,6 @@ An integration is `integrations/<key>.toml`. There is no create/update/delete co
 ```bash
 primitive config fields integration              # every key, type, required, default
 primitive config create integration weather-api  # scaffold integrations/weather-api.toml
-primitive config set integration/weather-api integration.status=active
 primitive config push --only integration/weather-api # apply just this one
 ```
 
@@ -408,7 +402,7 @@ primitive integrations test <id> --method POST --body '{"foo":"bar"}'
 
 Note: `--method` defaults to `GET` regardless of the integration's `defaultMethod`. Pass `--method` explicitly when the integration only allows non-GET methods.
 
-The test endpoint runs with `allowInactive: true`, includes a `requestPreview` (with secrets redacted), and works against `draft` integrations.
+The test endpoint is a documented diagnostic: it includes a `requestPreview` (with secrets redacted) and works against an INACTIVE integration. An `archived` one is refused.
 
 ### Logs
 
@@ -572,13 +566,15 @@ The step pulls App Secrets and resolves `{{secrets.KEY}}` the same way the user-
 
 ## Status Lifecycle
 
+`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow. A row created before #2803 may still store `draft`; it reads `inactive`.
+
 | Status | Callable by clients? | `primitive integrations test`? |
 |--------|----------------------|--------------------------------|
-| `draft` | No (404) | Yes |
 | `active` | Yes | Yes |
-| `archived` | No (404) | Yes |
+| `inactive` | No (404) | Yes — it is the diagnostic |
+| `archived` | No (404) | No |
 
-Deleting an integration — remove its TOML file, then `primitive config push --prune` — sets it `archived`. A hard delete, which removes the row permanently, is available over the API and in the console.
+Deleting an integration over the API or in the console **archives** it. `primitive config push --prune` — remove the TOML file, then push — hard-deletes the row permanently.
 
 ## Files on Disk (sync mode)
 
@@ -595,4 +591,4 @@ primitive secrets list                      # confirm referenced secret keys exi
 primitive vars list                         # confirm referenced var keys exist
 ```
 
-If client calls return `INTEGRATION_NOT_FOUND` despite the integration existing, check status — drafts/archived return 404.
+If client calls return `INTEGRATION_NOT_FOUND` despite the integration existing, check its status — inactive and archived both return 404. `primitive integrations enable <key>` puts it back in service.

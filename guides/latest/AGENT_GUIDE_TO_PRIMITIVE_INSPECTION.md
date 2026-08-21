@@ -82,7 +82,7 @@ Six views read "what happened": `workflows runs list`, `workflows runs failures`
 | `source` | Discriminator: `workflow-run`, `workflow-step`, `integration`, `webhook`, `activity`. |
 | `timestamp` | ISO-8601 event time, or `null` when the record carries none. |
 | `outcome` | Normalized verdict: `ok`, `error`, `pending`, `neutral`. |
-| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `failed`/`completed`/`terminated` (run), `skipped` (step), `duplicate`/`workflow_not_active` (webhook), `null` (activity). |
+| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `failed`/`completed`/`terminated` (run), `skipped` (step), `duplicate`/`workflow_inactive` (webhook), `null` (activity). |
 | `correlation` | Pivot keys: `runId`, `stepId`, `stepRunId`, `eventId`, `traceId`, `workflowId`, `workflowKey`, `integrationKey`, `webhookId`, `workflowRunId`, `userId` — including the row's own id, so a printed row can always be looked up again. Only the keys a source records are present. |
 | `detail` | Per-source allowlist of operator-facing fields — a projection, not the stored record. |
 
@@ -93,10 +93,10 @@ Outcome mapping, by source:
 | Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
 | Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | `missing`, `skipped` |
 | Workflow step | `completed` | `failed`, `error_captured` | — | `skipped`, `running` |
-| Webhook | `accepted`, `duplicate`, `handshake`, `workflow_not_active` | `rejected`, `error` | — | — |
+| Webhook | `accepted`, `duplicate`, `handshake`, `workflow_inactive` | `rejected`, `error` | — | — |
 | Activity | — | — | — | always |
 
-`workflow_not_active` is `ok` on purpose: the delivery was accepted and deliberately not dispatched. Activity events are always `neutral` — they carry no success signal, so no `ok` is invented for them.
+`workflow_inactive` is `ok` on purpose: the delivery was accepted and deliberately not dispatched. Activity events are always `neutral` — they carry no success signal, so no `ok` is invented for them.
 
 Pagination per view: `workflows runs list`, `workflows runs failures` and `webhooks events` return `{ items, hasMore, nextCursor? }` and take `--limit`/`--cursor`; the two run views add `scanned` (runs examined) whenever a filter is in play, since a filtered read searches the index rather than reading one page; `workflows runs steps` returns `{ items }` (a run's steps are not paged); `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--source` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`.
 
