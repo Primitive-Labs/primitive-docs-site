@@ -952,7 +952,7 @@ saveAs = "billingUpgrades"
 
 ### `script`
 
-Runs a sandboxed [Rhai](https://rhai.rs/) script over JSON input and returns JSON. Use it for transforms too involved for a templated `transform` step (nested reshaping, derived fields, array map/filter/reduce). The sandbox is **side-effect-free** — no network or storage access — and deterministic except for the `ulid()` builtin (mints fresh record ids, e.g. for `document.bulkUpdate` creates), so script steps are safe to retry and easy to test. The [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md) covers the script model, input/output contract, limits, error codes, and gotchas in full; this section is the step-level reference.
+Runs a sandboxed [Rhai](https://rhai.rs/) script over JSON input and returns JSON. Use it for transforms too involved for a templated `transform` step (nested reshaping, derived fields, array map/filter/reduce). Full concept, input/output contract, `parse_json`, `ulid()`, per-step limits, error codes, and telemetry: [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md).
 
 ```toml
 [[steps]]
@@ -966,31 +966,10 @@ raw = "{{ steps.fetch.body }}"
 currency = "{{ input.currency }}"
 ```
 
-The referenced body (`transforms/normalize-order.rhai`):
-
-```
-let items = input.raw.items.filter(|i| i.qty > 0);
-let total = 0.0;
-for i in items { total += i.qty * i.price; }
-#{
-  currency: input.currency,
-  itemCount: items.len(),
-  total: total,
-}
-```
-
-Given `steps.fetch.body = { "items": [{ "sku": "a1", "qty": 2, "price": 5.0 }, { "sku": "b2", "qty": 0, "price": 9.0 }] }` and `input.currency = "USD"`, the step records `steps.normalize.output = { "result": { "currency": "USD", "itemCount": 1, "total": 10.0 }, "ok": true }` — the return value is wrapped under `result` (see Result nesting below).
-
-- `ref` (required) names a `Script` — a stored Rhai body, unique per app. Script bodies live in `transforms/<name>.rhai` in your config directory and are mirrored to the server by `primitive config push` (and pulled back by `primitive config pull`); the `<name>` is the filename without `.rhai`. Script bodies are authored only through sync — no CLI command writes them; the `primitive scripts` command inspects scripts and manages their test cases (see the [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md)).
-- `with` is the JSON context handed to the script. Inside the script the whole table is exposed as **`input.*`** (with `ctx.*` as an alias) — NOT as bare top-level variables. `let x = payload;` fails with `Variable not found: payload`; write `input.payload`. Also, `with` itself is a reserved Rhai keyword — a script can't declare a variable named `with`.
-- **Result nesting.** A script step's output is an envelope: `steps.<id>.output = { result: <return value>, ok: <bool> }`. The return value lives at `steps.<id>.output.result.*` and the success verdict at `steps.<id>.output.ok` (also mirrored at `steps.<id>.ok`); per-run telemetry sits in a sibling `steps.<id>.scriptMetrics`, not inside `output`. Unlike `transform`, whose result is the templated table directly (`steps.<id>.<field>`), wire downstream templates/`runIf` as `{{ steps.normalize.output.result.total }}` — not `{{ steps.normalize.output.total }}` or `{{ steps.normalize.total }}`.
-- **Script bodies resolve live at run time.** The runner looks up the script's active config body on each execution; there is no publish-time snapshot. Pushing a changed `.rhai` file (`primitive config push`) creates a new config and activates it — referencing workflows pick up the new body on their next run with no re-publish step. Pin a specific config with `configId = "..."` on the step to bypass the active-config lookup when determinism is required.
-- Handy patterns: `parse_json(input.someJsonString)` for JSON-string fields (e.g. payload columns stored as strings); missing keys read as `()` (test with `h.symbol != ()`); `NaN`/`Infinity` can't survive JSON output — they serialize as `null`, so return a sentinel instead.
-- **`parse_json` parses any strict-JSON value** — object→map, array→array, plus primitives and `null` — so a field storing a JSON array string parses straight into an array. Input must be strict JSON (no trailing commas, comments, single quotes, or hex literals); invalid input fails the step with a non-retryable `SCRIPT_RUNTIME_ERROR` and a positioned message.
-- `limits` (optional) lets a step lower the per-run ceilings (`maxOperations`, `wallMsHint`, `maxOutputBytes`, `maxArrayLength`, `maxObjectKeys`, `maxNestingDepth`, `maxStringSize`, `maxCallDepth`, `maxLogBytes`); requested values are clamped at the app ceiling, never raised.
-- **`with` is capped at 262,144 bytes (256KB) serialized**, and this cap is fixed — it isn't one of the fields `limits` can lower. A step whose input exceeds it fails non-retryably; see the [Scripts guide's per-step limits](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#per-step-limits) for the exact error and for keeping batch-processing inputs (e.g. a query step's `data` piped into a map script) under the cap.
-- Deterministic failures (parse / compile / runtime / limit / validation) come back as a non-retryable step error so durable retries don't re-run a guaranteed failure; transient/transport errors throw and retry normally. The runtime fails closed — it never silently passes input through.
-- Each execution records per-step telemetry at `steps.<id>.scriptMetrics` — a sibling of the step's `output`, persisted on `WorkflowStepRun.scriptMetrics` (operation counts, input/output byte sizes, runtime version) — visible in run detail.
+- `ref` (required) names a `Script` — a stored Rhai body, unique per app, authored only through sync (`transforms/<name>.rhai`, mirrored by `primitive config push`/`pull`); see the Scripts guide's [Script model](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#the-script-model).
+- `with` is the JSON context handed to the script, templated by the engine before the script runs; see the Scripts guide's [Input and output](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#input-and-output) for how it's exposed inside the script, the `output`/`ok`/`scriptMetrics` result envelope, and `parse_json` gotchas.
+- `configId` (optional) pins a specific `ScriptConfig`, bypassing the active-config lookup the runner otherwise does on every execution — see [Live resolution at run time](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#live-resolution-at-run-time).
+- `limits` (optional) lowers the per-run ceilings; see [Per-step limits](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#per-step-limits) for the fields, bounds, and the fixed (non-lowerable) `with` input cap.
 
 ### `block.call`
 

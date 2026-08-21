@@ -24,17 +24,17 @@ Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` a
 
 ## Status Lifecycle (matters less than you'd think)
 
-| Status     | Executable from workflow | Executable from client SDK / CLI | Executable from server REST |
-| ---------- | ------------------------ | -------------------------------- | --------------------------- |
-| `draft`    | Yes                      | Yes                              | Yes                         |
-| `active`   | Yes                      | Yes                              | Yes                         |
-| `archived` | No                       | Yes (no status check)            | Yes (no status check)       |
+| Status     | Executable from workflow | Executable from client SDK / CLI |
+| ---------- | ------------------------ | --------------------------------- |
+| `draft`    | Yes                      | Yes                               |
+| `active`   | Yes                      | Yes                               |
+| `archived` | No                       | No                                |
 
-Default for new prompts is `draft`. **Both `draft` and `active` execute from workflows** (verified in `src/workflows/steps/prompt-step.ts:66`); only the workflow path enforces the status gate. The user REST handler (`src/app-api/controllers/prompts-controller.ts`) and the admin/CLI execute endpoint do NOT filter by `status`, so `archived` prompts still execute via the SDK and CLI as long as the prompt and an active-config exist. Archive a prompt only to hide it from listings — it does not block direct execution outside workflows.
+Default for new prompts is `draft`. **Both `draft` and `active` execute, from workflows and from the client SDK/CLI alike.** The status gate lives at the shared execution chokepoint (`src/services/prompt-execution.ts`) that both the client route and the workflow step call through, so `archived` prompts are refused everywhere with a `400` ("not executable"), not just from workflows.
 
-The config `status` field is separate. A config defaults to `status = "active"`. The workflow step checks this and refuses to execute archived configs ("not executable"); the SDK/REST/CLI paths do not check config status.
+The config `status` field is separate. A config defaults to `status = "active"`. The same chokepoint checks config status too, so an archived config is refused ("not executable") from every path — workflow, SDK, REST, and CLI.
 
-> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). Archived prompts return 200 from the user REST endpoint, not 404. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll get a 400 ("No configuration found for this prompt"), not 404.
+> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). Archived prompts return `400`, not 404. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll get a 400 ("No configuration found for this prompt"), not 404.
 
 ---
 

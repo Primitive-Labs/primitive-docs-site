@@ -329,6 +329,23 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
   await client.documents.open(result.documentId);
 ```
 
+### Local-only documents
+
+`documents.create({ localOnly: true })` creates a document that never reaches the server — not in the creating session, not in any later one, and not after the local copy is evicted and its metadata reloaded from the stored row. Every edit to it is dropped before it would be queued outbound, so there is nothing to mark unsynced and nothing to commit later.
+
+```typescript
+  const { metadata } = await client.documents.create({
+    title: "Draft",
+    localOnly: true,
+  });
+  await client.documents.open(metadata.documentId, {
+    waitForLoad: "local",
+    enableNetworkSync: false,
+  });
+```
+
+Open a local-only document with `waitForLoad: "local"` and `enableNetworkSync: false`. `enableNetworkSync` defaults to `true`, so omitting it — or passing `waitForLoad: "network"` — throws `JsBaoError` with code `LOCAL_ONLY_UNSUPPORTED_OPTION`; pass both options explicitly on every open.
+
 ### Share a document (user / email / group)
 
 ```typescript
@@ -1446,7 +1463,7 @@ Pass `null` to clear `thumbnailBlobId` or `metadata`.
 
 Delete a document (it must be closed first, or pass `forceCloseIfOpen: true`) — see the compiled call below. Root documents cannot be deleted. Deletion requires **direct `owner` permission** on the document or the app `owner` role — group-derived permission never qualifies, and `read-write` editors can delete records and content but not the document itself.
 
-The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
+The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
 
 ```typescript
   // Must be closed first
@@ -1790,7 +1807,7 @@ await client.collections.revokeGroupPermission(collectionId, "team", "engineerin
 
 The deferred-grant flow when adding a collection member by email (`collections.addMember`) mirrors the document share path: `app.baseUrl` must be configured, `sendEmail: true` requires `collectionUrl`, and `client.invitations.delete(invitationId)` cancels every pending collection add (plus any pending document shares and group adds) attached to the invitation. See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants) for the resolution lifecycle.
 
-For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) in the Users and Groups guide.
+For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) in the Users and Groups guide.
 
 
 **CLI:**

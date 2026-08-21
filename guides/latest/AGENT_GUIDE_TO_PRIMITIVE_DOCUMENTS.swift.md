@@ -298,6 +298,25 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
   _ = try await client.documents.open(result.documentId)
 ```
 
+### Local-only documents
+
+`documents.create({ localOnly: true })` creates a document that never reaches the server — not in the creating session, not in any later one, and not after the local copy is evicted and its metadata reloaded from the stored row. Every edit to it is dropped before it would be queued outbound, so there is nothing to mark unsynced and nothing to commit later.
+
+```swift
+  let result = try await client.documents.create(
+    options: CreateDocumentOptions(title: "Draft", localOnly: true)
+  )
+  let documentId = result.metadata?["documentId"]?.stringValue
+  if let documentId {
+    _ = try await client.documents.open(
+      documentId,
+      options: OpenDocumentOptions(waitForLoad: .local, enableNetworkSync: false)
+    )
+  }
+```
+
+Open a local-only document with `waitForLoad: .local` and `enableNetworkSync: false` — the content never reaches the wire regardless of the open options, but these are the ones that skip an unreachable network wait.
+
 ### Share a document (user / email / group)
 
 ```swift
@@ -1076,7 +1095,7 @@ Update a document's title, thumbnail, and presentation metadata — see [Update 
 
 Delete a document (it must be closed first, or pass `forceCloseIfOpen: true`) — see the compiled call below. Root documents cannot be deleted. Deletion requires **direct `owner` permission** on the document or the app `owner` role — group-derived permission never qualifies, and `read-write` editors can delete records and content but not the document itself.
 
-The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
+The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
 
 ```swift
   // Must be closed first
@@ -1271,7 +1290,7 @@ Collections accept email-based members exactly like documents and groups — a d
 
 The deferred-grant flow when adding a collection member by email (`collections.addMember`) mirrors the document share path: `app.baseUrl` must be configured, `sendEmail: true` requires `collectionUrl`, and `client.invitations.delete(invitationId)` cancels every pending collection add (plus any pending document shares and group adds) attached to the invitation. See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants) for the resolution lifecycle.
 
-For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) in the Users and Groups guide.
+For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) in the Users and Groups guide.
 
 `collections.addDocument`/`removeDocument` are idempotent, and the same max-wins cascade applies. The template's local app-state pattern assumes one collection per doc (`ListRef.collectionId`); for multi-membership, model a `[String]` field or query `collections.listCollectionsForDocument(documentId:)` on demand. Read collection lists with `collections.list(options:)` and members with `collections.getAccess(collectionId:)` (see [Permission / collection reads](#permission--collection-reads) below).
 
