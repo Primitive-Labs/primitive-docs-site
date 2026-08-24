@@ -377,18 +377,44 @@ instead of failing with no explanation.
 
 ### Installing idb
 
-idb is two pieces: a native companion (Homebrew) and the `idb` Python client:
+In an app scaffolded from the Swift template, this is one command:
+
+```bash
+bash scripts/setup-idb.sh
+```
+
+It is idempotent — on a machine that already has idb it installs nothing — and
+it fails loudly if it can't finish, rather than letting the problem resurface
+later as an unexplained "cannot run accessibility commands".
+
+What it does, and what to run by hand without the template: idb is two pieces, a
+native companion (Homebrew) and the `idb` Python client.
 
 ```bash
 brew install facebook/fb/idb-companion
-python3.12 -m venv idbenv && ./idbenv/bin/pip install fb-idb
-export PATH="$PWD/idbenv/bin:$PATH"   # put `idb` on PATH
+python3.12 -m venv ~/.local/share/primitive/idb-venv
+~/.local/share/primitive/idb-venv/bin/pip install fb-idb
+mkdir -p ~/.local/bin                                              # may not exist yet
+ln -s ~/.local/share/primitive/idb-venv/bin/idb ~/.local/bin/idb   # put `idb` on PATH
 ```
 
+The link step is deliberately not `ln -sf`: if you already manage an `idb` at
+`~/.local/bin/idb`, it errors instead of replacing it (which is what the script
+does too). Remove yours first if you want the venv's client there.
+
 **Pin Python 3.12.** `fb-idb` calls `asyncio.get_event_loop`, which was removed
-in Python 3.14, so it fails to run under 3.14. Install it into a 3.12 venv as
-shown. `ui_signin`'s preflight detects a missing or unrunnable idb and prints
-these steps rather than a raw stack trace.
+in Python 3.14, so it fails to run under 3.14 — and Homebrew's Python is PEP 668
+externally-managed, so a plain `pip install fb-idb` is refused outright. A 3.12
+venv answers both, which is why the script builds one (at
+`PRIMITIVE_IDB_VENV`, default `~/.local/share/primitive/idb-venv`, so every app
+on the machine shares one install).
+
+`scripts/smoke-test.sh` finds that venv's client itself — including when a
+broken 3.13/3.14 `idb` shadows it on PATH — so `ui_signin` needs no PATH export.
+For ad-hoc `idb` commands, add `export PATH="$HOME/.local/bin:$PATH"` to your
+shell (the script prints the line when it's needed). `ui_signin`'s preflight
+detects a missing or unrunnable idb and points at `bash scripts/setup-idb.sh`
+rather than printing a raw stack trace.
 
 ### Driving idb by hand
 

@@ -551,7 +551,6 @@ That writes `prompts/greeting-generator.toml` from the type's defaults. Fill it 
 [prompt]
 key = "greeting-generator"
 displayName = "Greeting Generator"
-status = "active"
 accessRule = "true"
 
 [[configs]]

@@ -119,33 +119,110 @@ config/
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
 - `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; opts into the deprecated direct LLM/Gemini proxy routes, off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array)
-- `[auth]` — `googleOAuthEnabled`, `googleClientId`, `googleClientSecret` (a `{{secrets.KEY}}` reference — see below), `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `redirectUris` (string array), `[auth.passkeys]` relying-party config
+- `[auth]` — `googleOAuthEnabled`, `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the magic-link allow-list, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
 
-Push forwards only recognized keys and only those present: an omitted key is left untouched on the server (not cleared), an explicit `false` is forwarded, and `appleAudiences = []` clears the audiences. This omit-preserves rule is specific to app settings — a synced entity's owned scalar fields are cleared when their line is removed (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)). An unrecognized key is ignored with a warning (`Unrecognized [<section>] key "<key>" in app.toml — ignored. Recognized keys: …`).
+`app.toml` is the **whole truth**, the same source-of-truth rule every other configuration file follows (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)): push sends a value for every setting listed above, not just the keys present, so a deleted line **clears** the setting or **resets it to its declared default** — `magicLinkEnabled` / `otpEnabled` / `waitlistNotifyAdmins` to `true`, `[cors] mode` to `"universal"`, `[invitations] limit` to `5`, the remaining booleans to `false`, everything else cleared. `[app].name` and `[app].mode` are **required** (no default to reset to, and `mode` decides who can sign up), so their absence is a validation error from `config push` and `config diff` alike. `config pull` still omits a setting the server does not hold, so a pull → push round trip is a no-op. An explicit `false` is forwarded and `appleAudiences = []` clears the audiences. An unrecognized or retired key is rejected by name before anything is applied — never ignored.
 
-`googleClientSecret` holds a whole `{{secrets.KEY}}` reference, never the secret itself, so it round-trips through `app.toml` like any other string setting. Store the value as an app secret first:
+### Google sign-in — one client per platform
+
+Google registers an OAuth client **per platform**, so `app.toml` states one
+entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`.
+Each entry carries its own `clientId` and its own `redirectUris`, and — for the
+types Google issues one for — its own `clientSecret`. Store the secret's value
+as an app secret first:
 
 ```bash
 primitive secrets set GOOGLE_CLIENT_SECRET --value <client-secret>
 ```
 
 ```toml
-[auth]
-googleClientId = "1234.apps.googleusercontent.com"
-googleClientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+[auth.google.clients.web]
+clientId     = "1234-web.apps.googleusercontent.com"
+clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+redirectUris = ["https://app.example.com/oauth/callback"]
+
+[auth.google.clients.ios]
+clientId     = "1234-ios.apps.googleusercontent.com"
+redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
 ```
 
-A literal value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. Clearing the setting (`""`) leaves the app secret in place.
+| client type | `clientSecret` |
+|---|---|
+| `web`, `desktop` | **required** |
+| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
 
-A plain value stored before this rule shipped is a literal, and it keeps working — Google sign-in on an app that never migrated still uses the stored secret. It is deprecated, and it blocks configuration: while the stored value is a literal, **any** app-settings write is rejected with `GOOGLE_CLIENT_SECRET_MIGRATION_REQUIRED` unless that same write migrates the field — sets a valid `{{secrets.KEY}}` reference, or clears it. Store the value as an app secret and re-point the setting in one push.
+A `clientSecret` holds a whole `{{secrets.KEY}}` reference, never the secret
+itself, so the whole map round-trips through `app.toml` like any other setting.
+A literal value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and
+a reference naming a key that doesn't exist with
+`MISSING_GOOGLE_CLIENT_SECRET_REF`.
 
-`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a *reference* naming a secret that doesn't exist, or a malformed reference (below): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone, so Primitive lets it through rather than rejecting it outright. Exempt is not unaffected: when the reference resolves the server does send `client_secret` alongside `code_verifier`, and Google requires it for the "Web application" client type the setup guide provisions — so on a dangling reference the native exchange fails at Google instead, as a generic `INVALID_TOKEN`.
+**A redirect URI belongs to the client that redirects, and selects it at the
+callback** — so a URI may appear in only one entry, and an iOS custom scheme is
+not a valid redirect for the web client. Removing a client is how you stop using
+it: for `web` and `desktop` you cannot blank the secret and keep the entry,
+because the map would then be invalid. Deleting the whole `[auth.google]` table
+removes every client.
 
-The server only ever sends `googleClientSecret` back when it holds a reference. A pre-existing literal is real credential material, so it is withheld from every read — `apps get`, `config pull`, the API — and reported as `googleClientSecretStatus = "legacy-literal"` instead. Google sign-in keeps working on such an app; the setting is simply absent from `app.toml`. `apps get` and `config pull` each warn when they read that status, naming the remediation — a pulled `app.toml` cannot be pushed back until the field is migrated. Re-point it at a secret reference and push.
+`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be
+resolved to a client secret — a *reference* naming a secret that doesn't exist,
+or a malformed reference (below): the **web** sign-in flow fails closed with it
+before the request reaches Google. Native (PKCE) sign-in is deliberately exempt
+from that guard — a PKCE exchange can prove possession of the auth code with the
+code verifier alone, so Primitive lets it through rather than rejecting it
+outright.
 
-`googleClientSecretStatus = "malformed-reference"` is the case that is **not** working: the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space), so it is neither a pointer nor the secret Google issued, and sign-in fails with `GOOGLE_OAUTH_MISCONFIGURED`. It is withheld from reads for the same reason a literal is. Store the real client secret and point the setting at it.
+The server sends every stored `clientSecret` back verbatim: a whole
+`{{secrets.KEY}}` reference is a pointer, not a credential, so there is nothing
+to withhold and `apps get`, `config pull` and the API all show it. Classify what
+you see:
+
+- a whole `{{secrets.KEY}}` reference — healthy;
+- a plain value, from before this rule shipped — deprecated. Google sign-in on
+  that app keeps working (the stored value IS the secret), but the entry cannot
+  be saved as it stands, because every write path rejects a literal. Store the
+  value as an app secret, point `clientSecret` at it, and push;
+- reference syntax that no `{{secrets.KEY}}` reference accounts for
+  (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying
+  an invisible character such as a zero-width space) — **already failing**. It is
+  neither a pointer nor the secret Google issued, so sign-in fails with
+  `GOOGLE_OAUTH_MISCONFIGURED`. Store the real client secret and re-point the
+  entry.
+
+An unmigrated value blocks nothing else: an app-settings write that does not
+touch the Google map succeeds whatever is stored.
+
+### Magic-link redirect URIs
+
+`emailRedirectUris` is the allow-list the magic-link flow validates against —
+flat in `[auth]`, alongside `magicLinkEnabled` and `otpEnabled`:
+
+```toml
+[auth]
+magicLinkEnabled  = true
+emailRedirectUris = ["https://app.example.com/auth/callback"]
+```
+
+Matching is **fail-closed**: an empty or missing list rejects every magic-link
+request. New apps are seeded with `http://localhost:5173/oauth/callback` so a
+fresh app works with no configuration, and `primitive init` appends the dev-port
+callback when you choose a non-default port. `http`/`https` entries match by
+ORIGIN (one origin, many paths); a custom scheme must match exactly.
+
+### Retired keys
+
+`googleClientId`, `googleClientSecret`, `redirectUris`, `passkeyRpId` and
+`passkeyRpName` are no longer authored. A file that still carries one is
+rejected by name, with the replacement:
+
+| retired key | replacement |
+|---|---|
+| `googleClientId` | `[auth.google.clients.<type>].clientId` |
+| `googleClientSecret` | `[auth.google.clients.<type>].clientSecret` |
+| `redirectUris` | `[auth.google.clients.<type>].redirectUris` for Google callbacks; `emailRedirectUris` for magic links — a stored list may legitimately have mixed the two, so split it |
+| `passkeyRpId` / `passkeyRpName` | `[auth.passkeys]` (`passkeyRpConfig`) |
 
 ## Owned scalar fields (clear on absence)
 
@@ -163,13 +240,15 @@ Enum and defaulted fields (`status`, `timeoutMs`, `timezone`, `overlapPolicy`, `
 
 ## Environment resolution
 
-Every command resolves its target environment in order: `--env <name>` flag → `PRIMITIVE_ENV` env var → `defaultEnvironment` in `.primitive/config.json` → the only defined environment → error. Manage environments with `primitive env add|list|show|use|remove`. Tokens are stored per-environment in `.primitive/credentials.json` (gitignored); `.primitive/config.json` is committed.
+Every command resolves its target Primitive environment in order: `--env <name>` flag → `PRIMITIVE_ENV` env var → this machine's selection in `.primitive/local.json` → `defaultEnvironment` in `.primitive/config.json` → the only defined environment → error. Manage environments with `primitive env add|list|show|use|remove`.
+
+`primitive env use <name>` writes the selection to `.primitive/local.json`, NOT to the committed config: which backend this machine is pointed at is per-machine state, so switching backends never modifies a tracked file. `defaultEnvironment` stays the committed team default a fresh clone resolves. Tokens (`.primitive/credentials.json`) and the selection (`.primitive/local.json`) are gitignored; `.primitive/config.json` is committed and is the single place a backend URL and app ID are typed — app templates read it rather than repeating those values in their own config. A corrupt or dangling selection is reported by `env list`/`env show` rather than silently falling back.
 
 `primitive env add` writes only the environment entry into `.primitive/config.json` — it seeds no credentials, and project mode does **not** fall back to the global `~/.primitive/credentials.json`. A freshly-added environment therefore starts logged-out: project-scoped commands report "not logged in" until you run `primitive login` for that environment, even when a global `primitive whoami` succeeds. (The `dev` environment scaffolded by `primitive init` is the exception — init seeds it with the session it authenticated during setup.) Agents and CI can log in without a browser by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` (see [Headless auth](#headless-auth-ci)).
 
 ## Previewing a push
 
-`primitive config diff` lists entities that would be created, changed, or removed; `primitive config push --dry-run` reports the full push without applying it. A local file with no matching server entity is reported in one of two buckets, counted separately in the summary: **Local only (new)** — a file no prior pull managed, hand-authored, which push will create — and **Local only (absent from export)** — a file a prior pull wrote whose entity is now absent from the server (deleted server-side); push would RE-create it unless you remove the file, and a default `config pull` would prune it (see [Pull pruning](#pull-pruning-deleting-local-files)). The discriminator is the same prior-sync-state check the pull-side prune uses. A server entity with **no** local file is reported under **Remote only**, split by the same check: **Remote only (managed)** — a prior pull recorded it, so `push --prune` deletes it (see [Push pruning](#push-pruning-deleting-server-entities)) — and **Remote only (unmanaged)** — never synced, authored server-side, left alone. **`diff` covers every resource type `config push` handles** — the config types (database types, rule sets, group- and collection-type configs, metadata-category configs), email templates, webhooks and prompts are compared for content, not just presence, so an edit to one of them is reported as **Modified** rather than silently reading as in-sync until push applies it. Any type whose current server state `diff` could not fetch is listed under an explicit **not compared** line instead of being omitted, so the summary is never mistaken for exhaustive. **`diff` counts entities only** (workflows, prompts, database types, integrations, webhooks, …) — an `app.toml` / app-settings-only edit is invisible to it, reporting every count as zero, which reads as "nothing to push" when there is. App-settings changes surface only in `push --dry-run`, which walks the full push. Both run the **same** validate-first gate as a real push — local TOML validation followed by the server-side checks via the validate-first pass — so the preview is faithful: what it reports is what the push applies. For the types push reconciles against live server state — the config types, email templates, transforms and prompts — both commands decide from the **same** comparison, so a comment-only or formatting-only edit is a change to neither, and a difference `diff` reports is one `push` acts on: it applies the edit, or reports it as server drift or a conflict rather than overwriting. Integrations, webhooks, cron triggers and blob buckets still gate their push on the file's byte hash, so for those a cosmetic edit can still appear as a push update. One prompt difference push cannot apply is named instead of being reported as a clean update: push updates and creates the `[[configs]]` entries the file lists, but deletes none and clears no activation, so a file omitting an entry the server holds — or naming no `active` configuration — is reported as still differing after the push (`Prompt <key> still differs from the server after this push`), which `config diff` will keep reporting until you `config pull` or remove the configuration server-side. Schema-gate rejections surface identically in the preview and in a real push: an operation whose database type has no schema set, an unresolved `$params.X`/reference, or a schema change that would break an existing registered operation. A previewed or blocked entity records no content hash in sync state, so it stays pending on the next `config diff` rather than reading "in sync" — a server-rejected change cannot silently disappear from the diff. `primitive config diff --json` emits machine-readable output on stdout.
+`primitive config diff` lists entities that would be created, changed, or removed; `primitive config push --dry-run` reports the full push without applying it. A local file with no matching server entity is reported in one of two buckets, counted separately in the summary: **Local only (new)** — a file no prior pull managed, hand-authored, which push will create — and **Local only (absent from export)** — a file a prior pull wrote whose entity is now absent from the server (deleted server-side); push would RE-create it unless you remove the file, and a default `config pull` would prune it (see [Pull pruning](#pull-pruning-deleting-local-files)). The discriminator is the same prior-sync-state check the pull-side prune uses. A server entity with **no** local file is reported under **Remote only**, split by the same check: **Remote only (managed)** — a prior pull recorded it, so `push --prune` deletes it (see [Push pruning](#push-pruning-deleting-server-entities)) — and **Remote only (unmanaged)** — never synced, authored server-side, left alone. **`diff` covers every resource type `config push` handles** — the config types (database types, rule sets, group- and collection-type configs, metadata-category configs), email templates, webhooks, prompts, integrations, cron triggers, blob buckets, test-case sidecars and the app settings in `app.toml` (compared per field) are all compared for CONTENT, not just presence, so an edit to any of them is reported as **Modified** rather than silently reading as in-sync until push applies it. Any type whose current server state `diff` could not fetch is listed under an explicit **not compared** line instead of being omitted, so the summary is never mistaken for exhaustive. Both run the **same** validate-first gate as a real push — local TOML validation followed by the server-side checks via the validate-first pass — so the preview is faithful: what it reports is what the push applies. Both commands decide from the same comparison against live server state, for every type push handles and with no per-type exception list: a comment-only or formatting-only edit is a change to neither, and a difference `diff` reports is one `push` acts on — it applies the edit, or reports it as server drift (**DRIFT**, not overwritten) or a conflict (**CONFLICT**, cleared by `config pull` or `--force`), or names an immutable-field difference with its remedy. A file `push` would refuse — an unrecognized or retired key, or a value whose spelling is not its declared type — is reported by `diff` with the identical message under **Invalid**, never as in-sync. When a type's live state cannot be read, that type degrades to the last-sync content hash with a named warning, and fails closed when there is no stored hash to gate on: nothing is written, and the run tells you to `config pull` or `--force`. One prompt difference push cannot apply is named instead of being reported as a clean update: push updates and creates the `[[configs]]` entries the file lists, but deletes none and clears no activation, so a file omitting an entry the server holds — or naming no `active` configuration — is reported as still differing after the push (`Prompt <key> still differs from the server after this push`), which `config diff` will keep reporting until you `config pull` or remove the configuration server-side. Schema-gate rejections surface identically in the preview and in a real push: an operation whose database type has no schema set, an unresolved `$params.X`/reference, or a schema change that would break an existing registered operation. A previewed or blocked entity records no content hash in sync state, so it stays pending on the next `config diff` rather than reading "in sync" — a server-rejected change cannot silently disappear from the diff. `primitive config diff --json` emits machine-readable output on stdout.
 
 ## Push failures
 
@@ -234,6 +313,6 @@ primitive tokens create --name "CI deploys" --ttl 90d    # m/h/d/w/mo/y units; o
 PRIMITIVE_ENV=prod primitive config push
 ```
 
-`login` resolves its server from the active environment's `apiUrl` (project mode) or the default server (legacy/no project config). Set `PRIMITIVE_SERVER_URL` to point legacy-mode login and scripts at a custom server (`PRIMITIVE_SERVER_URL=http://localhost:8787 primitive login`). An unresolvable environment — multiple environments with no `-e <env>` and no `defaultEnvironment` — fails loudly rather than defaulting to production.
+`login` resolves its server from the active environment's `apiUrl` (project mode) or the default server (legacy/no project config). Set `PRIMITIVE_SERVER_URL` to point legacy-mode login and scripts at a custom server (`PRIMITIVE_SERVER_URL=http://localhost:8787 primitive login`). An unresolvable environment — multiple environments with no `-e <env>`, no `primitive env use` selection and no `defaultEnvironment` — fails loudly rather than defaulting to production.
 
 `primitive token` (singular) prints the current access token, auto-refreshing it — usable for `curl -H "Authorization: Bearer $(primitive token)"`.

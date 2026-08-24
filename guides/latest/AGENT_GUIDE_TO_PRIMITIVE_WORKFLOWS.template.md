@@ -1489,7 +1489,8 @@ displayName = "Stripe Payments"
 workflowKey = "process-stripe"
 verificationScheme = "stripe"     # stripe | github | slack | discord | jwt | plaid | custom | none
 signingSecret = "{{secrets.STRIPE_WEBHOOK_SECRET}}"  # a whole {{secrets.KEY}} reference; nothing else is accepted
-status = "active"                 # active | paused; create defaults to active
+# Availability is server-owned and is NOT authored here: a pushed webhook is in
+# service, and `primitive webhooks enable|disable` is what changes that.
 # Optional: toleranceSeconds, deduplicationEnabled, deduplicationWindowMs,
 # secretGracePeriodMs, maxBodyBytes, [webhook.allowedIps] cidrs, [webhook.inputMapping]
 ```
@@ -1729,7 +1730,7 @@ A cron trigger fires a workflow on a clock schedule. It is one of the ways to in
 
 ### Critical rules
 
-1. **Cron triggers fire workflows, not arbitrary code.** Create the workflow first (`status = "active"` with an active config/revision), then point the trigger at it via `workflowKey`.
+1. **Cron triggers fire workflows, not arbitrary code.** Create the workflow first — push it, and confirm it is in service and has an active config/revision — then point the trigger at it via `workflowKey`. Availability is server-owned: `primitive workflows enable|disable` is what changes it, and a pushed workflow starts in service.
 2. **Set `requiresClientApply = false` on the target workflow.** Cron-triggered workflows almost always want this — otherwise the run sits in `apply_pending` forever because no client is listening.
 3. **Set an IANA `timezone` whenever the schedule has a user-visible hour.** `0 9 * * *` in UTC is 2am in Los Angeles.
 4. **`overlapPolicy` is `"skip"` (default) or `"allow"`.** There is no `"queue"`. `"skip"` checks whether the previous run is still active and increments `skippedCount`; `"allow"` always fires. Use `"allow"` only when each firing is independent and idempotent.
@@ -1746,7 +1747,8 @@ cron = "0 9 * * *"
 timezone = "America/Los_Angeles"
 workflowKey = "send-digest"
 overlapPolicy = "skip"
-state = "active"
+# Availability is server-owned and not authored here: a pushed trigger is in
+# service, and `primitive cron-triggers enable|disable` is what changes it.
 
 # Optional: static input passed to the workflow on every fire
 [rootInput]
@@ -2110,7 +2112,6 @@ include = ["common-validation", "common-audit"]
 [workflow]
 key = "onboard"
 name = "Onboard new user"
-status = "active"
 accessRule = "true"
 
 [[steps]]
@@ -2263,6 +2264,8 @@ primitive workflows codegen --dir ../config -o src/types/generated/workflows
 ```
 
 `--check` (`primitive workflows codegen --check`) belongs in CI next to `primitive databases codegen --check`, so stale generated invokers fail the build instead of drifting silently.
+
+An app scaffolded from the web starter template ships this wiring already: its `pnpm codegen` script (run by `dev`, `build`, and `test`) regenerates workflow invokers alongside model types whenever workflow TOMLs are present in the sync directory.
 {{/lang}}
 
 {{#lang swift}}
@@ -2295,6 +2298,8 @@ Generated factory members:
 - The wrappers delegate to the additive generic overloads on the client — `client.workflows.runSync<Input, Output>(...)`, `start<Input>(...)`, and `getStatus<Output>(...)` accept the same type parameters if you prefer to bind them by hand.
 - Type mapping mirrors the server's schema validator: scalar `type` → Swift scalar, `enum` → a nested `String`-raw `enum`, `object` + `properties`/`required` → a `struct` (open objects gain an `extra: [String: JSONValue]` catch-all; `additionalProperties: false` omits it), `array` + `items` → `[T]`. A qualifying discriminated-union `oneOf` (see below) → an `enum` with associated values. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `JSONValue`. A schema-less workflow gets `Input`/`Output` of `JSONValue`.
 - After a CLI upgrade, `primitive workflows codegen --lang swift --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
+
+An app scaffolded from the iOS starter template ships this wiring already: `./run.sh` and `./run-ios.sh` regenerate workflow invokers alongside model types through `scripts/codegen.sh`, and `bash scripts/codegen.sh --check` runs the same staleness gate offline (it reads only the local workflow TOMLs — no network or sign-in), so it fits a pre-commit hook or CI.
 
 ### Discriminated-union (`oneOf`) schema outputs
 

@@ -39,20 +39,30 @@ In the starter template this wiring is owned for you by the template's `userStor
   const config = await client.getAuthConfig();
   // {
   //   appId, name, mode, waitlistEnabled,
-  //   googleOAuthEnabled, googleClientId, hasOAuth, redirectUris,
-  //   passkeyEnabled, passkeyRpId, passkeyRpName, passkeyRpConfig, hasPasskey,
+  //   googleOAuthEnabled,
+  //   googleClients: { clients: { web: { clientId, redirectUris, usable }, … } },
+  //   passkeyEnabled, passkeyRpConfig, hasPasskey,
   //   appleSignInEnabled, hasApple, magicLinkEnabled, otpEnabled
   // }
 
   const methods = {
-    google: config.hasOAuth,
+    // Google registers a client per platform, so availability is the provider
+    // being enabled AND this platform's entry being usable. `checkOAuthAvailable()`
+    // computes the same thing; sharing one predicate is what keeps a rendered
+    // button clickable.
+    google: googleWebClientAvailable(config),
     magicLink: config.magicLinkEnabled,
     otp: config.otpEnabled,
     passkey: config.hasPasskey,
   };
 ```
 
-`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured — the latter a `{{secrets.KEY}}` reference to an app secret holding the client secret, per the Configuration guide). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+
+Availability is the provider being enabled **and** your platform's entry being usable, together.
+`checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.
+
+`magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)
@@ -75,13 +85,14 @@ Server-side app settings must align with the origin the client app is served fro
 | Server field | Contract | Set via |
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
-| `redirectUris` | OAuth callbacks are validated against this whitelist — a non-listed callback URL returns 400 `Invalid redirect URI`. | `[auth].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `emailRedirectUris` | The magic-link allow-list. **Fail-closed**: an empty or missing list rejects every magic-link request. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme must match exactly. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
 | Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `magicLinkEnabled`, `passkeyEnabled` + `[auth.passkeys]`, `otpEnabled`) → `config push`. |
 
 **CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin to `[cors].allowedOrigins` and running `primitive config push --only app`; inspect with `primitive apps get`. Common triggers: serving on a non-default port, or a newly deployed domain.
 
-Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, and add the production OAuth callback to `[auth].redirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
+Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production magic-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
 
 ---
 
@@ -90,8 +101,9 @@ Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allo
 ### Start the flow
 
 ```typescript
-  const hasOAuth = await client.checkOAuthAvailable();
-  if (hasOAuth) {
+  // True when Google OAuth is enabled AND the `web` client entry is usable.
+  const googleAvailable = await client.checkOAuthAvailable();
+  if (googleAvailable) {
     // Redirects the browser to Google. Code after this does not run on success.
     await client.startOAuthFlow(continueUrl);
   }
@@ -281,7 +293,7 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
 
 > **Caveat on OTP disabled.** When OTP is disabled the request endpoint returns a plain 400 with the message `"OTP authentication is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the OTP UI on `getAuthConfig()`'s `otpEnabled` up front instead.
 
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the app's `googleClientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
 The same `AuthError` codes apply to `magicLinkRequest`/`magicLinkVerify` and `passkey*` methods.
 

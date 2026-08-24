@@ -15,13 +15,13 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-08-20",
+    "stampedAt": "2026-08-23",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "2.1.0",
       "js-bao": "0.5.1",
       "primitive-admin": "1.0.59",
-      "primitive-app": "3.0.9"
+      "primitive-app": "3.1.0"
     }
   },
   "guides": [

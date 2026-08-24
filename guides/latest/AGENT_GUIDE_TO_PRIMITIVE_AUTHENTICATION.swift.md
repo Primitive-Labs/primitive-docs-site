@@ -40,12 +40,16 @@ In the starter template this wiring is owned for you by `PrimitiveAppState.initi
 ```swift
   let config = try await client.auth.getAuthConfig()
   // AuthConfigInfo: appId, name, mode, waitlistEnabled,
-  //   googleOAuthEnabled, googleClientId, hasOAuth, redirectUris,
-  //   passkeyEnabled, passkeyRpId, passkeyRpName, passkeyRpConfig, hasPasskey,
+  //   googleOAuthEnabled,
+  //   googleClients: { clients: ["ios": (clientId, redirectUris, usable), …] },
+  //   passkeyEnabled, passkeyRpConfig, hasPasskey,
   //   appleSignInEnabled, hasApple, magicLinkEnabled, otpEnabled
 
   let methods = (
-    google: config.hasOAuth,
+    // Google registers a client per platform: this is the provider being
+    // enabled AND this app's `ios` entry being usable, in one property so the
+    // button and the flow cannot disagree.
+    google: config.googleSignInAvailable,
     apple: config.hasApple,
     magicLink: config.magicLinkEnabled,
     otp: config.otpEnabled,
@@ -53,7 +57,12 @@ In the starter template this wiring is owned for you by `PrimitiveAppState.initi
   )
 ```
 
-`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured — the latter a `{{secrets.KEY}}` reference to an app secret holding the client secret, per the Configuration guide). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+
+Availability is the provider being enabled **and** your platform's entry being usable, together.
+`AuthConfigInfo.googleSignInAvailable` computes exactly that against the `ios` entry, and `AppConfigInfo.googleAvailable` is projected from it — the launch UI and the flow cannot disagree.
+
+`magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
 `hasApple` reports Sign in with Apple availability (`appleSignInEnabled` plus configured Apple audiences); gate the native `signInWithApple` button on it.
 
 ## Server App Settings ↔ Client Contract
@@ -63,12 +72,13 @@ Server-side app settings must align with the origin the client app is served fro
 | Server field | Contract | Set via |
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
-| `redirectUris` | OAuth callbacks are validated against this whitelist — a non-listed callback URL returns 400 `Invalid redirect URI`. | `[auth].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `emailRedirectUris` | The magic-link allow-list. **Fail-closed**: an empty or missing list rejects every magic-link request. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme must match exactly. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
 | Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `magicLinkEnabled`, `otpEnabled`, `appleSignInEnabled`, `appleAudiences`) → `config push`. Enable Sign in with Apple by setting `appleSignInEnabled = true` and `appleAudiences = ["<bundle-id>"]` (`hasApple` then reports true). |
 
 
-Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, and add the production OAuth callback to `[auth].redirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
+Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production magic-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
 
 ---
 
@@ -77,8 +87,9 @@ Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allo
 ### Start the flow
 
 ```swift
-  let hasOAuth = await client.checkOAuthAvailable()
-  if hasOAuth {
+  // True when Google OAuth is enabled AND the `ios` client entry is usable.
+  let googleAvailable = await client.checkOAuthAvailable()
+  if googleAvailable {
     // Open this URL in a browser / ASWebAuthenticationSession.
     let authUrl = try await client.startOAuthFlow(
       redirectUri: redirectUri,
@@ -160,7 +171,7 @@ let apple = try await client.signInWithApple(
 
 For Apple, this only resolves on **first** sign-in (`isNewUser == true`); a repeat sign-in from an existing Apple identity takes a different internal path and does not resolve `inviteToken` grants — call `client.invitations.accept(inviteToken:)` afterward for that case, or for any other post-hoc acceptance. The invite token is validated server-side only after the Apple identity token is cryptographically verified, and only before any user/grant mutation — so any bad, expired, or already-used token throws `HttpError` with `serverCode == "INVITE_TOKEN_INVALID"` (one code for every invalid-token reason, by design, to avoid a validity oracle). A domain-restricted app also still throws the pre-existing `DOMAIN_NOT_ALLOWED` when the Apple-verified email itself falls outside `allowedDomains`.
 
-Gate the buttons on the auth config: `hasOAuth` for Google, `hasApple` for Apple (`AuthConfigInfo` also carries `appleSignInEnabled`). The starter template's `PrimitiveAuthManager` wraps both helpers and renders only the providers `availableProviders` reports.
+Gate the buttons on the auth config: `googleSignInAvailable` for Google — the provider enabled and this app's `ios` client entry usable — and `hasApple` for Apple (`AuthConfigInfo` also carries `appleSignInEnabled`). The starter template's `PrimitiveAuthManager` wraps both helpers and renders only the providers `availableProviders` reports.
 
 ---
 
