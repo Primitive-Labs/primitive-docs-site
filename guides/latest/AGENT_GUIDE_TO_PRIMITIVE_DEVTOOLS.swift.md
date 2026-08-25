@@ -313,8 +313,8 @@ your own screen's identifier when you replace the post-login UI.
 ### Prerequisite: a test account
 
 `ui_signin` signs in through the `+primitivetest` OTP bypass — no mailbox, no
-real code. Whitelist a base email on the app and set OTP as the email method,
-then hand the scenario a derived address. The full contract (address shape,
+real code. Whitelist a base email on the app, then hand the scenario a derived
+address. The full contract (address shape,
 the fixed `000000` code, the per-app whitelist, TTL, and member-only roles) is
 in the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) under
 "Test User Sign-In" — don't re-derive it here.
@@ -324,13 +324,13 @@ effective-settings view before it builds:
 
 ```bash
 primitive apps get --json   # must list your base under testAccountBaseEmails,
-                                 # report otpEnabled: true, and have a signup
-                                 # mode that admits the test address
+                                 # report emailSignInEnabled: true, and have a
+                                 # signup mode that admits the test address
 ```
 
-With OTP disabled the same email button sends a magic link instead of prompting
-for a code, so `otpEnabled` is a hard requirement. Set these in `app.toml` and apply with
-`primitive config push --only app`. Then:
+Email sign-in always offers the code — one email carries it — so
+`emailSignInEnabled: true` is the hard requirement. Set these in `app.toml` and
+apply with `primitive config push --only app`. Then:
 
 ```bash
 export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"

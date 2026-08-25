@@ -80,6 +80,19 @@ The two axes grow separately.
 
 **Another Primitive environment:** `primitive env add alpha --api-url ... --app-id ...`, then name it with `--primitive-env alpha`. Nothing in `wrangler.toml` or `.env.*` changes.
 
+### Pinning a deploy environment to a Primitive environment
+
+Opt-in, for apps whose `.env.<mode>` keys are only correct against one backend (per-environment resource IDs and the like). Declare the pairing in that mode's file:
+
+```dotenv
+# .env.production
+VITE_EXPECTED_PRIMITIVE_ENV=prod
+```
+
+Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too.
+
+Rules: absent (the default) keeps the axes fully independent; a value in the base `.env` is the default for every mode and `.env.<mode>` overrides it; an empty value cancels the check for that mode; a non-empty `VITE_EXPECTED_PRIMITIVE_ENV` in the process environment wins over the files, which is how a deliberate cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev PRIMITIVE_ENV=dev pnpm test --mode alpha`). The pure-env CI hatch — a build supplying both `VITE_APP_ID` and `VITE_API_URL` — resolves nothing and so skips the check; overriding only one of them does not, because the other half still comes from the resolved environment. `cf-deploy` reads `.env*` from the project root, so under a custom Vite `envDir` its `--check` will not see the declaration (a real deploy still fails inside the build).
+
 ```toml
 [env.test]
 name = "my-app-test"

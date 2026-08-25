@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-08-23",
+    "stampedAt": "2026-08-25",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "2.1.0",
@@ -1007,7 +1007,8 @@
         "Authenticating the CLI in CI pipelines"
       ],
       "relatedGuides": [
-        "app-secrets"
+        "app-secrets",
+        "multi-client"
       ]
     },
     {
@@ -1237,6 +1238,36 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.swift.md"
         }
+      ]
+    },
+    {
+      "topic": "multi-client",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_MULTI_CLIENT.md",
+      "description": "One app with a web and a native client — layout, shared schema, adding a client",
+      "keywords": [
+        "multi-client",
+        "clients",
+        "web and ios",
+        "layout",
+        "shared schema",
+        "models.toml",
+        "primitive init",
+        "add client",
+        "project root",
+        "environments"
+      ],
+      "useCases": [
+        "Scaffolding one app with a web and a native client",
+        "Adding a second client to an existing Primitive app",
+        "Finding which files are shared by every client",
+        "Running codegen for each client from one model schema",
+        "Selecting the environment every client's CLI commands target"
+      ],
+      "relatedGuides": [
+        "configuration",
+        "documents",
+        "deploying",
+        "data-modeling"
       ]
     },
     {

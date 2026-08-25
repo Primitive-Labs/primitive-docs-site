@@ -29,7 +29,7 @@ Deleting a config object = delete its file + `primitive config push --prune`. Ev
 
 Not configuration, so still direct commands: secrets (`primitive secrets set`), resource creation that mints an id (`apps create`, `databases create`, `collections create`, `groups create`), data operations, and every read/test command.
 
-Availability is runtime state, not configuration. `<noun> disable`/`enable` — for `workflows`, `cron-triggers`, `webhooks`, `integrations` and `prompts` alike — are its only writers, along with the matching web-admin action. `status` is server-owned and is deliberately not a TOML key: `config pull` does not emit it, a file that still carries the line fails `config push` with guidance naming the verb, and `config diff` reports "inactive; configuration unchanged" rather than drift. Anything created or pushed is active; there is no `draft` state on any object. Read the current value back with `<noun> get` or `<noun> list`. Per-VERSION status is a different key and stays in TOML: `[[configs]] status = "archived"` retires one named config, and says nothing about whether the object is serving.
+Availability is runtime state, not configuration. `<noun> disable`/`enable` — for `workflows`, `cron-triggers`, `webhooks`, `integrations` and `prompts` alike — are its only writers, along with the matching web-admin action and the delete flow, which writes the third value `archived` (a retired object, kept so its history still resolves; `enable` refuses it). `status` is server-owned and is deliberately not a TOML key: `config pull` does not emit it, a file that still carries the line fails `config push` with guidance naming the verb, and `config diff` reports "inactive; configuration unchanged" rather than drift. Anything created or pushed is active; there is no `draft` state on any object. Read the current value back with `<noun> get` or `<noun> list`. Per-VERSION status is a different key and stays in TOML: `[[configs]] status = "archived"` retires one named config, and says nothing about whether the object is serving.
 
 ## The sync loop
 
@@ -40,7 +40,7 @@ primitive config diff  # preview changes
 primitive config push  # apply local TOML to the server
 ```
 
-With project-scoped environments (`.primitive/config.json`), the config directory auto-resolves to `.primitive/sync/<env>/<appId>/` — one isolated slot per environment, so a `pull --env staging` never touches production state. Pass `--dir <path>` only to override that location with a fixed directory shared across environments.
+With project-scoped environments (`.primitive/config.json`), the config directory auto-resolves to `.primitive/sync/<env>/<appId>/` — one isolated slot per environment, so a `pull --env staging` never touches production state. Pass `--dir <path>` only to override that location with a fixed directory shared across environments. The resolution walks up from the working directory to the nearest project config, so in an app with several clients the config lives once at the repository root and every client directory resolves it — see the `multi-client` guide for that layout.
 
 Structured values — an operation's `definition`/`params`, a subscription's `params`, a workflow step's object fields — are written as nested TOML tables. A file may instead hold them as single-line JSON strings (the older encoding); the server treats the two identically, `config pull` keeps whichever form a file already uses, and `primitive config migrate-toml` rewrites a file from JSON strings to TOML tables in place. Author new files in table form.
 
@@ -86,7 +86,7 @@ Prune is fail-closed on every candidate:
 
 One batch confirmation gates the destructive deletes (`Delete N remote entity(ies)? This cannot be undone.`); **`-y`/`--yes`** skips it for CI. **`--dry-run`** reports the full plan — will delete / already absent / skipped, with the skip reason — and mutates nothing. When a pruned block type (workflow, prompt) is deleted, its sidecar `<key>.tests/` directory and test-case state are cleaned up with it.
 
-Webhooks are the one exception to what a prune deletion means. Every other archive-semantics type is archived by a prune; a pruned **webhook** is hard-deleted, so its slot against the 50-webhook-per-app cap and its `key` are both freed. That is deliberate — an archiving prune would burn a slot every cycle with no way to reclaim it from `sync` — but it is irreversible, and the webhook's delivery history stops resolving.
+A prune always hard-deletes. Every type that carries `archived` is soft-archived by a plain API `DELETE` (or the console's Archive action) and **hard-deleted** by `config push --prune`, so its `key` — and, for webhooks and cron triggers, its slot against the per-app cap — is freed. That is deliberate: an archiving prune would keep the key with no way to reclaim it from `config`. It is also irreversible, and the object's history (webhook deliveries, workflow runs, prompt executions) stops resolving what it points at, so archive first if that history still matters.
 
 ## Directory map
 
@@ -114,12 +114,26 @@ config/
   metadata-category-configs/*.toml # Resource metadata category configs (schema + readRule/writeRule)
 ```
 
+**A test case's file name is its identity.** The basename of a
+`<key>.tests/<case>.toml` file is the case's key on the server, unique per block
+and case-insensitive. That is what lets a fresh clone — which has no
+`.primitive-sync.json`, since it is gitignored — reconcile the committed tree
+instead of creating a duplicate of every case. `config pull` writes a case back
+under that same name (never the slug of its `[test] name`), and renaming the file
+renames the case on the next push, updating the same test case rather than
+creating a second one. Keep the name path-safe: no `/` or `\`, no leading or
+trailing spaces, no trailing dot, 200 characters at most. A case created outside
+the CLI (the console, the raw API) has no key until a `config push` stamps one;
+where a push cannot tell which server case an unkeyed file belongs to, it says
+so and creates nothing — run `config pull` first, or push once from the machine
+that has the sync state.
+
 ## App settings (`app.toml`)
 
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
 - `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; opts into the deprecated direct LLM/Gemini proxy routes, off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array)
-- `[auth]` — `googleOAuthEnabled`, `magicLinkEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `otpEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the magic-link allow-list, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
+- `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
 
@@ -194,28 +208,33 @@ you see:
 An unmigrated value blocks nothing else: an app-settings write that does not
 touch the Google map succeeds whatever is stored.
 
-### Magic-link redirect URIs
+### Email sign-in and its redirect URIs
 
-`emailRedirectUris` is the allow-list the magic-link flow validates against —
-flat in `[auth]`, alongside `magicLinkEnabled` and `otpEnabled`:
+`emailSignInEnabled` is the ONE email sign-in switch: one request sends one
+email carrying a 6-digit code and, when a link can be issued, a sign-in link.
+`emailRedirectUris` is the allow-list that link is validated against — flat in
+the same table:
 
 ```toml
 [auth]
-magicLinkEnabled  = true
-emailRedirectUris = ["https://app.example.com/auth/callback"]
+emailSignInEnabled = true
+emailRedirectUris  = ["https://app.example.com/auth/callback"]
 ```
 
-Matching is **fail-closed**: an empty or missing list rejects every magic-link
-request. New apps are seeded with `http://localhost:5173/oauth/callback` so a
-fresh app works with no configuration, and `primitive init` appends the dev-port
-callback when you choose a non-default port. `http`/`https` entries match by
-ORIGIN (one origin, many paths); a custom scheme must match exactly.
+Link issuance is **fail-closed**: with no redirect target, or an empty list, the
+email renders code-only from the same template; a target that misses a non-empty
+list is rejected 400 `Invalid redirect URI`. New apps are seeded with
+`http://localhost:5173/oauth/callback` so a fresh app works with no
+configuration, and `primitive init` appends the dev-port callback when you
+choose a non-default port. `http`/`https` entries match by ORIGIN (one origin,
+many paths); a custom scheme matches on SCHEME + AUTHORITY, so `myapp://auth`
+covers `myapp://auth/magic-link` but no other scheme or host.
 
 ### Retired keys
 
-`googleClientId`, `googleClientSecret`, `redirectUris`, `passkeyRpId` and
-`passkeyRpName` are no longer authored. A file that still carries one is
-rejected by name, with the replacement:
+`googleClientId`, `googleClientSecret`, `redirectUris`, `passkeyRpId`,
+`passkeyRpName`, `magicLinkEnabled` and `otpEnabled` are no longer authored. A
+file that still carries one is rejected by name, with the replacement:
 
 | retired key | replacement |
 |---|---|
@@ -223,6 +242,7 @@ rejected by name, with the replacement:
 | `googleClientSecret` | `[auth.google.clients.<type>].clientSecret` |
 | `redirectUris` | `[auth.google.clients.<type>].redirectUris` for Google callbacks; `emailRedirectUris` for magic links — a stored list may legitimately have mixed the two, so split it |
 | `passkeyRpId` / `passkeyRpName` | `[auth.passkeys]` (`passkeyRpConfig`) |
+| `magicLinkEnabled` / `otpEnabled` | `emailSignInEnabled` — one email flow, one setting |
 
 ## Owned scalar fields (clear on absence)
 
@@ -243,6 +263,8 @@ Enum and defaulted fields (`status`, `timeoutMs`, `timezone`, `overlapPolicy`, `
 Every command resolves its target Primitive environment in order: `--env <name>` flag → `PRIMITIVE_ENV` env var → this machine's selection in `.primitive/local.json` → `defaultEnvironment` in `.primitive/config.json` → the only defined environment → error. Manage environments with `primitive env add|list|show|use|remove`.
 
 `primitive env use <name>` writes the selection to `.primitive/local.json`, NOT to the committed config: which backend this machine is pointed at is per-machine state, so switching backends never modifies a tracked file. `defaultEnvironment` stays the committed team default a fresh clone resolves. Tokens (`.primitive/credentials.json`) and the selection (`.primitive/local.json`) are gitignored; `.primitive/config.json` is committed and is the single place a backend URL and app ID are typed — app templates read it rather than repeating those values in their own config. A corrupt or dangling selection is reported by `env list`/`env show` rather than silently falling back.
+
+A web app resolves the same way through the `primitiveEnv()` Vite plugin, and its Vite mode (`--mode`, i.e. which `.env.<mode>` supplies app-behavior keys) is a SEPARATE axis — `PRIMITIVE_ENV=dev pnpm build --mode alpha` is a legitimate combination. When a mode's keys are only correct against one backend, pin the pair by declaring `VITE_EXPECTED_PRIMITIVE_ENV=<name>` in that mode's `.env` file: every entry point that resolves an environment (dev server, build, deploy, headless vitest run) then fails at startup on a mismatch. Opt-in — absent, the axes stay independent. Details in the deploying guide.
 
 `primitive env add` writes only the environment entry into `.primitive/config.json` — it seeds no credentials, and project mode does **not** fall back to the global `~/.primitive/credentials.json`. A freshly-added environment therefore starts logged-out: project-scoped commands report "not logged in" until you run `primitive login` for that environment, even when a global `primitive whoami` succeeds. (The `dev` environment scaffolded by `primitive init` is the exception — init seeds it with the session it authenticated during setup.) Agents and CI can log in without a browser by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` (see [Headless auth](#headless-auth-ci)).
 
@@ -288,18 +310,18 @@ primitive secrets delete OPENAI_API_KEY
 
 ## Email templates
 
-Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and workflows can register custom types. Built-in types: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by pushing an override and triggered from an `email.send` workflow step. Each type exposes template variables (`{{magicLinkUrl}}`, `{{otpCode}}`, …) substituted at send time.
+Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and workflows can register custom types. Built-in types: `email-sign-in`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by pushing an override and triggered from an `email.send` workflow step. Each type exposes template variables (`{{code}}`, `{{expiryMinutes}}`, the optional `{{magicLink}}`, …) substituted at send time. `magic-link` and `otp` are RETIRED: a stored override for either is kept and listed as retired but never rendered, and create/update/preview/test on one is refused with migration guidance — re-author it into `email-sign-in` (`{{code}}` for the code, the `{{#if magicLink}}` block for the link) and delete the retired override.
 
 An override is `email-templates/<emailType>.toml` — `[template]` with `emailType` and `subject` required, `htmlBody` and `textBody` optional:
 
 ```bash
-primitive config create email-template magic-link     # scaffold the file
-primitive config push --only email-template/magic-link
+primitive config create email-template email-sign-in   # scaffold the file
+primitive config push --only email-template/email-sign-in
 
-primitive email-templates list                   # all types + override status
-primitive email-templates get magic-link         # current subject + body + variables
-primitive email-templates variables magic-link   # available {{vars}}
-primitive email-templates test magic-link        # send a test email
+primitive email-templates list                     # all types + override status
+primitive email-templates get email-sign-in        # current subject + body + variables
+primitive email-templates variables email-sign-in  # available {{vars}}
+primitive email-templates test email-sign-in       # send a test email
 ```
 
 Revert to the built-in default by deleting the file and running `primitive config push --prune`.

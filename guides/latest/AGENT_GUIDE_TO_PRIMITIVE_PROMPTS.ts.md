@@ -21,14 +21,17 @@ Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` a
 
 ## Availability
 
-A prompt's availability is one server-owned `status` — `active | inactive` — and it is **not** a TOML key. Every created or pushed prompt is active; `primitive prompts disable <key>` takes one out of service and `primitive prompts enable <key>` puts it back (the console has the matching action). A file that still carries a `[prompt] status` line fails `config push` with a message naming the verb.
+A prompt's availability is one server-owned `status` — `active | inactive | archived` — and it is **not** a TOML key. Every created or pushed prompt is active; `primitive prompts disable <key>` takes one out of service and `primitive prompts enable <key>` puts it back (the console has the matching action). A file that still carries a `[prompt] status` line fails `config push` with a message naming the verb.
 
 | Status     | Executable from a workflow | Executable from the client SDK / REST | `primitive prompts execute` |
 | ---------- | -------------------------- | ------------------------------------- | --------------------------- |
 | `active`   | Yes                        | Yes                                   | Yes                         |
 | `inactive` | No                         | No (`400 PROMPT_NOT_EXECUTABLE`)      | Yes — it is the diagnostic  |
+| `archived` | No                         | No                                    | No — it has been deleted    |
 
-A prompt stored before this model may still carry `draft` or `archived`; both read `inactive`, so a legacy draft prompt no longer executes at the member endpoint. `primitive prompts execute` is the documented way to trial an inactive prompt before enabling it.
+A prompt stored before this model may still carry `draft`, which reads `inactive`, so a legacy draft prompt no longer executes at the member endpoint. `primitive prompts execute` is the documented way to trial an inactive prompt before enabling it.
+
+**Retiring a prompt.** A plain admin `DELETE` (and the console's **Archive**) sets `status = "archived"` and destroys nothing: the prompt's configs and stored prompt bodies stay, so every execution and analytics row that names it keeps resolving. An archived prompt is refused everywhere — the member endpoint, the workflow `prompt.execute` step, `primitive prompts execute`, test runs, and as another test case's **evaluator** — and `enable` will not bring it back. It goes on holding its `promptKey`. `DELETE ?hard=true` (the console's **Delete permanently**, and what `primitive config push --prune` sends) destroys the prompt, its configs and their R2 bodies, and frees the key. To bring a key back after archiving: hard-delete the holder, then re-add the file and push — a bare re-push cannot clear a server-owned `archived`.
 
 The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` retires that named version, and the resolve path refuses it.
 

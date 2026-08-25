@@ -42,7 +42,7 @@ In the starter template this wiring is owned for you by the template's `userStor
   //   googleOAuthEnabled,
   //   googleClients: { clients: { web: { clientId, redirectUris, usable }, … } },
   //   passkeyEnabled, passkeyRpConfig, hasPasskey,
-  //   appleSignInEnabled, hasApple, magicLinkEnabled, otpEnabled
+  //   appleSignInEnabled, hasApple, emailSignInEnabled
   // }
 
   const methods = {
@@ -51,8 +51,10 @@ In the starter template this wiring is owned for you by the template's `userStor
     // computes the same thing; sharing one predicate is what keeps a rendered
     // button clickable.
     google: googleWebClientAvailable(config),
-    magicLink: config.magicLinkEnabled,
-    otp: config.otpEnabled,
+    // ONE email capability: one request sends one email carrying both a code
+    // and (when a link can be issued) a link, so there is no method to offer.
+    // `magicLinkEnabled` / `otpEnabled` are still reported, both equal to this.
+    email: config.emailSignInEnabled,
     passkey: config.hasPasskey,
   };
 ```
@@ -62,7 +64,7 @@ Google registers a client **per platform**, so `getAuthConfig()` reports a clien
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 `checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.
 
-`magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+`emailSignInEnabled` reports whether email sign-in is available at all — ONE flag, because one request sends one email carrying both a code and (when a link can be issued) a link. It defaults to `true` unless explicitly disabled. `magicLinkEnabled` and `otpEnabled` are still reported for already-published clients and always equal it; new code reads `emailSignInEnabled`.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)
@@ -86,13 +88,13 @@ Server-side app settings must align with the origin the client app is served fro
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
-| `emailRedirectUris` | The magic-link allow-list. **Fail-closed**: an empty or missing list rejects every magic-link request. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme must match exactly. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
-| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `magicLinkEnabled`, `passkeyEnabled` + `[auth.passkeys]`, `otpEnabled`) → `config push`. |
+| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
 
 **CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin to `[cors].allowedOrigins` and running `primitive config push --only app`; inspect with `primitive apps get`. Common triggers: serving on a non-default port, or a newly deployed domain.
 
-Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production magic-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
+Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production sign-in-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
 
 ---
 
@@ -193,24 +195,39 @@ correctly skipped.
 
 ---
 
-## Magic Link
+## Email Sign-In (One Email, Both Credentials)
 
 ### Request + verify
 
+One request sends ONE email carrying a 6-digit code and — when a link can be
+issued — a sign-in link. Nothing chooses a method: the user types the code or
+opens the link, and consuming either one retires both.
+
 ```typescript
-  // Request the email. Requires oauthRedirectUri on the client, or pass
-  // an explicit redirectUri here.
-  await client.magicLinkRequest(email, {
+  // `redirectUri` is optional and defaults to the client's oauthRedirectUri.
+  // Without a usable one the email carries the code alone, rendered from the
+  // same email-sign-in template.
+  await client.emailSignInRequest(email, {
     redirectUri: "https://app.example.com/auth/magic-callback",
   });
 
-  // On the callback page, read ?magic_token=... and verify it.
-  const { user, isNewUser, promptAddPasskey } =
-    await client.magicLinkVerify(magicToken);
-  // Token is now stored on the client and the WS auto-connects.
+  // Finish by typing the code from the email...
+  const { user, isNewUser } = await client.otpVerify(email, code);
+
+  // ...or by clicking the link in the same email, which lands on the callback
+  // page with ?magic_token=... — see the magic-link callback example. Either
+  // one retires both: one email signs the user in once.
 ```
 
-`magicLinkRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`) and throws `Error("Redirect URI not configured")` if neither is set.
+Link issuance is **fail-closed**. The email carries a link only when the request
+names a redirect target AND that target matches the app's non-empty
+`emailRedirectUris`. With no target, or an empty allow-list, the same
+`email-sign-in` template renders code-only; a target that misses a non-empty
+allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
+link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
+no endpoint renders any other sign-in template, so that removal holds.
+
+`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone. `magicLinkRequest` and `otpRequest` remain as **deprecated** aliases of the same issuance path.
 
 ### Reading the token (callback page)
 
@@ -240,17 +257,11 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
 
 ---
 
-## OTP (Email Code)
+## Finishing With the Code
 
-```typescript
-  await client.otpRequest(email);
+The code half of the same email is verified with the OTP verify call, unchanged:
 
-  // User enters the 6-digit code from the email.
-  const { user, isNewUser } = await client.otpVerify(email, code);
-  // Token is now stored on the client and the WS auto-connects.
-```
-
-`otpVerify` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
+`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
 
 ### Error handling
 
@@ -291,11 +302,11 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
   }
 ```
 
-> **Caveat on OTP disabled.** When OTP is disabled the request endpoint returns a plain 400 with the message `"OTP authentication is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the OTP UI on `getAuthConfig()`'s `otpEnabled` up front instead.
+> **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
 
 The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
-The same `AuthError` codes apply to `magicLinkRequest`/`magicLinkVerify` and `passkey*` methods.
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify` and `passkey*` methods.
 
 ---
 
@@ -705,7 +716,7 @@ The whitelist is `[app].testAccountBaseEmails` in `app.toml` (max 50 bases per a
 
 ## Customizing Email Templates
 
-The `magic-link` and `otp` sign-in emails are two of the transactional types Primitive sends; override either with a custom subject and branded HTML/text body for auth emails. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are triggered from `email.send` workflow steps.
+The `email-sign-in` email is one of the transactional types Primitive sends; override it with a custom subject and branded HTML/text body — and delete the `{{#if magicLink}}` block if the app should never send a clickable link. The retired `magic-link` and `otp` types are no longer rendered by any endpoint; a stored override for either is kept and listed as retired, with migration guidance. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are triggered from `email.send` workflow steps.
 
 ---
 

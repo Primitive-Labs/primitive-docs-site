@@ -526,20 +526,46 @@ wiring; the pieces, all load-bearing:
   `Cannot find package 'ws'`.
 - Script: `"test": "pnpm codegen && vitest run"`.
 
-Environment selection: the app id and server URLs come from the `.env` file
-vitest loads, so the target backend is whatever that file points at. Select
-another one with a `.env.<mode>` file plus vitest's `--mode`, passed with **no
-`--` separator**:
+Environment selection: `vitest.config.ts` merges the app's Vite config, so the
+`primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
+does for `pnpm dev` — from `.primitive/config.json`, honoring `primitive env
+use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
+a `.env` file (no `.env` file repeats them). Point one run elsewhere:
+
+```bash
+PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" PRIMITIVE_ENV=alpha pnpm test
+```
+
+vitest's `--mode` is the OTHER axis: it selects `.env.<mode>` (app-behavior
+keys) and never the backend. Pass it with **no `--` separator**:
 
 ```bash
 PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" pnpm test --mode staging
 ```
 
-`pnpm test -- --mode staging` is a silent wrong-environment run: vitest drops
-every argument after a bare `--` (the mode flag and any positional test
-filter), so the suite runs full and green against the default `.env` backend
-and writes its test data there. To assert which environment a run loaded, log
-`import.meta.env.MODE` / `import.meta.env.VITE_API_URL` from a test.
+`pnpm test -- --mode staging` is a silent wrong-mode run: vitest drops every
+argument after a bare `--` (the mode flag and any positional test filter), so
+the suite runs full and green with the default mode's app behavior. The plugin
+prints the resolved Primitive environment (name, apiUrl, appId, config path)
+at the start of every run, so which backend a run used is never a guess.
+
+Because the axes are independent, `PRIMITIVE_ENV=dev pnpm test --mode alpha`
+signs in and writes test data against `dev` while using alpha's app behavior —
+a real combination, and a dangerous mistake when a mode's keys are coupled to
+one backend. Such a mode should declare its environment:
+
+```dotenv
+# .env.alpha
+VITE_EXPECTED_PRIMITIVE_ENV=alpha
+```
+
+The plugin then fails the run at config time — before a spec is collected or
+anything signs in — which is why the check lives there and not in the app's
+`envConfig.ts`: `src/tests/primitive-tests.spec.ts` builds its client straight
+from `import.meta.env` and never imports it. Opt-in; a non-empty
+`VITE_EXPECTED_PRIMITIVE_ENV` in the shell overrides the file, so a deliberate
+cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev
+PRIMITIVE_ENV=dev pnpm test --mode alpha`).
 
 `registerPrimitiveTests(options)` — from `primitive-app/testing`:
 
