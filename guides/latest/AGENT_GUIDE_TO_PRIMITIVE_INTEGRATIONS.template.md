@@ -519,7 +519,7 @@ The step pulls App Secrets and resolves `{{secrets.KEY}}` the same way the user-
 
 ## Status Lifecycle
 
-`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow. A row created before #2803 may still store `draft`; it reads `inactive`.
+`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow — whose CLI spelling is `primitive integrations archive <id>`. Archiving is the delete lifecycle, not availability: the row is retired but kept and goes on holding its `integrationKey`, `enable` refuses it, and there is no un-archive (reclaim the key with a confirmed `primitive config push --prune` after removing the file, then re-add and push). A row created before #2803 may still store `draft`; it reads `inactive`.
 
 | Status | Callable by clients? | `primitive integrations test`? |
 |--------|----------------------|--------------------------------|

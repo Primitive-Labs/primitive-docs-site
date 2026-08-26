@@ -205,8 +205,10 @@ opens the link, and consuming either one retires both.
 
 ```typescript
   // `redirectUri` is optional and defaults to the client's oauthRedirectUri.
-  // Without a usable one the email carries the code alone, rendered from the
-  // same email-sign-in template.
+  // With no target at all the email carries the code alone, rendered from the
+  // same template. A target that IS sent must match the app's non-empty
+  // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
+  // URI` — nothing degrades to code-only on your behalf (#2967).
   await client.emailSignInRequest(email, {
     redirectUri: "https://app.example.com/auth/magic-callback",
   });

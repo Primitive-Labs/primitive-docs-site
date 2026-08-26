@@ -1326,7 +1326,7 @@ The permission and collection reads return the raw server rows — they do **no*
 | `me.sharedDocuments(tag:limit:cursor:)` | `SharedDocumentListResult` (`.items`, `.cursor`) — documents shared with the user |
 | `collections.list(options:)` | `PaginatedResult<CollectionInfo>` |
 | `collections.listDocuments(collectionId:options:)` | `PaginatedResult<CollectionDocumentInfo>` |
-| `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId`; resolve `email`/`name` yourself if you need them |
+| `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId` and `email`, plus `name` when the user has one (a user provisioned by email code has none — fall back to `email` for display) |
 | `collections.getAccess(collectionId:)` | `CollectionAccessInfo` — collection members and their permission levels |
 
 The "accessible documents" set is the **union** of `me.ownedDocuments` and `me.sharedDocuments`: call both and dedupe by document id (the same doc can surface in both).
@@ -1355,7 +1355,7 @@ Pick the call that answers the question you're actually asking:
 
 `options:` takes a `PaginationOptions(limit:cursor:)`; the paginated reads return `PaginatedResult` (`.data`, `.nextCursor`, `.hasMore`).
 
-The permission / collection reads — `documents.getPermissions(_:)`, `collections.getAccess(_:)`, `collections.listPendingInvitations(_:)` — return the raw server rows ([Permission / collection reads](#permission--collection-reads) above). Permission rows carry `userId`, not `email`/`name`, so a UI that shows who has access resolves those fields itself.
+The permission / collection reads — `documents.getPermissions(_:)`, `collections.getAccess(_:)`, `collections.listPendingInvitations(_:)` — return the raw server rows ([Permission / collection reads](#permission--collection-reads) above). A document permission row carries `email` (and `name` when the user has one) alongside `userId`; a collection member row carries only `userId`, so a UI that shows who has access to a collection resolves the email and name itself.
 
 **Anti-patterns:**
 

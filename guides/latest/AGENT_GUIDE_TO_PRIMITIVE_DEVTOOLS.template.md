@@ -970,6 +970,15 @@ bash scripts/smoke-test.sh             # default run — launch_survive only, no
 `scripts/smoke-test.sh` (and `pnpm swift:smoke` in the monorepo) stays
 zero-dependency. Run `ui_signin` explicitly to opt into idb.
 
+Every run targets a simulator dedicated to the app under test — named
+`Smoke — <bundle id>` and created on first use — never whichever device happens
+to be booted. That is what lets two apps built from the template smoke-test side
+by side on one machine without app B installing onto app A's simulator and
+asserting against app A's UI. Override the device name with
+`PRIMITIVE_SMOKE_SIM` (e.g. to share one device between two checkouts of the
+same app on purpose) and the device type it is created from with
+`PRIMITIVE_SMOKE_SIM_BASE` (default `iPhone 17 Pro`).
+
 The scenario locates login controls by stable `.accessibilityIdentifier`
 (`primitive.login.emailField`, `primitive.login.emailSubmit`,
 `primitive.login.otpField`, `primitive.login.otpVerify`), so it survives

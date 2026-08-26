@@ -211,8 +211,11 @@ issued — a sign-in link. Nothing chooses a method: the user types the code or
 opens the link, and consuming either one retires both.
 
 ```swift
-  // `redirectUri` is optional. Without a usable one the email carries the
-  // code alone, rendered from the same email-sign-in template.
+  // `redirectUri` is optional, and OMITTING it is how a code-only email is
+  // requested: the server renders one from the same template and consults no
+  // allow-list. A target that IS supplied must match the app's non-empty
+  // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
+  // URI` — nothing degrades to code-only on your behalf (#2967).
   _ = try await client.auth.emailSignInRequest(
     email: email,
     redirectUri: "myapp://auth/magic-link"
@@ -236,7 +239,26 @@ allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
 link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
-`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`; `auth.magicLinkRequest`/`auth.otpRequest` remain as **deprecated** aliases.
+`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`; `auth.magicLinkRequest`/`auth.otpRequest` remain as **deprecated** aliases.
+
+### Make the emailed sign-in link open your app (iOS)
+
+**The iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check whether the app opted in.
+
+Four pieces make the emailed LINK work, and `primitive init` ships two of them:
+
+| Piece | Who does it | Symptom when it is missing |
+|---|---|---|
+| `<scheme>://auth/magic-link` in `[auth].emailRedirectUris` | you (see below) | with the flag on, **every** email request fails 400 `Invalid redirect URI` — no fallback to a code-only email |
+| `authManager.sendsEmailSignInLink = true` | you (one line) | sign-in works, email carries the code only, no error |
+| The scheme registered in `CFBundleURLTypes` under the `PrimitiveAuth` URL name | `primitive init` stamps an app-unique scheme into `Info-Partial.plist` | the emailed link is a **dead tap** — nothing launches, nothing logs |
+| `.onOpenURL` → `routePlatformLink(url)` | the template's `ContentView` | the app opens and nobody signs in |
+
+The allow-list step is a MERGE into the existing array — `app.toml` is the whole truth about app settings on push, so a file listing only the new entry deletes the rest. If `config/app.toml` isn't in the repo yet, run `primitive config pull --only app` first; after editing, `primitive config push --only app`. A custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link`.
+
+`PrimitiveAuthManager(callbackScheme:)` resolves its scheme from that same `PrimitiveAuth` URL type when no argument is passed (falling back to `primitiveapp`), and an explicit argument also starts `sendsEmailSignInLink` at `true` — an app that named its own scheme allow-listed it deliberately.
+
+Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. One `https://` link that works everywhere is universal links, tracked in [#2982](https://github.com/Primitive-Labs/js-bao-wss/issues/2982). The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
 
 ### Reading the token (callback page)
 
