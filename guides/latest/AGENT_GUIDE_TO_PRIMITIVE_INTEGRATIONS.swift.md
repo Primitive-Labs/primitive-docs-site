@@ -454,6 +454,36 @@ go in `integrations/stripe.tests/basic/` and upload with the same push. Clearing
 a field is blanking it (`""`, `[]`, `{}`) and pushing; deleting a case is
 removing its file and running `primitive config push --prune`.
 
+For an integration case, `inputVariables` is the request the run issues — the
+same JSON object a client passes to `integration.call`, at the top level, with
+no wrapper key. Its keys are `method`, `path`, `headers`, `query`, and the body:
+`body` (JSON), or `form` for form-urlencoded, or `bodyMode` plus
+`multipartFields` for multipart. Anything else in the object is ignored.
+
+A key the case omits falls back the same way a live call's does, per field: no
+`method` uses `defaultMethod`, no `path` calls `/` on the `baseUrl`,
+`defaultHeaders`/`staticQuery` merge into the case's headers and query,
+`bodyMode` and `multipartFields` fall back to (and, for the field mapping,
+merge with) the configured ones. There is no configured body: a case that
+authors no `body` or `form` sends none. So a case against a
+`defaultMethod = "POST"` integration can name a `path` and a `body` alone, and
+a case that authors nothing runs `defaultMethod` on `/` — which still has to
+pass `allowedPaths`.
+
+```toml
+# integrations/plaid.tests/mints-a-link-token.toml
+[test]
+name = "mints a link token"
+inputVariables = '''
+{
+  "method": "POST",
+  "path": "/link/token/create",
+  "body": { "client_name": "Acme", "products": ["transactions"] }
+}
+'''
+expectedOutputPattern = "link-production-"
+```
+
 Run and inspect them from the CLI:
 
 ```bash
