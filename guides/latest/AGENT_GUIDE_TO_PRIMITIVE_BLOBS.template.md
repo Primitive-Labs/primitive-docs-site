@@ -194,6 +194,18 @@ Inspect and control the per-document upload queue, and set the client-wide uploa
 
 {{ example: blobs/doc-blob-queue }}
 
+{{#lang swift}}
+Every queue verb is `async`: the upload queue lives behind an actor, so reading
+or changing it is an `await`. The queue members carry the `Async` suffix
+(`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`,
+`setBlobUploadConcurrencyAsync(_:)`, …), and the two concurrency readers are
+`async` properties: `await client.blobUploadConcurrency` and
+`await client.documents.uploadConcurrency`.
+
+`downloadUrl(blobId:disposition:attachmentFilename:)` is the exception and stays
+synchronous, so it is safe to call straight from a SwiftUI `body`.
+{{/lang}}
+
 ---
 
 ## Events

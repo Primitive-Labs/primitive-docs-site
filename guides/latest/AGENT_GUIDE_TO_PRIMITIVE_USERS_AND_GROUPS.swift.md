@@ -77,7 +77,9 @@ Primitive provides a built-in user model that every app should leverage. **Do no
 | `appId` | string | The app the user belongs to |
 | `addedAt` | string \| undefined | When the user joined the app |
 
-`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`: `refreshNetwork` (bypass cache once), `refreshIfOlderThanMs`, `waitForLoad` (`"local" | "network" | "localIfAvailableElseNetwork"`), `serverTimeoutMs`.
+`getBasic` results are cached with a 5-minute default TTL. Override per call via `GetUserOptions`.
+
+Its fields: `refreshNetwork` and `refreshIfOlderThan` (both refresh *behind* the cached value, so the call returns straight away and the *next* read is current), `waitForLoad` (a `WaitForLoadMode`: `.local`, `.network`, `.localIfAvailableElseNetwork`), `serverTimeout`. The two durations are `TimeInterval`s in seconds. Use `waitForLoad: .network` when the call must wait for fresh server data.
 
 ### Supplementing user data — not replacing it
 
@@ -155,7 +157,7 @@ Every user has one of three built-in roles: `"owner"`, `"admin"`, or `"member"` 
 Behavior:
 - **`owner`** and **`admin`** users **bypass all rule-set evaluation** for groups, collections, and database type rules. Do not try to restrict them via rules.
 - **`member`** is the default — access is determined by direct permissions and group memberships.
-- In CEL rule contexts the field is `user.role` (NOT `user.appRole`). See [Rule CEL context](#rule-cel-context) below.
+- In CEL rule contexts the field is `user.role` (NOT `user.appRole`). See the [Access Control guide's identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere).
 
 ## Current User: `client.me`
 
@@ -168,9 +170,9 @@ The current authenticated user has its own namespace. Use it for "me"-scoped rea
   let profile = try await client.me.get(
     options: FetchCachedOptions(
       waitForLoad: .localIfAvailableElseNetwork,  // | .local | .network
-      refreshNetwork: true,  // bypass the cache once
-      refreshIfOlderThanMs: 60_000,  // default is 5 minutes
-      serverTimeoutMs: 5_000
+      refreshNetwork: true,  // refresh behind the cached value
+      refreshIfOlderThan: 60,  // seconds; default is 5 minutes
+      serverTimeout: 5  // seconds
     )
   )
 
@@ -333,8 +335,18 @@ See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-gra
     groupType: "team", groupId: "engineering",
     options: PaginationOptions(limit: 50, cursor: page.cursor)
   )
+
+  // Join profile data in the same call with `include: .profiles`.
+  let withProfiles = try await client.groups.listMembers(
+    groupType: "team", groupId: "engineering",
+    include: .profiles
+  )
+  // withProfiles.items: [GroupMemberInfo(userId, userName?, userEmail?, avatarUrl?, addedAt, addedBy)]
+  // avatarUrl is a URL, or nil if the user has no avatar or the membership
+  // is orphaned (deleted user).
 ```
 
+Pass `include: .profiles` to join each member's profile in the same call. Without it, `GroupMemberInfo.avatarUrl` is `nil` — the field is absent from the default response. With `include: .profiles`, `userName`/`userEmail` become reliably populated and `avatarUrl` is a resolved URL to the uploaded avatar, or `nil` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go nil. `include` is opt-in and purely additive: omitting it returns exactly the pre-existing response shape. The server rejects unknown `include` values with HTTP 400.
 
 ### Remove members
 
@@ -377,7 +389,7 @@ Each entry carries a `deferredId` — cancel that invitation by revoking the def
 
 ## Group Type Configuration
 
-Group types are configured via TOML config files and the `primitive sync` command (version-controlled alongside your code).
+Group types are configured via TOML config files and the `primitive config` command (version-controlled alongside your code).
 
 **File:** `config/group-type-configs/team.toml`
 
@@ -398,13 +410,13 @@ A group type config reads `md.self.<category>.<key>` in its rule set with **no d
 Push to the server:
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 **Defaults & gotchas:**
 - `autoAddCreator` defaults to `true` **only when a group type config exists** for the type. With **no config at all**, no auto-add happens.
 - A group type with **no config** falls back to built-in default rules. Per-op fallback also applies: when a configured rule set leaves a `(category, op)` pair undefined, that op resolves against the defaults too. The defaults: `group.create = "true"` (any signed-in member); `group.edit/delete` and `member.create/edit/delete` are creator-only (`user.userId == group.createdBy`); `group.get` and `member.list` allow the creator OR any direct group member (`isMemberOf(group.groupType, group.groupId)`).
-- A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely (`primitive group-type-configs delete <group-type>`, or `client.groupTypeConfigs.delete(groupType)`).
+- A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive config push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
 
 See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#configuring-with-the-cli) for the full sync workflow (`init`, `pull`, `diff`, `push`).
 
@@ -504,17 +516,17 @@ access: "user.email == 'admin@example.com'"   // user.email is not in context
 access: "has(database.metadata.teamId) && isMemberOf('team', database.metadata.teamId)"
 ```
 
-## Rule Sets for Group Management
+## Rule Sets for Groups and Collections
 
-Rule sets control who can manage groups (`category: "group"`) and group members (`category: "member"`). Each `(category, operation)` pair holds a CEL expression evaluated against the requesting user and the target group.
+Group and collection management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `config/rule-sets/*.toml` and bound to a group or collection type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups and collections: which operations exist, the CEL context each adds, and the built-in defaults.
 
-**Valid operations:**
-- `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs).
-- `category: "member"` — `create`, `edit`, `delete`, `list`.
+### Group rule sets
 
-There is no `read` or `update` — use `edit`. There is no `add` — use `create` (for `member.create` = "add member").
+**Resource type:** `group`. **Categories and operations:**
+- `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
+- `category: "member"` — `create`, `edit`, `delete`, `list` (there is no `add` — use `create` for "add member").
 
-**Default rule set:** A group type with no group type config falls back to built-in defaults:
+**Default rule set** — applies to any group type with no group type config:
 
 | Op | Default | Meaning |
 |----|---------|---------|
@@ -527,57 +539,10 @@ There is no `read` or `update` — use `edit`. There is no `add` — use `create
 | `member.delete` | `user.userId == group.createdBy` | Creator only |
 | `member.list` | `user.userId == group.createdBy \|\| isMemberOf(group.groupType, group.groupId)` | Creator or direct member |
 
-Per-op fallback applies — when a configured rule set defines some ops but leaves others undefined, the missing ops still resolve against this table. Apps that need stricter (or looser) policy install a custom rule set whose defined ops always win. A group type config with no rule set attached (`ruleSetId: null`) is an explicit opt-out and denies everything except admin/owner — it does NOT fall through to these defaults.
-
-### Defining a rule set
-
-Rule sets are defined in TOML config files:
-
-**File:** `config/rule-sets/team-rules.toml`
-
-```toml
-[ruleSet]
-name = "team-rules"
-resourceType = "group"
-description = "Controls who can manage team groups and members"
-
-[rules.group]
-create = "true"                                               # any signed-in member can create a team
-edit   = "isMemberOf(group.groupType, group.groupId)"         # only members can rename
-delete = "user.userId == group.createdBy"                     # only the creator can delete
-get    = "isMemberOf(group.groupType, group.groupId)"         # only members see the team in list
-
-[rules.member]
-create = "isMemberOf(group.groupType, group.groupId)"         # any member can invite
-delete = "user.userId == target.userId || user.userId == group.createdBy"  # self-leave or creator-kick
-list   = "isMemberOf(group.groupType, group.groupId)"
-```
-
-### Attaching to a group type
-
-Reference the rule set by name in the group type config:
-
-**File:** `config/group-type-configs/team.toml`
-
-```toml
-[groupTypeConfig]
-groupType = "team"
-ruleSetName = "team-rules"
-autoAddCreator = true
-```
-
-Push both configs:
-
-```bash
-primitive sync push
-```
-
-### Rule CEL context
+**CEL context**, beyond the [identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere):
 
 | Variable | Always present? | Description |
 |----------|-----------------|-------------|
-| `user.userId` | yes | Requesting user's ID |
-| `user.role` | yes | Requesting user's app role (`"owner"` / `"admin"` / `"member"`). NOT `user.appRole`. |
 | `group.groupType` | yes | Target group's type |
 | `group.groupId` | yes | Target group's ID (also present at `create` time — server passes the requested ID) |
 | `group.contextId` | yes | Read-alias of `group.groupId` — the same value under the `contextId` name collection rules use, so group and collection rule sets can share expressions |
@@ -585,41 +550,7 @@ primitive sync push
 | `group.createdBy` | yes (after create) | userId of the group creator |
 | `target.userId` | only `category: "member"`, ops `create`/`edit`/`delete` | Target user being added/removed. Absent for `member.list`. |
 
-`group.description` is **NOT** in the rule context. Don't reference it.
-
-Plus all CEL functions: `isMemberOf`, `memberGroups`, `hasRole`, `now()`, `fromWorkflow()`.
-
-**Owners and admins always bypass rule evaluation.** Don't try to restrict them via rules.
-
-**Don't do this — rule CEL footguns:**
-
-```toml novalidate
-# BAD — `user.appRole` does not exist. Use user.role.
-create = "user.appRole == 'admin'"
-
-# BAD — admins bypass anyway, so this is dead code in practice.
-create = "hasRole('admin')"
-
-# BAD — referencing target on member.list (target is undefined there).
-list = "target.userId != user.userId"
-
-# BAD — referencing group.description (not in the context).
-edit = "group.description != ''"
-
-# BAD — typo: group ops are `create/edit/delete/get`, not `update/read`.
-[rules.group]
-update = "true"
-read   = "true"
-
-# GOOD — same intent with valid operations.
-[rules.group]
-edit = "true"
-get  = "true"
-```
-
-### Testing rules
-
-Test a rule set with a simulated request, or debug against a real user's live memberships (full trace). `test()` returns `{ allowed, expression?, context?, trace?, error? }`; `debug()` returns `{ allowed, expression?, reason?, ruleSetId?, ruleSetName?, user?, memberships?, context?, trace? }`. `debug()` **requires console-admin auth** — regular app callers get 403.
+`group.description` is **NOT** in the rule context — don't reference it.
 
 ```swift
   // Simulated request — no live data needed.
@@ -651,11 +582,9 @@ Test a rule set with a simulated request, or debug against a real user's live me
   ))
 ```
 
-`result.trace` shows every `isMemberOf`/`memberGroups`/`hasRole` call and its result. To update rule sets, edit the TOML file and run `primitive sync push`.
+### Collection rule sets
 
-## Rule Sets for Collection Management
-
-Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collections)) use the same rule-set pipeline as groups — a `CollectionTypeConfig` row binds a `collectionType` to a rule set, and per-op fallback resolves missing ops against the built-in defaults. The CEL namespace is `collection.*` (separate from `group.*`), and an extra helper `hasCollectionAccess(collectionId)` is available only inside collection rule sets.
+Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collections)) use the same rule-set pipeline as groups — a `CollectionTypeConfig` row binds a `collectionType` to a rule set. The CEL namespace is `collection.*` (separate from `group.*`), and an extra helper `hasCollectionAccess(collectionId)` is available only inside collection rule sets. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
 
 **Resource type:** `collection`. **Categories and operations:**
 
@@ -663,7 +592,7 @@ Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#col
 - `category: "document"` — `add`, `remove`, `delete`, `list` (controls which documents the collection can hold, plus authorization for deleting a member document outright — see [Deleting Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#deleting-documents)).
 - `category: "member"` — `add`, `remove`, `list`.
 
-**Default rule set:** A collection type with no `CollectionTypeConfig` row falls back to:
+**Default rule set** — applies to any collection type with no `CollectionTypeConfig` row:
 
 | Op | Default | Meaning |
 |----|---------|---------|
@@ -676,16 +605,14 @@ Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#col
 | `member.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
 | `member.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
 
-Per-op fallback applies — configured ops always win, missing ops resolve against this table. A `CollectionTypeConfig` row whose `ruleSetId` is null is an explicit opt-out and denies everything except admin/owner. A non-creator reader/writer removing their own membership via `member.remove` is denied (403) unless the rule set grants it.
+A non-creator reader/writer removing their own membership via `member.remove` is denied (403) unless the rule set grants it.
 
 `document.delete` is distinct from `document.remove`: `remove` only detaches a document from this collection, while `delete` authorizes destroying the whole document (`client.documents.delete`) when the caller isn't the document's owner or the app owner — the delete endpoint checks every collection containing the document and allows the delete if any one collection's `document.delete` rule passes. Because that check runs per collection, granting `document.add` on a collection can extend who is able to delete documents placed in it — configure `document.add` and `document.delete` together with that reach in mind.
 
-### CEL context for collection rule sets
+**CEL context**, beyond the identity context:
 
 | Variable | Always present? | Description |
 |----------|-----------------|-------------|
-| `user.userId` | yes | Requesting user's ID |
-| `user.role` | yes | App role (`"owner"` / `"admin"` / `"member"`) |
 | `collection.collectionType` | yes | Collection's type (matches the `CollectionTypeConfig` this rule set is bound to) |
 | `collection.collectionId` | yes (after create) | Collection's ID |
 | `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Expresses "caller belongs to the group this collection represents." Prefer storing that external id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it as `md.self.<category>.<key>` — see [Migrating `contextId` to a metadata category](#migrating-contextid-to-a-metadata-category). |
@@ -693,41 +620,9 @@ Per-op fallback applies — configured ops always win, missing ops resolve again
 | `collection.createdBy` | yes (after create) | userId of the collection's creator |
 | `target.userId` | only `category: "member"`, ops `add` / `remove` | The user being added or removed. Absent for `member.list`. |
 
-Plus the standard CEL functions (`isMemberOf`, `memberGroups`, `hasRole`, `now()`, `fromWorkflow()`) and the collection-only helper:
+Plus the collection-only helper:
 
 - `hasCollectionAccess(collectionId)` — true when the caller has direct collection membership (the platform-managed `_col-reader` / `_col-writer` system groups) OR membership in a non-system user-group that holds a `CollectionGroupPermission` of `reader` or `read-write` on the collection. Resolves to `false` outside collection rule sets, and to `false` on `collection.create` (no `collectionId` in scope yet).
-
-### Defining a collection rule set
-
-```toml
-# config/rule-sets/class-reports-rules.toml
-[ruleSet]
-name = "class-reports-rules"
-resourceType = "collection"
-description = "Per-class collections — only members of the class can see/list reports"
-
-[rules.collection]
-create = "isMemberOf('class', collection.contextId)"  # only class members can create their class's collection
-edit   = "user.userId == collection.createdBy"
-delete = "user.userId == collection.createdBy"
-get    = "isMemberOf('class', collection.contextId) || hasCollectionAccess(collection.collectionId)"
-
-[rules.document]
-add    = "isMemberOf('class', collection.contextId)"  # any class member can add reports
-remove = "user.userId == collection.createdBy"
-list   = "isMemberOf('class', collection.contextId) || hasCollectionAccess(collection.collectionId)"
-```
-
-Bind the rule set to a collection type the same way as groups:
-
-```toml
-# config/collection-type-configs/class-reports.toml
-[collectionTypeConfig]
-collectionType = "class-reports"
-ruleSetName    = "class-reports-rules"
-```
-
-Then push with `primitive sync push`. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
 
 ### Migrating `contextId` to a metadata category
 
@@ -844,7 +739,7 @@ Use groups to model relationships between users.
 
 **Setup** (via CLI config):
 
-**File:** `config/database-types/classroom.toml` (excerpt)
+**File:** `config/database-type-configs/classroom.toml` (excerpt)
 
 ```toml
 [[operations]]

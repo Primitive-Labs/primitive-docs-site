@@ -20,10 +20,10 @@ primitive secrets delete OPENAI_API_KEY
 |---|---|---|
 | Integrations | `requestConfig.defaultHeaders`, `requestConfig.staticQuery` | Per request, when the proxy executes the call |
 | Workflows | Any step-config template string; CEL contexts (`runIf`, `switch` `when`) expose `secrets.*` | Just before the step runs |
-| Inbound webhooks | A webhook's `signingSecret` | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery |
+| Inbound webhooks | A webhook's `signingSecret` / `previousSigningSecret` — which must each be a **whole** reference, never a literal (`400` `SIGNING_SECRET_MUST_BE_SECRET_REF`) | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery, or `signing_secret_unset` if the stored value is missing. A raw value stored before this rule (`signingSecretStatus: legacy-literal`) still verifies, but updating **or rotating** that webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` until the same write migrates it — rotation refuses so a raw value can never be moved into the grace slot. A stored value carrying reference syntax that resolves to nothing (`signingSecretStatus: malformed-reference`) does **not** verify — it fails closed like an unresolvable reference, and is blocked from writes the same way |
 | Databases | Operation `access` / per-param `access` CEL; trigger stamp `value` CEL | When the operation executes (secrets load only when the expression references `secrets.`) |
 
-Write the reference without inner spaces — `{{secrets.KEY}}`, uppercase key, max 64 chars. Integration and webhook fields resolve exactly that form (a spaced `{{ secrets.KEY }}` is left as literal text there); workflow step templates additionally accept the spaced form.
+`{{secrets.KEY}}` ≡ `{{ secrets.KEY }}` — whitespace around the reference is tolerated everywhere it resolves (integration/webhook fields and workflow step templates alike), but not inside `secrets.KEY` itself (no space around the dot). Uppercase key, max 64 chars. Type the reference rather than pasting it out of a document: a reference-only field (a webhook `signingSecret`, a Google client's `[auth.google.clients.<type>].clientSecret`) rejects a reference carrying an invisible character — a zero-width space or a byte-order mark — instead of resolving it with the stray character inside the credential.
 
 **The CEL `secrets.*` variable is declared-only.** In a CEL expression (workflow `runIf` / `switch` `when`, a database operation or per-param `access` rule, a trigger stamp `value`), `secrets.*` binds **only** the keys the owning config declares in a top-level `secrets = ["KEY", ...]` manifest — on the database or collection type config, or the workflow definition. An undeclared `secrets.KEY` is absent at evaluation, so a rule that reads it denies closed. The `{{secrets.KEY}}` template form (the rows above) is unaffected: it resolves any set key.
 
@@ -35,18 +35,26 @@ Integration templates only match uppercase keys — `{{secrets.MY_KEY}}` with `[
 
 1. **Never inline a credential in TOML** — config files are committed. Reference `{{secrets.KEY}}` and set the value with the CLI.
 2. **Resolve secrets in integration config, not workflow step config.** A workflow step's resolved config is recorded in the run's step output snapshots — a secret templated into `request.headers` becomes readable in run detail. Secrets in the integration's `defaultHeaders`/`staticQuery` resolve after that snapshot and stay invisible. (See the integrations guide.)
-3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value.
-4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow renders the missing-path sentinel (or fails the step under `strict = true`); an integration header referencing a deleted key sends the unresolved placeholder upstream.
+3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value. A key holds exactly one value, so this is a sharp cutover; where a provider gives an overlap window (a webhook signing secret), create a SECOND key and rotate the reference onto it instead.
+4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow fails the step, naming the key; an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook whose referenced key is gone rejects every signed delivery `401`.
+5. **Budget the 100-key limit.** Every credential a server-side config references is one key — an integration's API key, each signed webhook's signing secret (plus a second key while a rotation window is open), a database rule's token. An app with many signed webhooks needs one key per webhook.
 
 ## Config Vars
 
 The non-secret twin of app secrets: same key format (`^[A-Z][A-Z0-9_]{0,63}$`), same 2 KB value cap, same 100-per-app limit, same declared-only CEL binding, plus a template-resolution form — minus masking and minus save-time validation. Use a var for a plaintext app-wide scalar a rule needs to compare against (a platform-assigned group ID, say); use a secret for anything that grants access to an external system.
 
+Vars are configuration, so they are authored in `vars.toml` and applied with `config push` — there is no command that writes one directly:
+
 ```bash
-primitive vars set ADMIN_GROUP_ID --value grp_01ABC --summary "Admins group id"
-primitive vars list          # values ARE shown — vars are not secret
-primitive vars delete ADMIN_GROUP_ID
+primitive config set vars ADMIN_GROUP_ID=grp_01ABC
+primitive config push --only var/ADMIN_GROUP_ID
+primitive vars list                # values ARE shown — vars are not secret
+primitive vars get ADMIN_GROUP_ID  # one var, as the server has it
 ```
+
+Delete a var by removing its line from `vars.toml` and pushing — a key the file no longer declares is deleted server-side, no `--prune` needed.
+
+Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a key the app already holds, or a concurrent create won the key mid-upsert), `VAR_LIMIT_REACHED` (the app is at the 100-var cap), or `CONFLICT` (the by-key upsert's optimistic-concurrency precondition failed — what `config push` surfaces as `CONFLICT var: KEY` when a var changed on the server since the last pull). A full store is never reported as a duplicate key. A push upserts by key: an existing key is replaced, not refused.
 
 ### Where `{{ vars.KEY }}` resolves
 
@@ -57,19 +65,34 @@ Two deliberate divergences from secrets, both worth tracking explicitly:
 1. **Never redacted.** A var resolved into a header/query value is not marked sensitive and is not masked in admin logs or the test-mode request preview — only a value substituted from `{{secrets.*}}` becomes `[redacted]`. Vars are non-secret and stay visible everywhere.
 2. **Not validated at save time.** Saving/updating an integration whose `defaultHeaders`/`staticQuery` reference a nonexistent `{{secrets.KEY}}` fails with a 400 naming the missing key. The same integration referencing a nonexistent `{{vars.KEY}}` saves successfully — the reference simply resolves to the literal `{{vars.KEY}}` placeholder at call time (the same behavior secrets fall back to only if the key is deleted *after* save).
 
-### Declared-only in CEL
+### Declared-only in CEL — with one carve-out
 
-Declare a var for CEL access the same way as a secret, in the owning config's top-level manifest:
+Declare a var for CEL access in the owning config's top-level manifest:
 
 ```toml
 vars = ["ADMIN_GROUP_ID"]
 ```
 
-A rule reads it as `vars.<KEY>`, bound only to declared keys — an undeclared `vars.KEY` is absent at evaluation (denies closed), exactly like `secrets.*`. Vars bind in workflow CEL contexts (`runIf`, `switch` `when`, predicate expressions on batch/collect steps), database operation `access`/per-param `access`, database trigger CEL, and trigger stamp `value` expressions. This CEL path is independent of the template-resolution form above — a config can use either or both.
+A rule reads it as `vars.<KEY>`, bound only to declared keys. That declared-only rule governs database operation `access`/per-param `access`, database trigger CEL, trigger stamp `value` expressions, and every `accessRule` (workflows, prompts, integrations).
+
+**Workflow guard CEL is the carve-out.** A step's `runIf`, a `forEach` step's per-iteration `runIf` and `successWhen`, a `switch` case's `when`, a compensation step's guard, and any named `expr.*` definition all bind the app's **full** config-vars map, with no `vars = [...]` declaration — the same values `{{ vars.KEY }}` renders in that workflow's step config. Vars are non-secret by construction and the workflow author already reads the whole map through templating in the same file, so there is nothing for a declaration to protect there.
+
+`secrets.*` is NOT carved out. A guard reading `secrets.KEY` still sees only the manifest-declared keys, never the full app-secret map, in every context.
+
+An undeclared key does not "deny closed" — its behavior depends on the site:
+
+| Site | Reading a key that isn't bound |
+|---|---|
+| `runIf` (step, `forEach`, compensation) | throws `No such key: KEY`; the wrapped error carries the `in`-operator hint and fails the step (or is captured by `continueOnError`) |
+| `switch` case `when` | throws `No such key: KEY` as an ordinary step failure (no runIf hint) |
+| `forEach` `successWhen` | the error is logged and the iteration is classified `succeeded` — a broken classifier never fails the run |
+| database `access`, trigger CEL, stamps, `accessRule` | the key is unbound, so the rule errors and the access is refused |
+
+Test presence first when a key may be missing: `'KEY' in vars` is false rather than throwing, and `vars.?KEY` returns an optional. This CEL path is independent of the template-resolution form above — a config can use either or both.
 
 ### Syncing vars: `vars.toml`
 
-Unlike secrets — which never appear in TOML, by design — config vars round-trip through `primitive sync` as a flat `vars.toml` at the sync directory root (sibling to `app.toml`, **not** a subdirectory): a plain top-level `KEY = "value"` table, no `[vars]` header, keys sorted:
+Unlike secrets — which never appear in TOML, by design — config vars round-trip through `primitive config` as a flat `vars.toml` at the config directory root (sibling to `app.toml`, **not** a subdirectory): a plain top-level `KEY = "value"` table, no `[vars]` header, keys sorted:
 
 ```toml
 # Per-environment non-secret config vars.
@@ -81,12 +104,12 @@ ADMIN_GROUP_ID = "grp_01ABC"
 API_HOST = "https://api.example.com"
 ```
 
-- `sync pull` writes it; a failed fetch leaves the existing `vars.toml` untouched rather than clobbering it with an empty file.
-- `sync push` upserts changed keys and hard-deletes keys removed from the file, printing `Unsetting var KEY` for each; a missing/failed `vars.toml` read never mass-deletes.
-- `sync diff` reports var add/remove/modified rows like any other synced entity.
+- `config pull` writes it; a failed fetch leaves the existing `vars.toml` untouched rather than clobbering it with an empty file.
+- `config push` upserts changed keys and hard-deletes keys removed from the file, printing `Unsetting var KEY` for each; a missing/failed `vars.toml` read never mass-deletes.
+- `config diff` reports var add/remove/modified rows like any other synced entity.
 - **Concurrent-edit guard**: if the server's value drifted since the last local sync (edited from the Admin Console, say), push reports `CONFLICT var: KEY` — with `Local last sync:` / `Server modified:` lines, the same pattern used for every other synced entity type — and exits non-zero. `--force` bypasses the check and overwrites/deletes unconditionally.
 
-There is no client-side read API for vars — `primitive vars list`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.
+There is no client-side read API for vars — `primitive vars list` / `primitive vars get`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.
 
 ## Related guides
 

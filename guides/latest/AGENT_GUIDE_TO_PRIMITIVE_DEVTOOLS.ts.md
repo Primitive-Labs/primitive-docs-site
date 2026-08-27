@@ -526,6 +526,47 @@ wiring; the pieces, all load-bearing:
   `Cannot find package 'ws'`.
 - Script: `"test": "pnpm codegen && vitest run"`.
 
+Environment selection: `vitest.config.ts` merges the app's Vite config, so the
+`primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
+does for `pnpm dev` — from `.primitive/config.json`, honoring `primitive env
+use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
+a `.env` file (no `.env` file repeats them). Point one run elsewhere:
+
+```bash
+PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" PRIMITIVE_ENV=alpha pnpm test
+```
+
+vitest's `--mode` is the OTHER axis: it selects `.env.<mode>` (app-behavior
+keys) and never the backend. Pass it with **no `--` separator**:
+
+```bash
+PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" pnpm test --mode staging
+```
+
+`pnpm test -- --mode staging` is a silent wrong-mode run: vitest drops every
+argument after a bare `--` (the mode flag and any positional test filter), so
+the suite runs full and green with the default mode's app behavior. The plugin
+prints the resolved Primitive environment (name, apiUrl, appId, config path)
+at the start of every run, so which backend a run used is never a guess.
+
+Because the axes are independent, `PRIMITIVE_ENV=dev pnpm test --mode alpha`
+signs in and writes test data against `dev` while using alpha's app behavior —
+a real combination, and a dangerous mistake when a mode's keys are coupled to
+one backend. Such a mode should declare its environment:
+
+```dotenv
+# .env.alpha
+VITE_EXPECTED_PRIMITIVE_ENV=alpha
+```
+
+The plugin then fails the run at config time — before a spec is collected or
+anything signs in — which is why the check lives there and not in the app's
+`envConfig.ts`: `src/tests/primitive-tests.spec.ts` builds its client straight
+from `import.meta.env` and never imports it. Opt-in; a non-empty
+`VITE_EXPECTED_PRIMITIVE_ENV` in the shell overrides the file, so a deliberate
+cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev
+PRIMITIVE_ENV=dev pnpm test --mode alpha`).
+
 `registerPrimitiveTests(options)` — from `primitive-app/testing`:
 
 | Option | Default | Notes |
@@ -533,7 +574,7 @@ wiring; the pieces, all load-bearing:
 | `models` | required | The app's model classes, typically `allModels` from `@/models` |
 | `testModules` | required | `import.meta.glob("./**/*.primitive-test.ts")`; each module's default export must be a `TestGroup` or `TestGroup[]` |
 | `appId` / `apiUrl` / `wsUrl` | `process.env.VITE_APP_ID` / `VITE_API_URL` / `VITE_WS_URL` | |
-| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Must derive from a whitelisted test-account base (`primitive apps update <app-id> --test-account-bases "..."`). Use a stable suffix per CI project so the find-or-create provisioner reuses one test user across runs |
+| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Must be a `+primitivetest` derivative of a whitelisted test-account base (`[app].testAccountBaseEmails` in `app.toml`, applied with `primitive config push --only app`) — the bare base address itself is never a test account and always fails sign-in. Use a stable suffix per CI project so the find-or-create provisioner reuses one test user across runs |
 | `otpCode` | `"000000"` (`PRIMITIVE_TEST_OTP_CODE`) | The test-account OTP bypass code |
 | `testTimeoutMs` | `60_000` | Per-test timeout |
 | `clientOptions` | storage `{ type: "auto" }` | Partial client options; `auto` storage uses better-sqlite3 if installed, memory otherwise — no native deps required |

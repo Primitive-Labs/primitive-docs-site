@@ -110,7 +110,9 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
 `action` and `user_ulid` are required by the TypeScript interface. At runtime, `user_ulid` will be back-filled from the queue's user-resolver if you omit it AND the resolver returns a value — but the type checker won't let you omit it, so always pass it explicitly (or use `ANALYTICS_UNAUTHENTICATED_USER`).
 {{/lang}}
 {{#lang swift}}
-`analytics.logEvent` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+`analytics.logEventAsync` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
+
+**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. Awaiting each call is what orders two consecutive events against each other, and what guarantees an event logged before `flushAsync()` goes out with *that* batch. `AnalyticsContext` — the logger handed to LLM calls, read from `client.llmAnalyticsContext` / `client.geminiAnalyticsContext` — follows the same shape: `await context.logEventAsync(_:)`, taking a `[String: JSONValue]`. A context you construct yourself supplies the synchronous `logEvent:` closure and, optionally, a `logEventAsync:` closure; without the latter, `logEventAsync` falls back to the synchronous one and calls it exactly once.
 {{/lang}}
 
 ### Event with Context
@@ -211,6 +213,8 @@ So **don't** add your own `beforeunload → flush` listener — it's redundant a
 {{/lang}}
 {{#lang swift}}
 The queue auto-flushes every **100ms** (or earlier when batched). `await client.destroy()` cancels the flush timer and triggers a final flush before storage closes, so you don't need a manual flush on teardown.
+
+`flushAsync()` returns once the batch has actually reached the socket, so awaiting it is how you know an event went out before whatever follows.
 {{/lang}}
 
 ---
@@ -238,7 +242,7 @@ Accepted shapes:
 - `llm`, `gemini`: `boolean | { start?: boolean; success?: boolean; failure?: boolean }`
 {{/lang}}
 {{#lang swift}}
-`AnalyticsAutoEventsConfig` exposes each toggle as a flat field: `dailyAuth`, `returnActive`, `minResumeMs` (ms before another `user_returned` will fire), `syncErrorsEnabled` + `syncErrorsMinIntervalMs`, `blobUploadsStart` / `blobUploadsSuccess` / `blobUploadsFailure`, and `sessionEnd`.
+`AnalyticsAutoEventsConfig` exposes each toggle as a flat field: `dailyAuth`, `returnActive`, `minResume` (a `TimeInterval` — seconds before another `user_returned` will fire), `syncErrorsEnabled` + `syncErrorsMinInterval` (also seconds), `blobUploadsStart` / `blobUploadsSuccess` / `blobUploadsFailure`, and `sessionEnd`.
 {{/lang}}
 
 ---
@@ -286,6 +290,10 @@ primitive analytics workflows --limit 5
 primitive analytics prompts --limit 5
 ```
 
+Per-subject analytics live under the top-level `analytics` noun — `analytics workflows`, `analytics prompts` and `analytics integrations` are the only homes for them; no subject noun carries its own analytics group. `analytics workflows` ranks workflows by runs; the REST API exposes no app-wide workflow overview, so there is no CLI command for one either.
+
+`--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
+
 ---
 
 ## Querying Analytics (REST API)
@@ -325,6 +333,39 @@ GET /app/{appId}/api/analytics/prompts/top?windowDays=30&limit=10
 
 > The REST API does **not** expose `users/{userUlid}/timeline`, `users/{userUlid}/events`, `workflows/overview`, `prompts/overview`, or a combined `overview` endpoint. Use the granular endpoints above.
 
+### Response shapes
+
+Every endpoint returns a JSON object. The workflow query type in the first column names the same query as an `analytics.query` step, and the step records this exact body under `data` (see [Workflows](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md)).
+
+Every payload also carries `_timing: { total_ms, wae_queries }` — diagnostics for the query itself, not data to consume. It is left out of the shapes below.
+
+| Query type — endpoint | Payload |
+| --- | --- |
+| `overview.dau` / `overview.wau` / `overview.mau` — `/overview/{dau,wau,mau}` | `{ value, previous, deltaPct }` |
+| `overview.growth` — `/overview/growth` | `{ window_days, retained_users, new_users, reactivated_users, churned_users, current_active, previous_active, deltaPct }` |
+| `daily-active` — `/daily-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }] }` |
+| `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }] }` shape |
+| `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages }` |
+| `users.top` — `/users/top` | `{ windowDays, limit, results: [{ userUlid, email, name, firstSeen, lastSeen, eventCount }] }` |
+| `users.search` — `/users/search` | `{ query, limit, results }` — same row shape as `users.top` |
+| `users.detail` — `/users/{userUlid}/detail` | `{ user: { user_ulid, email, name }, stats: { first_seen, last_active, total_events, days_active }, events_by_action: [{ action, event_count, last_occurred }], events_by_feature: [{ feature, event_count, pct }] }` |
+| `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
+| `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
+| `events.grouped` — `/events/grouped` | `{ group_by, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
+| `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
+| `workflows.top` — `/workflows/top` | `{ windowDays, limit, workflows: [{ workflowKey, runs, successRate, medianDurationMs, p10, p50, p95, totalTokens }] }` |
+| `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens }] }` |
+| `integrations` — `/integrations` | `{ windowDays, integrations: [{ integrationKey, invocations, errorRate, medianDurationMs, p10DurationMs, p50DurationMs, p95DurationMs }] }` |
+
+Read these before computing anything from a payload:
+
+- **`value` / `previous` / `deltaPct`.** `value` is the distinct active users over the current window; `previous` is the immediately preceding, non-overlapping window. Both windows start on a UTC calendar-day boundary, but the current one ends at query time, so it holds a partial final day while `previous` is `windowDays` complete days. Expect `deltaPct` to read low early in the UTC day — most visibly for `overview.dau`, where "today so far" is compared against all of yesterday. A month-over-month comparison is still one `overview.mau` call, not a second series query. `deltaPct` is a **fraction, not a percentage** — `0.25` means +25%, and it is rounded to 4 decimal places. Against a zero base it is a fixed sentinel rather than a real ratio: `1` when `value > 0`, `0` when `value` is 0 too. Render "no baseline" instead of a percentage when `previous` is 0.
+- **`overview.dau` / `wau` / `mau` windows are fixed** at 1, 7, and 28 days; they ignore `windowDays`. `overview.growth` honors it (1–90, default 28) and reports both halves as `current_active` / `previous_active`, with `deltaPct` on the same fraction scale. `overview.growth` builds its windows the same way, so `current_active` carries the same partial final day — and `churned_users` / `reactivated_users`, which are derived from the two counts, inherit it.
+- **`daily-active` is dense.** It returns exactly `windowDays` rows (7–90, default 28), one per UTC day, zero-filled for days with no activity. `day_ts` is the day's UTC-midnight epoch second; `day_label` is `YYYY-MM-DD`.
+- **`rolling-active` always returns 28 rows**, one per day. Its `windowDays` (1–28, default 7) is the length of the trailing window each point counts distinct users over — not the number of points.
+- **`cohort-retention` retention values are percentages** (0–100, one decimal place), with `null` for a week a cohort hasn't reached yet; week 0 is always 100. `averages` is the per-week mean across the returned cohorts.
+- **`errors.groups` `daily` buckets are sparse** — see [Error groups](#error-groups).
+
 ### Filtering events / events-grouped
 
 Both `/analytics/events` and `/analytics/events/grouped` accept up to 10 filter clauses via repeated query parameters of the form `filter[FIELD][OPERATOR]=value`. Values are capped at 200 chars and rejected if they contain control or binary characters (printable Unicode only).
@@ -348,11 +389,23 @@ Supported `FIELD`s and the `OPERATOR`s each accepts:
 
 Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upgrade`. Unknown fields, unsupported operators, or rejected values are silently dropped.
 
+**At most 10 filter params per request.** `/analytics/events`, `/analytics/events/grouped` and `/analytics/errors/groups` answer `400` — `Too many filters: N. Maximum is 10.` — for anything above that, rather than applying the first ten and dropping the rest. The body carries `code: "FILTER_LIMIT_EXCEEDED"`; **branch on that code, not the message**, which interpolates the submitted count and so cannot be matched literally. The count is over the `filter[…][…]` params you send, so a value that gets rejected by the allowlist still counts, and repeating the same field/operator with different values (each param is ANDed separately) counts once per param.
+
 ### Error groups
 
-`/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted literals, or timestamps normalize to the same title and share a fingerprint.
+`/analytics/errors/groups` groups failure events (failed workflow runs, failed workflow steps, failed integration calls) by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
 
-Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, and `daily` — an ordered per-day `{ day, count }` series (sampling-weighted). The per-day buckets carry the whole window, so "today versus the trailing baseline" needs a single call, no rolling store.
+Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span that is followed by `:` *and* sits in JSON object position — after `{` or `,`; a quoted span in prose, like `Failed to parse "x.txt": ...` or `User "alice": not found`, is templated even though it precedes a colon), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED` — but not an uppercase id such as `ABC123XYZ` or `DEADBEEFCAFE`, which are templated), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
+
+Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, `daily` — a per-day `{ day, count }` series (sampling-weighted, ascending, `day` a `YYYY-MM-DD` label) — `first_seen` / `last_seen` (ISO-8601), and an `exemplar`. One call covers the whole window, so "today versus the trailing baseline" needs no rolling store.
+
+**The exemplar is how you identify a group.** `normalized_title` is a grouping key with the variable parts replaced by placeholders; `exemplar` is a raw sample of one real failure — `{ message, action, scope_key, step_id, run_id, at }` — so you can go from a spiking group straight to the run that produced it without paging `/analytics/events`. `step_id` and `run_id` are `null` when the failure had none. The whole object is `null` when no sampled row for that fingerprint carried a sample: events written before the exemplar shipped carry none, and a very noisy group can consume the sampling budget and leave a quieter one without one. Treat `exemplar: null` as a normal result, not an error.
+
+**One failure, one group.** A failed step's error is echoed onto the run that it failed, so the run-level event is suppressed when the run's raw error — with only the appended `Caused by:` chain removed — is identical to the attributed failed step's; the group is the `workflow_step` one. The comparison is on the raw text, not the normalized title, so a run that failed with a genuinely different error still gets its own group even when the two normalize alike. A run that failed for its own reason (output-schema validation, a launch failure with no step to attribute) still gets its `workflow_run` group. A setup-phase abort is attributed to the synthesized `__setup__` step, so it appears under `source: workflow_step`, `step_id: __setup__` and is **not** returned by a `source is workflow_run` filter.
+
+`status_class` is populated for a workflow failure whose message embeds a status (`{"error":{"code":503,…}}` → `5xx`); integration failures keep the real HTTP status class, including `transport`, which no message text can express.
+
+**The `daily` series is sparse.** A day on which that fingerprint produced no events has no bucket at all, so `daily` is shorter than the window for any intermittent error. Divide by `window_days` (the response echoes it) to get a per-day baseline — dividing by `daily.length` averages over only the days the error fired, which overstates the baseline and suppresses exactly the spike an alert should catch. A window with no failures returns `rows: []`.
 
 Only a bounded set of dimensions is filterable (the exact error code is inside the fingerprint, never a filter):
 
@@ -362,7 +415,7 @@ Only a bounded set of dimensions is filterable (the exact error code is inside t
 | `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
-Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the workflow query type `errors.groups` and the CLI `primitive analytics errors-groups`.
+Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the workflow query type `errors.groups` and the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).
 
 ### Event row shape
 

@@ -23,7 +23,11 @@ A rule reads caller identity and operation params only — it cannot read a data
 |---|---|---|---|
 | Database operation | `access` per op; `defaultAccess` on `[type]`; per-param `access` inside `params` JSON | `params.*`, `database.id`, `database.celContext`, `fromWorkflow()` / `fromWorkflow(key)` | No rule and no `defaultAccess` → denied to every caller (operation `access` has no owner/manager/admin bypass). `fromWorkflow(key)` gates ops to the internal workflow runner (unspoofable). |
 | Database subscription | `accessRule` (subscribe-time) + `filter` (per change) | `accessRule`: full context incl. `database.*`, membership fns, `params.*`. `filter`: **narrow** — `user.userId`, `record.*` (`record.data.*`, `record.previousData.*`, `record.modelName`/`op`/`id`), `params.*` only | `filter` cannot reference `database.*` (HTTP 400 at save) and cannot widen what `accessRule` allows. Both required; use `"true"` for filter to pass everything in scope. |
-| Workflow | `accessRule` on `[workflow]` | identity context only | Evaluated on `workflows.start()` and `workflow.call`; NOT on webhook triggers. admin/owner bypass. No rule → any authenticated member can start. |
+| Workflow | `accessRule` on `[workflow]` | identity context + `fromWorkflow()` / `fromWorkflow(key)` for a `workflow.call` step | Evaluated on `workflows.start()`, `runSync()` and `workflow.call`; NOT on webhook/cron triggers. admin/owner bypass. **No rule → denied**, existing rows included; `"true"` restores open access. Required at create on a caller workflow; a `runAs: "system"` workflow rejects any rule. A child called by a known parent can name it — `fromWorkflow('<parent-key>')` — and a `workflow.call` from a SYSTEM parent skips the child's rule entirely. Denial: `403 { errorCode: "WORKFLOW_ACCESS_DENIED" }`. |
+| Prompt | `accessRule` on `[prompt]` | identity context + `fromWorkflow()` / `fromWorkflow(key)` for a `prompt.execute` step | Evaluated on `client.prompts.execute()` and the workflow `prompt.execute` step (both run modes). admin/owner bypass. **No rule → denied**; required at create on every surface. Denial: `403 { errorCode: "PROMPT_ACCESS_DENIED" }`, before any model call, credential read or `prompt.executed` event. A `runAs: "system"` run binds no user, so authorize it with `fromWorkflow('<key>')`. |
+| Integration | `accessRule` on `[integration]` | identity context + `fromWorkflow()` / `fromWorkflow(key)` for an `integration.call` step | Evaluated on the proxy route and the `integration.call` step. admin/owner bypass. **No rule → denied**; required at create. Denial: `403 { errorCode: "INTEGRATION_ACCESS_DENIED" }`. |
+| Named locks | — | — | No per-resource rule exists: any app member may call them. |
+| Direct LLM/Gemini proxy routes | `directLlmEnabled` on `[app]` (`app.toml`) | — | No per-resource rule; one app-wide switch, **off by default**. While it is off the four spend routes (`llm/chat`, `gemini/generate`, `gemini/generate-raw`, `gemini/count-tokens`) answer `403 { code: "DIRECT_LLM_DISABLED" }` to every caller, app admins and owners included; `directLlmEnabled = true` opts in. Deprecated — removed in the next major server release. Use a managed prompt or a workflow LLM step, which are gated. |
 | Server-stamped fields / triggers | trigger `when` conditions; `autoPopulatedFields` values | `record.*`, `database.*`, `now()` | CEL produces values (`user.userId`, `now()`) as well as conditions. |
 | Rule sets | per-op rules on a named rule set | resource objects (e.g. `group.groupType`, `group.groupId`, `group.createdBy`) | Governs **management operations** (create/edit/delete groups & collections, member management) — see below. |
 | Metadata category | `readRule` (read API) / `writeRule` (write API) on the category config | `user.userId`, `user.role`, `resource.resourceType`/`resourceId`/`category`; `workflow.workflowKey` when called from a `metadata.write`/`read` step | Gates the metadata read/write API only — it doesn't govern a *different* rule's `md.self`/`md.caller` use (`md.self` is inferred; `md.caller`/paths are declared). App-level owner/admin bypass both rules (a resource-level permission never bypasses). See the Resource Metadata guide. |
@@ -34,16 +38,28 @@ Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-
 
 Data-access rules live on operations; **rule sets** govern who may manage groups and collections:
 
-```bash
-primitive rule-sets create "team-management" \
-  --resource-type group \
-  --rules '{
-    "group":  { "create": "true", "edit": "user.userId == group.createdBy", "delete": "user.userId == group.createdBy" },
-    "member": { "create": "isMemberOf(group.groupType, group.groupId)", "edit": "user.userId == group.createdBy", "delete": "user.userId == group.createdBy" }
-  }'
+```toml
+# config/rule-sets/team-management.toml
+[ruleSet]
+name = "team-management"
+resourceType = "group"
+
+[rules.group]
+create = "true"
+edit = "user.userId == group.createdBy"
+delete = "user.userId == group.createdBy"
+
+[rules.member]
+create = "isMemberOf(group.groupType, group.groupId)"
+edit = "user.userId == group.createdBy"
+delete = "user.userId == group.createdBy"
 ```
 
-Bind via the type config: `config/group-type-configs/<type>.toml` / `config/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via its `ruleSetId` (TOML, or `--rule-set-id` on `primitive blob-buckets create`), where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
+```bash
+primitive config push --only rule-set/team-management
+```
+
+Bind via the type config: `config/group-type-configs/<type>.toml` / `config/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via its `ruleSetId` in TOML, where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
 
 Semantics:
 - **App owners/admins bypass rule sets entirely**; rules apply to regular members.

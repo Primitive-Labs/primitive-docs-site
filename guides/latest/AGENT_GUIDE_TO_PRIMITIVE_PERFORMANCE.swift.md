@@ -119,7 +119,7 @@ Whenever a page reads three or more independent collections from the same databa
 
 ### Gotchas
 
-- Pipeline steps need an explicit `filter` field, even if empty (`"filter": {}`). Omitting it fails `primitive sync push` with a 400 (`query step requires a "filter" field`) attributed to that operation.
+- Pipeline steps need an explicit `filter` field, even if empty (`"filter": {}`). Omitting it fails `primitive config push` with a 400 (`query step requires a "filter" field`) attributed to that operation.
 - Each step's `limit` matters — pipelines don't paginate. Per-step `limit` caps at 1000, a pipeline allows at most 10 steps, and step types are `query`/`count`/`aggregate` only. Pick limits that comfortably cover real data without blowing past the reasonable size of a single response.
 - Pipelines only span one database. If the page also needs data from a *different* database, that's a second call (e.g. a per-user portfolio DB plus a shared securities-ref DB).
 
@@ -429,6 +429,7 @@ final class SourceStore: ObservableObject {
   @Published private(set) var source: SourceData?
   private var loadedAt: Date?
   private var inFlight: Task<SourceData, Error>?
+  private var subscription: EventSubscription?
 
   func ensureLoaded() async throws -> SourceData {
     if let source { return source }
@@ -444,17 +445,17 @@ final class SourceStore: ObservableObject {
   func invalidate() { source = nil }
 
   // Wire up DB subscribe once on first use. `subscribe` takes the database id,
-  // a server-registered subscription key, and an options object carrying the
-  // `onChange` callback (plus any `params` forwarded to the subscription's
-  // filter CEL).
+  // a server-registered subscription key, an options value (any `params` are
+  // forwarded to the subscription's filter CEL), and the change callback as a
+  // trailing @Sendable closure. Store the returned EventSubscription: the
+  // subscription ends when the handle is released.
   func observe(dbId: String) throws {
-    _ = try client.databases.subscribe(
+    subscription = try client.databases.subscribe(
       databaseId: dbId,
-      subscriptionKey: "source-changes",
-      options: DatabaseSubscribeOptions(onChange: { [weak self] _ in
-        self?.invalidate()
-      })
-    )
+      subscriptionKey: "source-changes"
+    ) { [weak self] _ in
+      Task { @MainActor in self?.invalidate() }
+    }
   }
 }
 ```

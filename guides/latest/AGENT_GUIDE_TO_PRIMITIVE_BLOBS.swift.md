@@ -175,7 +175,7 @@ Deleting also cancels any in-flight upload for the same `blobId` and clears loca
 The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
 
 ```swift
-  client.setNetworkMode(.offline)
+  client.networkMode = .offline
 
   // Bytes are written to the local cache immediately and queued. upload()
   // resolves without waiting for the network (bytesTransferred is 0).
@@ -191,7 +191,7 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
   await blobs.prefetch(blobIds: blobIds, concurrency: 4)
 
   // Queue processing resumes automatically; listen for .blobsQueueDrained.
-  client.setNetworkMode(.online)
+  client.networkMode = .online
 ```
 
 ---
@@ -204,19 +204,29 @@ Inspect and control the per-document upload queue, and set the client-wide uploa
   // Inspect what's queued for this document. Each BlobUploadStatus carries
   // queueId, blobId, filename, contentType, numBytes, status, attempts,
   // nextAttemptAt, lastError.
-  let tasks = blobs.uploads()
+  let tasks = await blobs.uploadsAsync()
 
   // Pause/resume by blobId (the queueId is the blobId for document uploads).
-  _ = blobs.pauseUpload(blobId: blobId)
-  _ = blobs.resumeUpload(blobId: blobId)
+  _ = await blobs.pauseUploadAsync(blobId: blobId)
+  _ = await blobs.resumeUploadAsync(blobId: blobId)
 
-  blobs.pauseAll()
-  blobs.resumeAll()
+  await blobs.pauseAllAsync()
+  await blobs.resumeAllAsync()
 
   // Concurrency is set on the client (global, all documents).
-  client.setBlobUploadConcurrency(5) // min 1; default 2
-  let concurrency = client.getBlobUploadConcurrency()
+  await client.setBlobUploadConcurrencyAsync(5) // min 1; default 2
+  let concurrency = await client.blobUploadConcurrency
 ```
+
+Every queue verb is `async`: the upload queue lives behind an actor, so reading
+or changing it is an `await`. The queue members carry the `Async` suffix
+(`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`,
+`setBlobUploadConcurrencyAsync(_:)`, …), and the two concurrency readers are
+`async` properties: `await client.blobUploadConcurrency` and
+`await client.documents.uploadConcurrency`.
+
+`downloadUrl(blobId:disposition:attachmentFilename:)` is the exception and stays
+synchronous, so it is safe to call straight from a SwiftUI `body`.
 
 ---
 
@@ -225,15 +235,15 @@ Inspect and control the per-document upload queue, and set the client-wide uploa
 The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level progress event — it fires on status transitions. There is no per-byte progress callback. `delete` issued mid-upload cancels the in-flight transfer and evicts the cached bytes.
 
 ```swift
-  let progress = client.events.on(.blobsUploadProgress) { (e: BlobUploadProgressEvent) in
+  let progress = client.observeOnMainActor(BlobUploadProgressEvent.self) { e in
     print(e.queueId, e.blobId, e.status, e.numBytes, e.attempts)
   }
 
-  let completed = client.events.on(.blobsUploadCompleted) { (e: BlobUploadCompletedEvent) in
+  let completed = client.observeOnMainActor(BlobUploadCompletedEvent.self) { e in
     print("done", e.blobId, e.queueId)
   }
 
-  let failed = client.events.on(.blobsUploadFailed) { (e: BlobUploadFailedEvent) in
+  let failed = client.observeOnMainActor(BlobUploadFailedEvent.self) { e in
     print("failed", e.blobId, e.lastError ?? "", "retry?", e.willRetry)
   }
 ```

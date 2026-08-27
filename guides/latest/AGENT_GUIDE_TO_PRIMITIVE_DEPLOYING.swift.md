@@ -24,8 +24,10 @@ The Team ID is the single setting required for device, TestFlight, and App Store
 3. Regenerate the xcodeproj:
 
    ```bash
-   xcodegen generate
+   bash scripts/regenerate-project.sh
    ```
+
+   That script is the one entry point for regeneration: it runs `xcodegen generate` and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
 
 After that, device installs and archives both work.
 
@@ -82,7 +84,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you.
+Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you. Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 

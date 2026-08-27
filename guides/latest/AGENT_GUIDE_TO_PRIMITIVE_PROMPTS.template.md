@@ -14,19 +14,23 @@ Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` a
 
 ---
 
-## Status Lifecycle (matters less than you'd think)
+## Availability
 
-| Status     | Executable from workflow | Executable from client SDK / CLI | Executable from server REST |
-| ---------- | ------------------------ | -------------------------------- | --------------------------- |
-| `draft`    | Yes                      | Yes                              | Yes                         |
-| `active`   | Yes                      | Yes                              | Yes                         |
-| `archived` | No                       | Yes (no status check)            | Yes (no status check)       |
+A prompt's availability is one server-owned `status` — `active | inactive | archived` — and it is **not** a TOML key. Every created or pushed prompt is active; `primitive prompts disable <key>` takes one out of service and `primitive prompts enable <key>` puts it back (the console has the matching action). A file that still carries a `[prompt] status` line fails `config push` with a message naming the verb.
 
-Default for new prompts is `draft`. **Both `draft` and `active` execute from workflows** (verified in `src/workflows/steps/prompt-step.ts:66`); only the workflow path enforces the status gate. The user REST handler (`src/app-api/controllers/prompts-controller.ts`) and the admin/CLI execute endpoint do NOT filter by `status`, so `archived` prompts still execute via the SDK and CLI as long as the prompt and an active-config exist. Archive a prompt only to hide it from listings — it does not block direct execution outside workflows.
+| Status     | Executable from a workflow | Executable from the client SDK / REST | `primitive prompts execute` |
+| ---------- | -------------------------- | ------------------------------------- | --------------------------- |
+| `active`   | Yes                        | Yes                                   | Yes                         |
+| `inactive` | No                         | No (`400 PROMPT_NOT_EXECUTABLE`)      | Yes — it is the diagnostic  |
+| `archived` | No                         | No                                    | No — it has been deleted    |
 
-The config `status` field is separate. A config defaults to `status = "active"`. The workflow step checks this and refuses to execute archived configs ("not executable"); the SDK/REST/CLI paths do not check config status.
+A prompt stored before this model may still carry `draft`, which reads `inactive`, so a legacy draft prompt no longer executes at the member endpoint. `primitive prompts execute` is the documented way to trial an inactive prompt before enabling it.
 
-> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). Archived prompts return 200 from the user REST endpoint, not 404. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll get a 400 ("No configuration found for this prompt"), not 404.
+**Retiring a prompt.** A plain admin `DELETE` (and the console's **Archive**) sets `status = "archived"` and destroys nothing: the prompt's configs and stored prompt bodies stay, so every execution and analytics row that names it keeps resolving. An archived prompt is refused everywhere — the member endpoint, the workflow `prompt.execute` step, `primitive prompts execute`, test runs, and as another test case's **evaluator** — and `enable` will not bring it back. It goes on holding its `promptKey`. `DELETE ?hard=true` (the console's **Delete permanently**, and what `primitive config push --prune` sends) destroys the prompt, its configs and their R2 bodies, and frees the key. To bring a key back after archiving: hard-delete the holder, then re-add the file and push — a bare re-push cannot clear a server-owned `archived`.
+
+The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` retires that named version, and the resolve path refuses it.
+
+> If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). An inactive prompt is a `400`, not a `404`. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll also get a 400 ("No configuration found for this prompt").
 
 ---
 
@@ -148,6 +152,12 @@ Use `| json` when you need to embed objects in larger strings:
 Data: {{ input.config | json }}
 ```
 
+### The direct LLM proxy is deprecated and off by default
+
+`client.llm.*` / `client.gemini.*` (the `llm/chat`, `gemini/generate`, `gemini/generate-raw`, `gemini/count-tokens` routes) are the *old* way to reach a model. They spend the app's LLM credit with no rule saying who may do it, so the whole surface is **off by default**: while `[app] directLlmEnabled` is not `true` in `app.toml`, every one of those four routes answers `403 { code: "DIRECT_LLM_DISABLED" }` — to app admins and owners as well, since it is a spend gate, not a role gate. The routes are deprecated and are **removed in the next major server release**.
+
+Use a managed prompt (`client.prompts.execute`) or a workflow LLM step instead. Neither goes through the switch: they run whatever it is set to, gated by their own `accessRule`.
+
 ### Don't do this
 
 ```
@@ -168,7 +178,7 @@ Data: {{ input.config | json }}
 
 ## TOML File Format
 
-Used by `primitive sync push/pull` and `primitive prompts create --from-file`.
+Read and written by `primitive config pull` / `primitive config push` — the only path that creates or updates a prompt.
 
 ### Basic structure
 
@@ -177,7 +187,8 @@ Used by `primitive sync push/pull` and `primitive prompts create --from-file`.
 key = "my-prompt"                # required, unique per app, kebab-case
 displayName = "My Prompt"        # required
 description = "What it does"     # optional
-status = "draft"                 # optional: draft (default) | active | archived
+accessRule = "true"              # REQUIRED at create: CEL deciding who may execute.
+                                 # Absent/empty = every non-admin execution denied.
 inputSchema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
 
 [[configs]]
@@ -189,7 +200,7 @@ userPromptTemplate = "Summarize: {{ input.text }}"   # required
 systemPrompt = "You are concise."        # optional
 temperature = 0.3                # optional, number or string ("0.3"); stored as string
 maxTokens = 1000                 # optional integer
-outputFormat = "text"            # optional: text (default) | json
+outputFormat = "text"            # optional: text (default) | json — request/response shaping only, never a workflow's type
 ```
 
 ### Field reference (verified against `src/models/app-prompt.js` and `app-prompt-config.js`)
@@ -201,9 +212,11 @@ outputFormat = "text"            # optional: text (default) | json
 | `key`          | Yes      | Unique per app                                                                       |
 | `displayName`  | Yes      |                                                                                      |
 | `description`  | No       |                                                                                      |
-| `status`       | No       | `draft` (default) \| `active` \| `archived`                                          |
-| `inputSchema`  | No       | JSON Schema as a string (parsed server-side)                                         |
-| `outputSchema` | No       | JSON Schema as a string. **Read by `sync push` / `prompts create --from-file`, but `sync pull` does NOT write it back** |
+| `accessRule`   | Yes at create | CEL deciding who may execute. Absent/empty = every non-admin execution denied with `403 { errorCode: "PROMPT_ACCESS_DENIED" }`; `"true"` allows any app member |
+| `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
+| `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back                     |
+
+`config push` applies the complete `[prompt]` table: a file with no `outputSchema` key clears any output schema stored on the server. Prompt files written by an older CLI omit that key even when the server has a schema — run `primitive config pull` once before the first push after upgrading the CLI.
 
 **`[[configs]]`:**
 
@@ -216,10 +229,14 @@ outputFormat = "text"            # optional: text (default) | json
 | `userPromptTemplate` | Yes      |                                                    |
 | `systemPrompt`       | No       |                                                    |
 | `temperature`        | No       | Stored as string; numbers in TOML are accepted     |
+| `topP`               | No       | Nucleus-sampling cutoff; stored as string          |
 | `maxTokens`          | No       | Integer                                            |
-| `outputFormat`       | No       | `text` (default) \| `json`                         |
+| `outputFormat`       | No       | `text` (default) \| `json`. On openrouter, `json` requests provider JSON mode (`response_format`); on gemini it only normalizes the HTTP execute response (fence stripping) — a gemini config constrains the request with `outputSchema` instead. Either way it is **not** the type a workflow step sees: a `prompt.execute` step types its `content` with its own `expect = "json" \| "text"` declaration. |
+| `outputSchema`       | No       | Config-level JSON Schema — the one a workflow `prompt.execute` step uses |
+| `providerConfig`     | No       | Provider-specific options, as a `[configs.providerConfig]` table |
+| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update. `isActive` is accepted as a legacy spelling |
 
-**Not exposed in TOML** (model fields that exist but aren't read by sync): `topP`, `outputSchema` on the config (prompt-level outputSchema is read on push only). Set these via `primitive prompts configs update` or the API client if needed.
+**Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `config pull` writes back what the server holds, and `config push` rejects a key the CLI does not recognize rather than dropping it silently.
 
 ### Multiple configs
 
@@ -227,6 +244,7 @@ outputFormat = "text"            # optional: text (default) | json
 [prompt]
 key = "summarizer"
 displayName = "Document Summarizer"
+accessRule = "true"
 
 [[configs]]
 name = "default"
@@ -250,7 +268,7 @@ temperature = 0.5
 userPromptTemplate = "Provide a concise summary: {{ input.text }}"
 ```
 
-The first `[[configs]]` becomes the active config when the prompt is created. To activate a different one later: `primitive prompts configs activate <prompt-id> <config-id>`.
+Mark the live config with `active = true` on exactly one `[[configs]]` entry. `config pull` writes that marker and `config push` honors it on create AND update, so the committed file always says which config the server is actually running. Two markers is an error rather than a first-wins rule. With no marker, the first entry becomes active when the prompt is created and nothing is re-activated afterwards.
 
 ### Evaluator prompts
 
@@ -263,6 +281,7 @@ Evaluators judge another prompt's output. They get TWO context entries:
 [prompt]
 key = "haiku-evaluator"
 displayName = "Haiku Evaluator"
+accessRule = "true"
 
 [[configs]]
 name = "default"
@@ -300,42 +319,24 @@ Set the active app once: `primitive use <app-id>`. All commands accept `--app <a
 
 Use `--json` for machine-readable output.
 
-### Prompt CRUD
+### Reading prompts
 
 ```bash
-primitive prompts list [app-id] [--status draft|active|archived] [--json]
+primitive prompts list [app-id] [--status active|inactive] [--json]
 primitive prompts get <prompt-id> [--json]
-primitive prompts update <prompt-id> [--name X] [--description X] [--status X] [--input-schema JSON] [--output-schema JSON]
-primitive prompts delete <prompt-id> [-y]          # archive (soft)
-primitive prompts delete <prompt-id> --hard [-y]   # permanent
 ```
 
-#### Create from CLI flags
+### Writing prompts (TOML only)
+
+A prompt is `prompts/<key>.toml`: a `[prompt]` table plus one `[[configs]]` block per named model config, exactly one of which carries `active = true`. There is no create/update/delete command.
 
 ```bash
-primitive prompts create \
-  --key my-prompt \
-  --name "My Prompt" \
-  --provider gemini \
-  --model "models/gemini-3-flash-preview" \
-  --user-template "Generate: {{ input.text }}" \
-  [--system-prompt "..."] \
-  [--temperature 0.7] \
-  [--max-tokens 1000] \
-  [--output-format text|json] \
-  [--input-schema '{...}'] \
-  [--output-schema '{...}']
+primitive config fields prompt                  # every key, type, required, default
+primitive config create prompt summarizer       # scaffold prompts/summarizer.toml
+primitive config push --only prompt/summarizer  # apply just this prompt
 ```
 
-Required: `--key`, `--name`, `--model`, `--user-template`. Default `--provider` is `openrouter`.
-
-#### Create from TOML
-
-```bash
-primitive prompts create --from-file ./summarizer.toml
-```
-
-Reads `[prompt]` + the FIRST `[[configs]]` entry. Additional configs are NOT created — for multi-config use `sync push` instead.
+Delete a prompt by removing its file and running `primitive config push --prune`; its `<key>.tests/` sidecar goes with it.
 
 ### Execute & preview
 
@@ -352,37 +353,47 @@ primitive prompts schema  <prompt-id> [--json]
 
 ```bash
 primitive prompts configs list <prompt-id>
-primitive prompts configs create <prompt-id> --name X --provider X --model X --user-template X [...]
-primitive prompts configs update <prompt-id> <config-id> [--name X] [--model X] [--temperature X] [--system-prompt X] [--user-template X] [--status active|archived]
-primitive prompts configs activate <prompt-id> <config-id>
-primitive prompts configs duplicate <prompt-id> <config-id> [--name X]
+primitive prompts configs get <prompt> <config>   # by key or id, name or id
 ```
 
-`configs create` requires `--name`, `--model`, `--user-template`. Default provider is `openrouter`.
+Configs are read here and written in `prompts/<key>.toml`: each is a
+`[[configs]]` entry with `name`, `provider`, `model`, `userPromptTemplate` and
+the rest of the table below. `active = true` marks the live one,
+`status = "archived"` retires one, and duplicating is copying the block under a
+new `name`. Apply with `primitive config push --only prompt/<key>`.
 
 ### Test cases
+
+Test cases are authored in TOML, one file per case, in a sidecar directory
+beside the prompt, and applied by `config push`:
+
+```toml
+# prompts/greeting.tests/basic-test.toml
+[test]
+name = "Basic test"
+description = "Greets by name"
+inputVariables = '{"text":"hello"}'
+# Empty means "not set": the case runs against the active config, unpinned and
+# unscored. Blanking a field and pushing CLEARS it server-side.
+configName = ""
+evaluatorPromptKey = ""
+evaluatorConfigName = ""
+expectedOutputPattern = ""
+expectedOutputContains = '["hi","hello"]'
+expectedJsonSubset = '{}'
+```
+
+`primitive config fields prompt` lists every key. `inputVariables`,
+`expectedOutputContains` and `expectedJsonSubset` carry JSON **text** — invalid
+JSON fails the push preflight, before anything is applied. Deleting a case is
+removing its file and running `primitive config push --prune`.
+
+Read them back from the CLI:
 
 ```bash
 primitive prompts tests list <prompt-id>
 primitive prompts tests get  <prompt-id> <test-case-id>
-primitive prompts tests delete <prompt-id> <test-case-id> [-y]
-
-primitive prompts tests create <prompt-id> \
-  --name "Basic test" \
-  --vars '{"text":"hello"}' \
-  [--pattern "regex"] \
-  [--contains '["substr1","substr2"]'] \
-  [--json-subset '{"key":"value"}'] \
-  [--config <config-id>] \
-  [--evaluator-prompt <prompt-id>] \
-  [--evaluator-config <config-id>]
-
-primitive prompts tests update <prompt-id> <test-case-id> \
-  [--name X] [--vars X] [--pattern X] [--contains X] [--json-subset X] [--config X] \
-  [--clear-pattern] [--clear-contains] [--clear-json-subset]
 ```
-
-Required for `create`: `--name`, `--vars`. `--vars` MUST be valid JSON (the CLI parses it).
 
 ### Running tests
 
@@ -408,11 +419,13 @@ primitive prompts tests batch cancel <prompt-id> <batch-id> [-y]
 
 ### Test case attachments (PDFs, images, etc.)
 
+Attachments are authored as files in `prompts/<key>.tests/<case>/` and uploaded
+by `primitive config push`; removing a file and running `config push --prune`
+deletes it server-side. The CLI reads server state:
+
 ```bash
 primitive prompts tests attachments list     <prompt-id> <test-case-id>
-primitive prompts tests attachments upload   <prompt-id> <test-case-id> ./doc.pdf [--name custom.pdf]
 primitive prompts tests attachments download <prompt-id> <test-case-id> doc.pdf [output-path]
-primitive prompts tests attachments delete   <prompt-id> <test-case-id> doc.pdf [-y]
 ```
 
 Upload size limit: **10 MB**. Attachments are sent to the model as file parts (`gemini`) or vision parts (`openrouter`) and are NOT visible in template context.
@@ -423,12 +436,7 @@ Upload size limit: **10 MB**. Attachments are sent to the model as file parts (`
 
 ## Sync (TOML version control)
 
-```bash
-primitive sync pull [app-id]
-primitive sync push [app-id] [--dry-run]
-```
-
-The sync directory auto-resolves to `.primitive/sync/<env>/<appId>/`; pass `--dir <path>` to override it.
+Prompt configs live at `prompts/<key>.toml`, with test cases in a sibling `<key>.tests/` directory. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and the `--dir` override.
 
 ### Directory layout (verified in `cli/src/commands/sync.ts` — see the layout block in the `sync` command's help text)
 
@@ -466,20 +474,25 @@ expectedJsonSubset = '{"status":"ok"}'                      # JSON string
 
 Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are portable across apps. ID-based refs (`configId`, `evaluatorPromptId`, `evaluatorConfigId`) are also accepted but tied to a specific app — prefer the key-based forms.
 
-### What `sync pull` actually writes
+### What `config pull` actually writes
 
-`serializePrompt` (`cli/src/commands/sync.ts:215`) writes:
+`serializePrompt` takes its key set from the prompt's shared configuration-object
+definition, so pull and push cannot disagree about which fields exist:
 
-- `[prompt]`: `key, displayName, description, status, inputSchema`
-- `[[configs]]`: `name, description, provider, model, temperature, maxTokens, outputFormat, systemPrompt, userPromptTemplate`
+- `[prompt]`: `key, displayName, description, status, accessRule, inputSchema, outputSchema`
+- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig`
 
-It does NOT write: `outputSchema` (prompt or config), `topP`. If you set these and run `pull`, they will be missing from the TOML — round-trip is lossy for those fields.
+A field the server has not set is omitted (there is no TOML `null`), and a JSON
+field TOML cannot represent faithfully — a `null` anywhere inside a schema — is
+written as a JSON string instead of losing the member. A key the server returns
+that this CLI version does not know is named in a warning and left out of the
+file; upgrade the CLI to manage it.
 
-### What `sync push` does
+### What `config push` does
 
 - Updates existing prompts (matched by `key`) and reconciles configs (matched by `name`).
 - Creates new prompts and additional configs that don't exist on the server.
-- For new prompts, the FIRST `[[configs]]` entry becomes the active config.
+- Activates the `[[configs]]` entry marked `active = true`, on create and on update alike. With no marker, the first entry becomes active on create.
 - Test case TOMLs in `<key>.tests/` are pushed and matched by filename slug.
 - Skips files unchanged since the last sync (use `--force` to bypass).
 - Conflict detection: if a prompt was modified on the server since the last pull, push fails — pull and re-merge.
@@ -527,20 +540,28 @@ Multiple verification types can stack on a single test case. All must pass for t
 ### Create from scratch
 
 ```bash
-cat > my-prompt.toml << 'EOF'
+primitive config create prompt greeting-generator
+```
+
+That writes `prompts/greeting-generator.toml` from the type's defaults. Fill it in:
+
+```toml
 [prompt]
 key = "greeting-generator"
 displayName = "Greeting Generator"
+accessRule = "true"
 
 [[configs]]
 name = "default"
+active = true
 provider = "gemini"
 model = "models/gemini-3-flash-preview"
 temperature = 0.7
 userPromptTemplate = "Generate a friendly greeting for {{ input.name || 'friend' }} who works as a {{ input.occupation || 'professional' }}."
-EOF
+```
 
-primitive prompts create --from-file my-prompt.toml
+```bash
+primitive config push --only prompt/greeting-generator
 ```
 
 ### Test it
@@ -552,39 +573,48 @@ primitive prompts execute <prompt-id> --vars '{"name":"Alice","occupation":"engi
 
 ### Add a regression test
 
-```bash
-primitive prompts tests create <prompt-id> \
-  --name "Mentions name and occupation" \
-  --vars '{"name":"Bob","occupation":"teacher"}' \
-  --contains '["Bob","teacher"]'
+```toml
+# prompts/greeting-generator.tests/mentions-name-and-occupation.toml
+[test]
+name = "Mentions name and occupation"
+inputVariables = '{"name":"Bob","occupation":"teacher"}'
+expectedOutputContains = '["Bob","teacher"]'
+```
 
+```bash
+primitive config push --only prompt/greeting-generator
 primitive prompts tests run-all <prompt-id>
 ```
 
 ### Compare configs
 
-```bash
-primitive prompts configs create <prompt-id> \
-  --name "creative" \
-  --provider gemini \
-  --model "models/gemini-3-pro-preview" \
-  --temperature 0.9 \
-  --user-template "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
+```toml
+# prompts/<key>.toml — add the candidate alongside the live one
+[[configs]]
+name = "creative"
+provider = "gemini"
+model = "models/gemini-3-pro-preview"
+temperature = 0.9
+userPromptTemplate = "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
+```
 
+```bash
+primitive config push --only prompt/<key>
+primitive prompts configs list <prompt-id>       # the new config's id
 primitive prompts tests run-all <prompt-id> --config <new-config-id>
-primitive prompts tests runs <prompt-id> --json     # compare runs across configs
+primitive prompts tests runs <prompt-id> --json  # compare runs across configs
 ```
 
 ### Version control
 
 ```bash
-primitive sync pull
+primitive config pull
 git add .primitive/sync && git commit -m "Snapshot prompts"
 
 # edit the synced prompts/*.toml files
 
-primitive sync push --dry-run        # preview
-primitive sync push                  # apply
+primitive config push --dry-run  # preview
+primitive config push            # apply
 ```
 
 ---
@@ -615,12 +645,14 @@ Pick `gemini` provider for native Gemini features (file parts, structured output
 
 `outputSchema` (structured JSON output) is **only honored by the gemini provider** in `src/services/block-executor.ts:563`. With openrouter, set `outputFormat = "json"` and instruct the model in the system prompt instead.
 
+`outputFormat` shapes the **provider request** on openrouter (`json` → `response_format: { type: "json_object" }`) and the **HTTP execute response's normalization** on both providers (fence stripping). On gemini it does NOT constrain the request — that is `outputSchema`'s job, per the paragraph above. It never decides what a workflow step receives either: a `prompt.execute` step declares `expect = "json"` or `"text"` (the default) and that declaration alone types its `content` output — see the workflows guide. Switching the active config between `text` and `json` therefore no longer retypes what downstream steps and scripts get. Recommended pairing for a `expect = "json"` step: `outputFormat = "json"` on an openrouter config, `outputSchema` on a gemini one.
+
 Both `AppPrompt` (prompt-level) and `AppPromptConfig` (config-level) have an `outputSchema` field, and which one is honored depends on the execution path:
 
 - SDK / user REST `POST /prompts/:promptKey/execute` and admin/CLI execute endpoint → use **`prompt.outputSchema`**.
 - Workflow `prompt.execute` step → uses **`config.outputSchema`**.
 
-The TOML `[prompt].outputSchema` field is read on push and applies to the prompt-level field. There is no TOML field that writes `config.outputSchema`; set it via `primitive prompts configs update` if you need it for the workflow path.
+Both are authorable: `[prompt].outputSchema` writes the prompt-level field and `[[configs]].outputSchema` writes the config-level one used by the workflow path.
 
 ---
 
@@ -631,6 +663,11 @@ The TOML `[prompt].outputSchema` field is read on push and applies to the prompt
 The first arg is the `promptKey`, NOT the `promptId`. The endpoint is `POST /prompts/:promptKey/execute`.
 
 `variables` becomes the `input` namespace in templates. `variables: { x: 1 }` → `{{ input.x }}`. There is no top-level access to your variables (e.g. `{{ x }}` won't resolve).
+
+An execution the prompt's `accessRule` refuses answers `403 { errorCode: "PROMPT_ACCESS_DENIED" }` — the same answer whether the rule evaluated false or the prompt has no rule (admins and owners always pass).
+{{#lang swift}}
+The refusal reaches Swift as a thrown `HttpError` with `serverCode == "PROMPT_ACCESS_DENIED"` — switch on that, not on the message text.
+{{/lang}}
 
 ### Don't do this
 
@@ -665,11 +702,12 @@ try await client.prompts.execute(promptKey: "p", options: ExecutePromptOptions(v
 
 1. Use `--json` whenever piping output to other tools.
 2. `primitive use <app-id>` once per session beats `--app` everywhere.
-3. Prefer TOML + `sync push` over CLI flags for anything with multiple configs or test cases.
+3. Prefer TOML + `config push` over CLI flags for anything with multiple configs or test cases.
 4. Always `preview` before `execute` when debugging templates — much faster.
 5. Missing variables silently render as empty. Use `||` fallbacks or `| expect: "..."` to fail loudly. (Note: `inputSchema` is metadata only — it is NOT validated against `variables` at execute time.)
 6. Evaluator prompts use `{{ output }}` (top-level), NOT `{{ input.output }}`.
 7. `outputSchema` only works with `provider = "gemini"`. With openrouter, use `outputFormat = "json"` + prompt the model.
-8. Test case `--vars` MUST be valid JSON — single-quote in shell, double-quote inside.
-9. `sync pull` is lossy for `outputSchema` and `topP` — set those via the API client/CLI.
-10. Both `draft` and `active` prompts execute. `archived` does not. There is no separate "publish" step.
+   `outputFormat` does **not** decide what a workflow gets: a `prompt.execute` step declares `expect = "json"` (or `"text"`, the default) to fix the type of its `content`. Pair the step's declaration with whatever constrains YOUR provider — `outputFormat = "json"` on openrouter, `outputSchema` on gemini (where `outputFormat` only normalizes the response).
+8. A test case's `test.inputVariables` is JSON **text** in the sidecar TOML (`prompts/<key>.tests/<case>.toml`) — a single-quoted TOML string holding a valid JSON object.
+9. `config pull` writes every authorable field back, including `outputSchema`, `topP` and `providerConfig` — a mistyped key fails the push instead of being dropped.
+10. Availability is `primitive prompts disable`/`enable`, never a TOML key — there is no separate "publish" step, and everything you push is live. Retiring a prompt outright is `primitive prompts archive <id>` (the delete flow's soft path: the row and its configs stay, it keeps its `promptKey`, `enable` refuses it, and there is no un-archive).

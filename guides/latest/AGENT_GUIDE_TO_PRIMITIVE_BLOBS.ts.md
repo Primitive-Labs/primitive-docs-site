@@ -249,6 +249,7 @@ Inspect and control the per-document upload queue, and set the client-wide uploa
   const concurrency = client.getBlobUploadConcurrency();
 ```
 
+
 ---
 
 ## Events

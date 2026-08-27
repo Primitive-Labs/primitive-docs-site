@@ -62,10 +62,11 @@ An app's access mode decides who can sign up:
 | `invite-only` | Only people holding an invitation |
 | `domain` | Anyone with an email on the app's `allowedDomains` (e.g. `@mycompany.com`) |
 
-Set the mode from the CLI:
+`mode` is an app setting in `app.toml` — set it there and push:
 
 ```bash
-primitive apps update --mode public        # | invite-only | domain
+primitive config set app app.mode=public     # | invite-only | domain
+primitive config push --only app
 ```
 
 In `domain` mode, the allowed domains are carried on the app's `allowedDomains` list. Deferred grants are re-validated against this list at resolution time (see [Domain re-validation](#domain-mode-apps)).
@@ -135,7 +136,7 @@ By default only admins/owners can invite. Two app fields control member invitati
 | `memberInvitationsEnabled` | If `true`, users with role `"member"` can create invitations |
 | `memberInvitationLimit` | Max active (non-accepted, non-expired) invitations per member |
 
-Set both via `primitive apps update --member-invitations-enabled true --member-invitation-limit 5` (limit `0` = unlimited).
+Set both in the `[invitations]` table of `app.toml` — `enabled` and `limit` (`0` = unlimited) — and apply with `primitive config push --only app`.
 
 `quota()` returns `{ used: 0, limit: 0, remaining: 0, unlimited: false }` for a member when `memberInvitationsEnabled` is `false` — treat that as "no quota, hide the button." Admins/owners always get `unlimited: true` and are exempt from the limit. Members can only invite at `role: "member"`; passing `"admin"`/`"owner"` is rejected.
 
@@ -196,7 +197,7 @@ The accept call (shown in [Accept an invite token](#accept-an-invite-token) abov
 **Template-provided acceptance page:** The template ships `InviteAcceptPage.vue` (`src/pages/InviteAcceptPage.vue`) at the route `/invite/accept?inviteToken=...`. It handles the signed-in confirmation path (calls `client.invitations.accept(token)`) and the signed-out path (stashes the token in `sessionStorage` via `src/lib/inviteToken.ts`, redirects to login, and the auth methods in `userStore` consume it automatically at sign-in). All error states are also handled. If you're using the template, point your invitation emails at `${yourApp.baseUrl}/invite/accept?inviteToken=${token}` — the page is already wired up in the router. See the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#invite-token-persistence-across-auth-round-trips-template-pattern) for the persistence details.
 {{/lang}}
 {{#lang swift}}
-**Wiring the acceptance flow:** Resolve the incoming invite URL (universal link / custom scheme) with `client.links` — `resolve(userActivity:)` / `resolve(url:)` returns a `.invitation(token:)` target carrying the `inviteToken` (see the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#deep-links-and-universal-links)). When the user is signed in, call `client.invitations.accept(inviteToken)`. When they're signed out, hold the token and pass it to the sign-in method that carries it: `auth.magicLinkVerify(token:inviteToken:)`, `auth.otpVerify(email:code:inviteToken:)`, `signInWithGoogle(..., inviteToken:)`, or `signInWithApple(..., inviteToken:)` — deferred grants then resolve atomically to the signing-in user on a first sign-in, no follow-up `accept` call needed. A repeat sign-in from an existing Apple identity takes a different internal path and does not resolve `inviteToken` this way — call the authenticated `client.invitations.accept(inviteToken:)` immediately after signing in for that case (or for any other post-hoc acceptance). Cover the error state (`INVITE_TOKEN_INVALID` — one code for all bad tokens). See the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) for token persistence across the sign-in round-trip.
+**Wiring the acceptance flow:** Resolve the incoming invite URL (universal link / custom scheme) with `client.links` — `resolve(userActivity:)` / `resolve(url:)` returns a `.invitation(token:)` target carrying the `inviteToken` (see the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#deep-links-and-universal-links)). When the user is signed in, call `client.invitations.accept(inviteToken)`. When they're signed out, hold the token and pass it to the sign-in method that carries it: `auth.magicLinkVerify(token:inviteToken:)`, `auth.otpVerify(email:code:inviteToken:)`, `auth.passkeyRegisterFinish(..., inviteToken:)`, `signInWithGoogle(..., inviteToken:)`, or `signInWithApple(..., inviteToken:)` — deferred grants then resolve atomically to the signing-in user on a first sign-in, no follow-up `accept` call needed. A repeat sign-in from an existing Apple identity takes a different internal path and does not resolve `inviteToken` this way — call the authenticated `client.invitations.accept(inviteToken:)` immediately after signing in for that case (or for any other post-hoc acceptance). Cover the error state (`INVITE_TOKEN_INVALID` — one code for all bad tokens). See the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) for token persistence across the sign-in round-trip.
 {{/lang}}
 
 ---

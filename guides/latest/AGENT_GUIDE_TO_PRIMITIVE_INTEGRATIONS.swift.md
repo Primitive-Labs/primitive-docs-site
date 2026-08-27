@@ -21,7 +21,7 @@ This guide is verified against `js-bao-wss` source. Anything not described here 
 
 - Admin defines an `AppIntegration` (per-app, keyed by `integrationKey`) with a `requestConfig` that pins the `baseUrl`, `allowedMethods`, and `allowedPaths`.
 - Credentials are stored as **App Secrets** (`primitive secrets set KEY --value ...`), then referenced from `defaultHeaders` or `staticQuery` via `{{secrets.KEY}}` templates.
-- Non-secret config values are stored as **Config Vars** (`primitive vars set KEY --value ...`), referenced the same way via `{{vars.KEY}}` templates — see "Vars vs Secrets" below.
+- Non-secret config values are stored as **Config Vars** (a key in `vars.toml`, applied with `config push`), referenced the same way via `{{vars.KEY}}` templates — see "Vars vs Secrets" below.
 - Clients call `client.integrations.call({ integrationKey, method, path, ... })`. The platform routes through `POST /app/{appId}/api/integrations/{integrationKey}/proxy`.
 - Workflows can call integrations via the `integration.call` step.
 
@@ -41,8 +41,9 @@ Integrations are defined in TOML with two sections: `[integration]` and `[reques
 key = "integration-key"              # Required. Unique per app, lowercased on lookup.
 displayName = "Display Name"         # Required.
 description = "Optional description" # Optional.
-status = "draft"                     # Optional. "draft" | "active" | "archived" (default "draft").
-                                     #   draft/archived integrations CANNOT be called by clients.
+accessRule = "true"                  # REQUIRED at creation. CEL expression deciding who may
+                                     #   invoke this integration. "true" = any app member.
+                                     #   Empty/absent = DENY everyone but app admins/owners.
 timeoutMs = 300_000                  # Optional. Per-request upstream timeout (default 300_000 = 5 min).
 
 [requestConfig]
@@ -93,7 +94,7 @@ value = "fine-tune"
 | `integration.key` | string | Yes | — | Lowercased on lookup. Unique per app. |
 | `integration.displayName` | string | Yes | — | |
 | `integration.description` | string | No | — | |
-| `integration.status` | string | No | `"draft"` | Only `"active"` is callable by clients. |
+| `integration.accessRule` | string | **Yes** | — | CEL rule for WHO may call it. Empty/absent = deny all but app admins/owners. See [Caller access control](#caller-access-control). |
 | `integration.timeoutMs` | int | No | `300000` | Aborts upstream after this long (504 `UPSTREAM_TIMEOUT`). |
 | `requestConfig.baseUrl` | string | Yes | — | `http://`, `https://`, or `test://`. |
 | `requestConfig.allowedMethods` | string[] | No | `["GET"]` | Uppercased; `defaultMethod` auto-added. |
@@ -111,6 +112,51 @@ value = "fine-tune"
 
 - `maxRequestBodyBytes` — default 1 MB. Exceeding → HTTP 413 `REQUEST_BODY_TOO_LARGE`.
 - Attachment base64 cap — 10 MB per attachment, enforced by the client payload normalizer.
+
+## Caller access control
+
+`accessRule` is a CEL expression, stored on the integration and evaluated on every proxy call, in the same language as a workflow `accessRule` and a metadata category rule.
+
+Decision order: app admin/owner → allow; no rule stored → **deny**; otherwise evaluate the expression.
+
+| Binding | Client proxy call | Workflow step, `runAs: "caller"` | Workflow step, `runAs: "system"` |
+|---|---|---|---|
+| `user.userId`, `user.role` | the authenticated caller | the run's caller | unbound — a `user.*` rule is false |
+| `isMemberOf(type, id)`, `memberGroups(type)`, `hasRole(role)` | caller's app memberships | caller's app memberships | false |
+| `fromWorkflow()` | `false` | `true` | `true` |
+| `fromWorkflow("<workflowKey>")` | `false` | true for that key | true for that key |
+| `workflow.workflowKey`, `workflow.runId`, `workflow.stepId` | unbound | the running workflow | the running workflow |
+| `md.self.<category>.<key>` | the integration's own stored metadata | same | same |
+| admin/owner bypass | applies | applies | does not apply (no app role) |
+
+Rules you can write for `[integration] accessRule`:
+
+| Rule | Allows |
+|---|---|
+| `"true"` | any app member |
+| `"fromWorkflow()"` | workflow steps only — no client call |
+| `"fromWorkflow('daily-digest')"` | one named workflow |
+| `"isMemberOf('staff', 'core')"` | one group |
+| `"user.userId == 'usr_123'"` | one user |
+| `"md.self.access.clientCallable == true"` | whatever the integration's own metadata says |
+
+Enforcement:
+
+- A denied call returns HTTP `403` with `{"errorCode": "INTEGRATION_ACCESS_DENIED"}`, before any upstream request is built and before any app secret is read. The response carries no rule text.
+- A denied integration is omitted from `GET /app/{appId}/api/integrations` for that caller, so its `allowedPaths` are not disclosed.
+- A denied workflow step fails non-retryably with `Integration access denied`.
+- Denials appear in `primitive integrations logs` with `errorCode = INTEGRATION_ACCESS_DENIED` and the caller's identity.
+- A syntactically invalid rule is refused at save time: `400 Invalid accessRule CEL expression: <message>`.
+
+**Migrating an existing integration.** Integrations that predate this field have no rule stored and therefore deny every member call and every workflow step, `runAs: "system"` included. Set a rule on each:
+
+```bash
+primitive config pull                  # writes integrations/<key>.toml
+# add accessRule to [integration] — "true" restores the previous open behavior
+primitive config push
+```
+
+Removing `accessRule` from an existing integration's TOML CLEARS the stored rule on the next push, which locks the integration down — it never opens it up. Creating a new integration without one is refused: `400 accessRule is required`.
 
 ## Validation Rules
 
@@ -152,7 +198,8 @@ Behavior:
 Config vars resolve in the same fields via `{{vars.KEY}}` — same key constraint (`^[A-Z][A-Z0-9_]{0,63}$`), same whitespace tolerance (`{{ vars.KEY }}` ≡ `{{vars.KEY}}`), same two fields (`defaultHeaders`/`staticQuery` only, resolved at proxy time).
 
 ```bash
-primitive vars set ACCOUNT_ID --value acct_123 --summary "Default account id"
+primitive config set vars ACCOUNT_ID=acct_123
+primitive config push --only var/ACCOUNT_ID
 ```
 
 ```toml
@@ -183,7 +230,6 @@ primitive secrets set OPENAI_API_KEY --value sk-new-...
 [integration]
 key = "open-ai"
 displayName = "Open AI"
-status = "draft"
 timeoutMs = 300_000
 
 [requestConfig]
@@ -235,7 +281,6 @@ forwardQueryParams = ["q"]   # Only let clients control the search term.
 [integration]
 key = "postman-echo"
 displayName = "Postman Echo"
-status = "draft"
 timeoutMs = 30_000
 
 [requestConfig]
@@ -300,12 +345,13 @@ Authorization = "Bearer sk-abc123..."
 Authorization = "Bearer {{secrets.OPENAI_API_KEY}}"
 ```
 
-### 5. Forgetting to flip status to `active`
+### 5. Writing `status` into the TOML
 
-Newly-pushed integrations land in `status = "draft"`. Drafts can be exercised via `primitive integrations test` but **not** via `client.integrations.call()` — clients get HTTP 404 / `INTEGRATION_NOT_FOUND`.
+`status` is server-owned and is not a key of `[integration]`. A file that still carries the line fails `config push` with a message naming the verb. Every pushed integration is callable straight away; take one out of service — and put it back — out of band:
 
 ```bash
-primitive integrations update <integration-id> --status active
+primitive integrations disable weather-api
+primitive integrations enable weather-api
 ```
 
 ### 6. `responsePassthrough` has no effect
@@ -326,31 +372,24 @@ primitive use <app-id>           # Persist current app
 # or pass --app <app-id> to any subcommand
 ```
 
-### Integration CRUD
+### Reading integrations
 
 ```bash
-primitive integrations list [--status draft|active|archived] [--json]
+primitive integrations list [--status active|inactive|archived] [--json]
 primitive integrations get <integration-id> [--json]
-
-# Create from TOML (preferred)
-primitive integrations create --from-file path/to/integration.toml
-
-# Create inline
-primitive integrations create \
-  --key weather-api \
-  --name "Weather API" \
-  --base-url "https://api.openweathermap.org/data/2.5" \
-  --allowed-methods "GET" \
-  --allowed-paths "/weather,/forecast" \
-  --timeout-ms 30000
-
-primitive integrations update <id> --name "..." --description "..." \
-                                   --status active --timeout-ms 60000
-
-primitive integrations delete <id>            # archive (soft)
-primitive integrations delete <id> --hard     # permanent
-primitive integrations delete <id> -y         # skip confirm
 ```
+
+### Writing integrations (TOML only)
+
+An integration is `integrations/<key>.toml`. There is no create/update/delete command — author the file and push it.
+
+```bash
+primitive config fields integration              # every key, type, required, default
+primitive config create integration weather-api  # scaffold integrations/weather-api.toml
+primitive config push --only integration/weather-api # apply just this one
+```
+
+Delete an integration by removing its file and running `primitive config push --prune`.
 
 ### Test (admin only — bypasses status check)
 
@@ -363,7 +402,7 @@ primitive integrations test <id> --method POST --body '{"foo":"bar"}'
 
 Note: `--method` defaults to `GET` regardless of the integration's `defaultMethod`. Pass `--method` explicitly when the integration only allows non-GET methods.
 
-The test endpoint runs with `allowInactive: true` and `allowMissingSecret: true`, includes a `requestPreview` (with secrets redacted), and works against `draft` integrations.
+The test endpoint is a documented diagnostic: it includes a `requestPreview` (with secrets redacted) and works against an INACTIVE integration. An `archived` one is refused.
 
 ### Logs
 
@@ -386,17 +425,69 @@ Values are AES-encrypted at rest using `APP_SECRETS_ENCRYPTION_KEY`. Max 100 sec
 
 ```bash
 primitive vars list [--app <app-id>] [--json]
-primitive vars set ACCOUNT_ID --value acct_123 --summary "Default account id"
-primitive vars delete ACCOUNT_ID
+primitive config set vars ACCOUNT_ID=acct_123  # edits vars.toml, no API call
+primitive config push --only var/ACCOUNT_ID    # applies it
 ```
 
-Values are plaintext (never encrypted, never masked). Max 100 vars per app, max 2 KB per value.
+Delete a var by removing its line from `vars.toml` and pushing. Values are plaintext (never encrypted, never masked). Max 100 vars per app, max 2 KB per value.
 
 ### Test Cases (regression suite for an integration)
 
+Test cases are authored in TOML, one file per case, and applied by `config push`.
+They live in a sidecar directory beside the integration:
+
+```toml
+# integrations/stripe.tests/basic.toml
+[test]
+name = "Basic"
+description = "GET /get returns 200"
+inputVariables = '{"method":"GET","path":"/get"}'
+# configName pins the case to a named config; leave empty for the active one.
+configName = ""
+expectedOutputPattern = ""
+expectedOutputContains = '["\"ok\":true"]'
+expectedJsonSubset = '{}'
+```
+
+`primitive config fields integration` lists every key. Fixture files for a case
+go in `integrations/stripe.tests/basic/` and upload with the same push. Clearing
+a field is blanking it (`""`, `[]`, `{}`) and pushing; deleting a case is
+removing its file and running `primitive config push --prune`.
+
+For an integration case, `inputVariables` is the request the run issues — the
+same JSON object a client passes to `integration.call`, at the top level, with
+no wrapper key. Its keys are `method`, `path`, `headers`, `query`, and the body:
+`body` (JSON), or `form` for form-urlencoded, or `bodyMode` plus
+`multipartFields` for multipart. Anything else in the object is ignored.
+
+A key the case omits falls back the same way a live call's does, per field: no
+`method` uses `defaultMethod`, no `path` calls `/` on the `baseUrl`,
+`defaultHeaders`/`staticQuery` merge into the case's headers and query,
+`bodyMode` and `multipartFields` fall back to (and, for the field mapping,
+merge with) the configured ones. There is no configured body: a case that
+authors no `body` or `form` sends none. So a case against a
+`defaultMethod = "POST"` integration can name a `path` and a `body` alone, and
+a case that authors nothing runs `defaultMethod` on `/` — which still has to
+pass `allowedPaths`.
+
+```toml
+# integrations/plaid.tests/mints-a-link-token.toml
+[test]
+name = "mints a link token"
+inputVariables = '''
+{
+  "method": "POST",
+  "path": "/link/token/create",
+  "body": { "client_name": "Acme", "products": ["transactions"] }
+}
+'''
+expectedOutputPattern = "link-production-"
+```
+
+Run and inspect them from the CLI:
+
 ```bash
 primitive integrations tests list <id>
-primitive integrations tests create <id> --name "Basic" --input '{"method":"GET","path":"/get"}'
 primitive integrations tests run <id> <test-case-id>
 primitive integrations tests run-all <id>
 primitive integrations tests run-all <id> --test-cases 01ABC,01DEF
@@ -405,53 +496,7 @@ primitive integrations tests runs <id> [--limit 20] [--group <comparison-group>]
 
 ### Sync (TOML <-> server)
 
-```bash
-primitive sync init     # create config tree + .primitive-sync.json
-primitive sync pull     # server -> local TOML
-primitive sync push [--dry-run] [--force]
-primitive sync diff
-```
-
-The sync directory auto-resolves to `.primitive/sync/<env>/<appId>/`; pass `--dir <path>` to override it. `init` creates these subdirs: `integrations/`, `webhooks/`, `cron-triggers/`, `blob-buckets/`, `prompts/`, `workflows/`, `database-types/`, `rule-sets/`, `group-type-configs/`, `collection-type-configs/`, `email-templates/`. Integration files live at `integrations/<key>.toml`.
-
-## Typical Workflow
-
-# This worked example pins a fixed sync dir (`--dir ./config`) so the file paths
-# below are concrete; omit `--dir` to use the default `.primitive/sync/<env>/<appId>/`.
-
-```bash
-# Initial setup
-primitive sync init --dir ./config
-primitive sync pull --dir ./config
-
-# Add a new integration
-cat > config/integrations/openai.toml <<'EOF'
-[integration]
-key = "open-ai"
-displayName = "OpenAI"
-status = "draft"
-
-[requestConfig]
-baseUrl = "https://api.openai.com/"
-allowedMethods = ["POST"]
-allowedPaths = ["/v1/responses", "/v1/chat/completions"]
-defaultMethod = "POST"
-
-  [requestConfig.defaultHeaders]
-  Content-Type = "application/json"
-  Authorization = "Bearer {{secrets.OPENAI_API_KEY}}"
-EOF
-
-# Push and configure
-primitive sync push --dir ./config --dry-run
-primitive sync push --dir ./config
-primitive secrets set OPENAI_API_KEY --value sk-...
-primitive integrations test <integration-id> --method POST --path /v1/responses \
-  --body '{"model":"gpt-4.1-mini","input":"hi"}'
-primitive integrations update <integration-id> --status active
-```
-
-If `sync push` reports a conflict, someone modified the server since your last `pull`. Either re-pull and merge, or `--force` to overwrite the server.
+Integration configs live at `integrations/<key>.toml`, one file per integration. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`), the `--dir` override, snapshots, pruning, and conflict handling.
 
 ## Calling from the Client SDK
 
@@ -496,8 +541,6 @@ If `sync push` reports a conflict, someone modified the server since your last `
     switch error.code {
     case .integrationNotFound:
       break // 404, also fires for status != active
-    case .integrationSecretMissing:
-      break // 409, MISSING_SECRET upstream
     case .integrationRequestInvalid:
       break // 400/413/422 (method/path/body)
     case .integrationProxyFailed:
@@ -519,7 +562,6 @@ If `sync push` reports a conflict, someone modified the server since your last `
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `INTEGRATION_INACTIVE` | 404 | `status != "active"`. |
-| `MISSING_SECRET` | 409 | A stored integration-scoped secret row is required but missing. Integrations using `{{secrets.KEY}}` app-secret templates don't trigger this. |
 | `DISALLOWED_METHOD` | 422 | Method not in `allowedMethods`. |
 | `DISALLOWED_PATH` | 422 | Path doesn't match `allowedPaths`. |
 | `REQUEST_BODY_TOO_LARGE` | 413 | Body exceeds `maxRequestBodyBytes`. |
@@ -554,13 +596,15 @@ The step pulls App Secrets and resolves `{{secrets.KEY}}` the same way the user-
 
 ## Status Lifecycle
 
+`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow — whose CLI spelling is `primitive integrations archive <id>`. Archiving is the delete lifecycle, not availability: the row is retired but kept and goes on holding its `integrationKey`, `enable` refuses it, and there is no un-archive (reclaim the key with a confirmed `primitive config push --prune` after removing the file, then re-add and push). A row created before #2803 may still store `draft`; it reads `inactive`.
+
 | Status | Callable by clients? | `primitive integrations test`? |
 |--------|----------------------|--------------------------------|
-| `draft` | No (404) | Yes |
 | `active` | Yes | Yes |
-| `archived` | No (404) | Yes |
+| `inactive` | No (404) | Yes — it is the diagnostic |
+| `archived` | No (404) | No |
 
-`primitive integrations delete <id>` (soft) sets `archived`. `--hard` permanently removes the row.
+Deleting an integration over the API or in the console **archives** it. `primitive config push --prune` — remove the TOML file, then push — hard-deletes the row permanently.
 
 ## Files on Disk (sync mode)
 
@@ -577,4 +621,4 @@ primitive secrets list                      # confirm referenced secret keys exi
 primitive vars list                         # confirm referenced var keys exist
 ```
 
-If client calls return `INTEGRATION_NOT_FOUND` despite the integration existing, check status — drafts/archived return 404.
+If client calls return `INTEGRATION_NOT_FOUND` despite the integration existing, check its status — inactive and archived both return 404. `primitive integrations enable <key>` puts it back in service.

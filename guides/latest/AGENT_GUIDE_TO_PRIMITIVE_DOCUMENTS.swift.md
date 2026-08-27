@@ -62,6 +62,19 @@ Documents must be opened before querying or modifying data within them.
 
 Documents are ready to be queried once the `.open()` call finishes. Applications should wait for all required documents to be opened and show a loading state until then, then track document-specific readiness explicitly. `open()` is idempotent — calling it on an already-open document is a no-op. Handle open failures explicitly: surface an error or redirect; don't silently continue.
 
+When an open needs server state to satisfy its `waitForLoad` — `network`, or `localIfAvailableElseNetwork` with no local copy — the call fails fast with a coded error instead of waiting on a sync that cannot happen:
+
+| Code | When |
+|---|---|
+| `DOCUMENT_UNAVAILABLE_OFFLINE` | `waitForLoad: network` while the network mode is offline |
+| `NETWORK_REQUIRES_AUTOSTART` | `waitForLoad: network` with `enableNetworkSync: false` — nothing would ever start the sync being waited for |
+| `NO_LOCAL_AND_NO_NETWORK` | `localIfAvailableElseNetwork` with no local copy and the document's sync left to the caller |
+| `CONNECTION_DISABLED` | the WebSocket is neither up nor able to come up — no token, or the state a logout / auth failure leaves behind |
+| `NETWORK_TIMEOUT` | the open waited out its availability budget (`availabilityWait`, default 30 seconds) without the sync completing — it throws rather than returning a possibly-empty document |
+
+A failed open does not leave the document registered as open — handle the error and retry the open itself.
+Thrown as `JsBaoError` with the matching `code` (`.documentUnavailableOffline`, `.networkRequiresAutostart`, `.noLocalAndNoNetwork`, `.connectionDisabled`, `.networkTimeout`) — catch `JsBaoError` and switch on `code`.
+
 Open only the documents you need to query or want real-time updates from — every open document syncs continuously. Don't open documents you don't need, and close ones you're done with (see [Closing Documents](#closing-documents)).
 
 
@@ -160,7 +173,10 @@ The generated model statics route through the process-wide default client — ca
 ```swift
   if var task = try Task.find(taskId) {
     task.completed = true
-    try task.save(in: documentId)
+    // Only `completed` is written — fields you didn't assign are left alone,
+    // so another device's concurrent edit to them survives. Assign the result
+    // back: it's the saved record, with no pending changes left to re-write.
+    task = try task.save(in: documentId)
   }
 ```
 
@@ -281,6 +297,25 @@ Grouping by a `stringset` field counts per member value (facet); a membership `g
   )
   _ = try await client.documents.open(result.documentId)
 ```
+
+### Local-only documents
+
+`documents.create({ localOnly: true })` creates a document that never reaches the server — not in the creating session, not in any later one, and not after the local copy is evicted and its metadata reloaded from the stored row. Every edit to it is dropped before it would be queued outbound, so there is nothing to mark unsynced and nothing to commit later.
+
+```swift
+  let result = try await client.documents.create(
+    options: CreateDocumentOptions(title: "Draft", localOnly: true)
+  )
+  let documentId = result.metadata?["documentId"]?.stringValue
+  if let documentId {
+    _ = try await client.documents.open(
+      documentId,
+      options: OpenDocumentOptions(waitForLoad: .local, enableNetworkSync: false)
+    )
+  }
+```
+
+Open a local-only document with `waitForLoad: .local` and `enableNetworkSync: false` — the content never reaches the wire regardless of the open options, but these are the ones that skip an unreachable network wait.
 
 ### Share a document (user / email / group)
 
@@ -436,7 +471,7 @@ final class MyAppState: PrimitiveAppState {
 
 For per-document setup beyond models, override the `onDocumentOpened(doc:documentId:)` hook — the base class opens the doc once and hands you the live `YDocument`, so don't call `openDocument(...)` again just to get one.
 
-For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. The new document is already open and writable, so write through it directly rather than reopening. If you do reopen with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake, with the fallback bounded by `availabilityWaitMs` (default 30s).
+For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. The new document is already open and writable, so write through it directly rather than reopening. If you do reopen with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake. The wait is bounded by `availabilityWait` (a `TimeInterval` in seconds, default `30`) — if the budget runs out first, `openDocument` throws `JsBaoError(.networkTimeout)` rather than returning a possibly-empty document.
 
 **Multi-doc apps (one ambient library doc + N per-item docs).** `selectDocumentAwaiting(_:)` is the *single*-selected-doc lifecycle — it closes the previously selected doc first, so using it for a per-item detail view closes your library/index doc. For one ambient doc plus transient detail docs, use `appState.openAuxiliaryDoc(_:)` from the detail view's `.task` and `appState.closeAuxiliaryDoc(_:)` from `.onDisappear`. These register the doc for sync, but they don't touch `selectedDocId` or fire `onDocumentOpened`. Once open, read the doc's records through the facade scoped to that document — the same scoped query as [Open Documents Before Querying](#1-open-documents-before-querying). The view is framework glue around `openAuxiliaryDoc` + that scoped query:
 
@@ -459,20 +494,23 @@ struct ItemDetailView: View {
 }
 ```
 
-**Watch for access loss in detail views.** When a peer revokes your access or hard-deletes a doc you have open, the server collapses both to the same wire shape: a `.documentMetadataChanged` event with `action == "deleted"` (and `metadata == nil`). Subscribe to it, filter on `action == "deleted"`, and dismiss the view. Retain the returned `EventSubscription` on a property and `[weak self]` the closure, or the handler is dropped:
+**Watch for access loss in detail views.** When a peer revokes your access or hard-deletes a doc you have open, the server collapses both to the same wire shape: a `.documentMetadataChanged` event with `action == "deleted"` (and `metadata == nil`). Subscribe to it, filter on `action == "deleted"`, and dismiss the view. Retain the returned `EventSubscription` on a property, or the handler is dropped the moment the call returns. `observeOnMainActor`'s handler already runs on the main actor, so there is no `Task { @MainActor in … }` wrapper — and a SwiftUI `View` is a struct, so capture the values you need rather than `[weak self]`:
 
 ```swift
-private var deletedSub: EventSubscription?
+@Environment(\.dismiss) private var dismiss
+@State private var deletedSub: EventSubscription?
 
 .task {
-    deletedSub = client.events.on(.documentMetadataChanged) { [weak self] (ev: DocumentMetadataChangedEvent) in
-        Task { @MainActor in
-            guard let self, ev.action == "deleted", ev.documentId == self.openDocId else { return }
-            self.dismiss()
-        }
+    let openDocId = self.openDocId
+    deletedSub = client.observeOnMainActor(DocumentMetadataChangedEvent.self) { ev in
+        guard ev.action == "deleted", ev.documentId == openDocId else { return }
+        dismiss()
     }
 }
+.onDisappear { deletedSub?.cancel() }
 ```
+
+When the handler needs the event's own timing — a debug timeline, a latency report — use the `withDelivery:` form: `client.observeOnMainActor(SomeEvent.self, withDelivery: { event, delivery in … })`. `delivery.emittedAt` is the instant the event was emitted (a `Date()` taken inside the plain handler also includes the hop onto the main actor), and `delivery.sequence` is a monotonic per-client counter — sort timelines on it, not on timestamps.
 
 ## Data Modeling Decisions
 
@@ -560,7 +598,11 @@ indexed = true
 
 `required = true` makes the emitted `init?(record:)` reject construction without that field; `indexed = true` registers a SQLite index for query-path filtering.
 
-**Codegen is wired on both build paths by the scaffold.** `swift build` / `swift test` run `JsBaoCodegenPlugin` automatically. The Xcode app path (`./run-ios.sh`, archives) compiles its source list from `.pbxproj`, so the SPM plugin never fires there — `run-ios.sh` runs the codegen tool before `xcodegen generate`, writing into `Models/Generated/`. The SPM target carries `exclude: ["Models/Generated"]` so the two producers don't collide. The footgun: editing `models.toml` and then hitting **Run in Xcode directly** compiles stale `Generated/` files with no error pointing at the cause — build through `./run-ios.sh` (which regenerates first) or run the codegen step by hand.
+**Codegen is wired on both build paths by the scaffold.** `swift build` / `swift test` run `JsBaoCodegenPlugin` automatically. The Xcode app path compiles its source list from `.pbxproj`, so the SPM plugin never fires there — the app target instead carries a **pre-build phase** ("Generate models from models.toml") running `scripts/generate-models.sh`, which writes into `Models/Generated/`. Xcode's Run button, a bare `xcodebuild` and CI therefore all compile the current schema. The phase declares `models.toml` as its input file and a stamp as its output, so an unchanged schema skips it. The SPM target carries `exclude: ["Models/Generated"]` so the two producers don't collide.
+
+The one case that still needs a hand is **adding a new model**: it emits a new file, and the Xcode project lists its sources explicitly, so `xcodegen generate` has to run before Xcode can compile it. `./run-ios.sh` does that (codegen, then regenerate); a build started from Xcode fails naming the missing file and pointing at `scripts/regenerate-project.sh`, rather than compiling an app silently missing the type. Changing an existing model needs nothing.
+
+The two build paths also carry separate package pins: `swift package update` moves the app's `Package.resolved`, while xcodebuild resolves from Xcode's own copy inside the `.xcodeproj`. Left apart, codegen runs against one revision of the client and the app compiles against another. `run-ios.sh`, `archive.sh`, and the fastlane lanes all run `scripts/sync-xcode-pins.sh` first, which copies the app's pin over Xcode's; run it by hand after `swift package update` if you build from the Xcode UI.
 
 `Models/Generated/` is **gitignored** (regenerated every build; only its `README.md` is tracked). The codegen sweep only deletes files carrying the `// Generated by swift-bao-codegen` banner, so a hand-written companion (`TodoItem+Extensions.swift`) for `Identifiable` conformance, computed helpers, camelCase aliases, or convenience inits survives every regen.
 
@@ -778,7 +820,7 @@ Dates are stored as ISO-8601 strings. Convert for comparisons:
   // Store
   if var task = try Task.find(taskId) {
     task.dueDate = now
-    try task.save(in: documentId)
+    task = try task.save(in: documentId)
 
     // Compare
     if let dueDate = task.dueDate, dueDate < now {
@@ -787,7 +829,7 @@ Dates are stored as ISO-8601 strings. Convert for comparisons:
   }
 
   // Query with date comparison
-  let overdue = try Task.query(["dueDate": ["$lt": now]])
+  let overdue = try Task.query(["dueDate": ["$lt": .string(now)]])
 ```
 
 ## Querying Data
@@ -816,7 +858,7 @@ Pass `include` in a query to batch-load related records alongside the rows, inst
 
 ### View-data binding with `BaoDataLoader`
 
-The data a view renders is a plain facade query — `TodoItem.findAll()` / `TodoItem.query(...)` (see [Read](#read-find--query--first--count)) — re-run whenever the records change, which you observe with `TodoItem.subscribe` (see [Subscribe to changes](#subscribe-to-changes)). `BaoDataLoader<[T]>` is the **SwiftUI glue** (PrimitiveApp package) that wires that re-run into a view: bind it rather than subscribing to `client.events.on(...)` directly or rolling a `@Published var items` + manual `refresh()`. The loader owns its subscription lifecycle (cancelled on deinit), debounces bursts (~50ms), runs the first load immediately, and re-runs a synchronous `load` closure on every trigger.
+The data a view renders is a plain facade query — `TodoItem.findAll()` / `TodoItem.query(...)` (see [Read](#read-find--query--first--count)) — re-run whenever the records change, which you observe with `TodoItem.subscribe` (see [Subscribe to changes](#subscribe-to-changes)). `BaoDataLoader<[T]>` is the **SwiftUI glue** (PrimitiveApp package) that wires that re-run into a view: bind it rather than subscribing to client events directly or rolling a `@Published var items` + manual `refresh()`. The loader owns its subscription lifecycle (cancelled on deinit), debounces bursts (~50ms), runs the first load immediately, and re-runs a synchronous `load` closure on every trigger.
 
 The view below is framework glue; the only Primitive calls in it are the `findAll()` query and the `TodoItem.subscribe` trigger:
 
@@ -875,6 +917,18 @@ struct TodoListView: View {
 ## Saving Data
 
 Writes go through record instances and are local-first — applied to the document store immediately and synced in the background (see [`models.toml` + codegen + the model facade](#modelstoml--codegen--the-model-facade) for the save/delete contract). `try record.save(in: documentId)` uses merge semantics: `nil` optional fields are not written, so fields you didn't set are preserved on update.
+
+**Saving an existing record writes only the fields you assigned** since you read it. Fetch–mutate–save is therefore a field-level write, and two devices editing different fields of the same record merge instead of overwriting each other:
+
+```swift
+var task = try TaskRecord.find(id)!   // read: nothing pending
+task.title = "New title"              // only `title` is marked changed
+task = try task.save(in: documentId)  // only `title` is written
+```
+
+Inserting a record the document doesn't have yet writes every field, so copying a record into another document still carries all of it. If the other document ALREADY holds that record, the save is an update — and an unmodified record has nothing to write, so it does nothing. Call `record.markAllChanged()` first when you mean to copy the whole record over it.
+
+`save(in:)` returns the record **as saved** — re-read from the document with no pending changes left, so a field another device changed while you held your copy, and any schema defaults filled in on insert, are present. Assign it back (as above) when you keep using the value, or call `record.discardChanges()` to drop pending edits without writing them. Constructing a record (`TaskRecord(id:title:)`) or decoding one from JSON marks every field it carries as changed; only a record read back through the facade starts clean.
 
 
 ## Design Patterns
@@ -1011,7 +1065,17 @@ Use these methods to confirm the server has received your writes before taking i
 
 The point-in-time checks return `false` if the client is disconnected or the check times out. The `waitFor*` polling helpers exist on both `documents.*` and the client root: `waitForWriteConfirmation` returns true on success / false on timeout, and `waitForInSync` throws on timeout.
 
-The point-in-time checks accept a `timeoutMs` (default 5s). For a cheap synchronous local read — no round-trip — use `documents.isSynced(documentId:)`.
+The point-in-time checks accept a `timeout` — a `TimeInterval` in seconds, default `5`. For a cheap synchronous local read — no round-trip — use `documents.isSynced(documentId:)`.
+
+### Connectivity vs network mode
+
+Network **mode** is user intent — `auto` by default, or pinned by `goOffline()` / `goOnline()`. **Reachability** is whether the device currently has a network path. They are separate, and the client never turns one into the other: losing connectivity in `auto` pauses the socket and suppresses reconnect, but the reported mode stays `"auto"`. When the network comes back the client reconnects on its own, still in `auto`.
+
+So test connectivity with `isOnline`, not with the mode:
+
+`client.networkStatus` carries the same `mode` / `isOnline` / `reason` triple, `NetworkModeEvent` fires on both kinds of transition, and `client.isOnline()` is the check to branch on. Drive offline UI from `isOnline`, not from `networkMode == .offline`.
+
+While the device is unreachable the client behaves as it does when offline is pinned: HTTP calls fail fast with `OFFLINE`, reads come from the local cache, and queued blob uploads wait. Nothing is lost — it resumes on reconnect.
 
 ### Updating Document Metadata
 
@@ -1033,7 +1097,7 @@ Update a document's title, thumbnail, and presentation metadata — see [Update 
 
 Delete a document (it must be closed first, or pass `forceCloseIfOpen: true`) — see the compiled call below. Root documents cannot be deleted. Deletion requires **direct `owner` permission** on the document or the app `owner` role — group-derived permission never qualifies, and `read-write` editors can delete records and content but not the document itself.
 
-The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
+The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
 
 ```swift
   // Must be closed first
@@ -1070,7 +1134,7 @@ When `sendEmail: true`, the server delivers per-recipient emails:
 - **Existing app members** receive the `document-share` template, populated with the caller-supplied `documentUrl`.
 - **Non-members (deferred grants)** receive the `document-share-deferred` template, populated with an accept URL composed from `app.baseUrl` + the new `inviteToken` (shape `${app.baseUrl}/invite/accept?inviteToken=...`).
 
-Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type with `primitive email-templates set document-share ...` or `primitive email-templates set document-share-deferred ...`.
+Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type by authoring `email-templates/document-share.toml` or `email-templates/document-share-deferred.toml` and running `primitive config push`.
 
 Repeated email-based calls are idempotent: a second `updatePermissions` call for the same email updates the existing pending `DeferredDocumentPermission` in place rather than creating a duplicate row, so the latest `permission` value wins at signup-time resolution and `client.documents.listPendingInvitations(documentId)` shows one entry per pending recipient.
 
@@ -1228,7 +1292,7 @@ Collections accept email-based members exactly like documents and groups — a d
 
 The deferred-grant flow when adding a collection member by email (`collections.addMember`) mirrors the document share path: `app.baseUrl` must be configured, `sendEmail: true` requires `collectionUrl`, and `client.invitations.delete(invitationId)` cancels every pending collection add (plus any pending document shares and group adds) attached to the invitation. See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants) for the resolution lifecycle.
 
-For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Rule Sets for Collection Management](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#rule-sets-for-collection-management) in the Users and Groups guide.
+For per-context CEL rules using `collectionType` + `contextId` (and the `hasCollectionAccess` helper), see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#collection-rule-sets) in the Users and Groups guide.
 
 `collections.addDocument`/`removeDocument` are idempotent, and the same max-wins cascade applies. The template's local app-state pattern assumes one collection per doc (`ListRef.collectionId`); for multi-membership, model a `[String]` field or query `collections.listCollectionsForDocument(documentId:)` on demand. Read collection lists with `collections.list(options:)` and members with `collections.getAccess(collectionId:)` (see [Permission / collection reads](#permission--collection-reads) below).
 
@@ -1238,12 +1302,13 @@ For per-context CEL rules using `collectionType` + `contextId` (and the `hasColl
 primitive collections create "Q1 Reports" --description "Quarterly reports"
 primitive collections create "Q1 Reports" --initial-metadata '{"settings":{"visibility":"class-only"}}'
 primitive collections list
-primitive collections docs {add|remove|list} <collection-id> [<document-id>]
+primitive collections documents {add|remove|list} <collection-id> [<document-id>]
 primitive collections share <collection-id> --group team/engineering --permission read-write
 primitive collections unshare <collection-id> --group team/engineering
+primitive collections members list <collection-id>
 primitive collections members add <collection-id> <user-id> --permission reader
 primitive collections members remove <collection-id> <user-id>
-primitive collections access <collection-id>
+primitive collections access <collection-id>   # combined groups + members view
 ```
 
 ### Building a "Members + Pending" UI
@@ -1261,10 +1326,14 @@ The permission and collection reads return the raw server rows — they do **no*
 | `me.sharedDocuments(tag:limit:cursor:)` | `SharedDocumentListResult` (`.items`, `.cursor`) — documents shared with the user |
 | `collections.list(options:)` | `PaginatedResult<CollectionInfo>` |
 | `collections.listDocuments(collectionId:options:)` | `PaginatedResult<CollectionDocumentInfo>` |
-| `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId`; resolve `email`/`name` yourself if you need them |
+| `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId` and `email`, plus `name` when the user has one (a user provisioned by email code has none — fall back to `email` for display) |
 | `collections.getAccess(collectionId:)` | `CollectionAccessInfo` — collection members and their permission levels |
 
 The "accessible documents" set is the **union** of `me.ownedDocuments` and `me.sharedDocuments`: call both and dedupe by document id (the same doc can surface in both).
+
+`me.ownedDocuments` / `ownedDocumentsPage` are **local-first by default**: when the local metadata cache already holds owned documents, the call returns those immediately and refreshes from the server in the background, so a later call is fresh. Pass `MeOwnedDocumentsOptions(waitForLoad: .network)` when a screen must show a server-fresh list (and `.local` to never touch the network). `serverTimeout` — a `TimeInterval` in seconds — bounds any server fetch, 10 by default, `0` for unbounded; a fetch that exceeds it throws `JsBaoError(code: .listTimeout)`; `.network` while offline throws `.listUnavailableOffline`. `limit` / `cursor` are ignored on a local path (the cache isn't paginated), so `ownedDocumentsPage` is excluded from the local-first short-circuit — under the default `waitForLoad` the paged form always fetches from the server, and only the cache-only modes (`localOnly`, `refreshFromServer: false`, `.local`) hand it a local page with `cursor == nil`.
+
+`documents.listGroupPermissions(documentId:)` hides the platform's internal `_`-prefixed groups (the `_col-*` groups behind collection sharing). Pass `includeSystem: true` to see them — useful when debugging why a user has access that no visible group grants.
 
 For **writes**, use the typed params factories — `documents.updatePermissions(documentId:params: .email("…", permission: "read-write", sendEmail: false, documentUrl: …))` (or `.user(…)` / `.batch([…])`) and `collections.addMember(collectionId:params: .email("…", permission: .readWrite))` (or `.user(…)`). To cancel a pending email invite on a document, call `documents.removePermission(documentId:, .email("…"))`; alternatively, read the row's `deferredId` via `client.invitations.listDeferredGrants(...)` and call `client.invitations.revokeDeferredGrant(deferredId:type:)` (`.document` for a per-doc invite, `.group` for a collection one). A group's pending entries need no such detour: each `PendingGroupInvitationEntry` from `groups.listPendingInvitations(groupType:groupId:)` carries its `deferredId` directly — revoke with `type: .group`.
 
@@ -1286,7 +1355,7 @@ Pick the call that answers the question you're actually asking:
 
 `options:` takes a `PaginationOptions(limit:cursor:)`; the paginated reads return `PaginatedResult` (`.data`, `.nextCursor`, `.hasMore`).
 
-The permission / collection reads — `documents.getPermissions(_:)`, `collections.getAccess(_:)`, `collections.listPendingInvitations(_:)` — return the raw server rows ([Permission / collection reads](#permission--collection-reads) above). Permission rows carry `userId`, not `email`/`name`, so a UI that shows who has access resolves those fields itself.
+The permission / collection reads — `documents.getPermissions(_:)`, `collections.getAccess(_:)`, `collections.listPendingInvitations(_:)` — return the raw server rows ([Permission / collection reads](#permission--collection-reads) above). A document permission row carries `email` (and `name` when the user has one) alongside `userId`; a collection member row carries only `userId`, so a UI that shows who has access to a collection resolves the email and name itself.
 
 **Anti-patterns:**
 
@@ -1336,4 +1405,82 @@ primitive documents import <path> --overwrite --dry-run   # Preview without chan
 ```
 
 Export creates a directory per document containing `metadata.json`, `document.yjs` (Yjs state), `permissions.json` (for reference), and `blobs/` (attachments). Permissions are **not** restored on import — the importing admin becomes the new owner and manages sharing in the target app. Document IDs are preserved across import. User-scoped aliases can be restored with `--aliases overwrite` or kept as-is with `--aliases skip`.
+
+## Admin CLI: Inspecting documents
+
+The `primitive` CLI also has commands for inspecting and managing documents from an operator or debugging session. Like export/import, these are admin operations, not used in application code. `--json` is available on every command for scripting.
+
+```bash
+# List a user's documents (documentId, title, permission, grantedAt).
+# --user-id is required — there is no app-wide document enumeration.
+primitive documents list --user-id <user-id>
+
+# Show one document's metadata and the caller's access (permission, access source, link access)
+primitive documents get <document-id>
+
+# List the user-level permissions on a document (userId, email, permission, grantedAt)
+primitive documents permissions list <document-id>
+
+# Discover the models in a document and describe one model's fields and indexes
+primitive documents records models <document-id>
+primitive documents records describe <document-id> <model-name>
+
+# Query, get, count, and aggregate records in a model (--filter is JSON, or
+# --filter-file <path> for a JSON/TOML file; --limit caps at 100). `get` on a
+# missing id prints null at exit 0 — a miss is not an error.
+primitive documents records query <document-id> <model-name> --filter '{"status":"open"}' --limit 50
+primitive documents records get <document-id> <model-name> <record-id>
+primitive documents records count <document-id> <model-name>
+primitive documents records aggregate <document-id> <model-name> --op sum --field qty --group-by symbol
+
+# Dump every record grouped by model, and read summary statistics
+primitive documents dump <document-id>
+primitive documents stats <document-id>
+```
+
+`records models` and `records describe` read the document's discovered schema — the models a client has written into the document, with each field's type and whether it is indexed, unique, or required. A newly created document with no records yet reports no models.
+
+`records query` returns a page of records as `{ items, hasMore, nextCursor? }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records get` returns one record by id, or `null` at exit 0 when there is no such record; `records count` returns how many records match a `--filter`; `records aggregate` runs one `count`/`sum`/`avg`/`min`/`max` over the matching set, with `--field` required for all but `count` and `--group-by` (repeatable) for per-group rows. Under `--json` it prints the `{ result }` envelope: ungrouped, `result` is an object keyed by the operation (`{"result":{"count":2}}`, `{"result":{"sum_qty":100}}`); grouped, `result` nests by group value with a single operation flattened to a scalar — the same shape `databases records aggregate` returns. `--group-by` takes plain field names only: StringSet facet grouping is a database-only capability and is rejected here with a 400, as are the `sort` and `limit` aggregate options the database endpoint accepts. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. It is always JSON on stdout with nothing else mixed in, so `primitive documents dump <doc> | jq .` parses. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
+
+The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
+
+```bash
+# Create a document — prints the minted document id (add --json for the full response)
+primitive documents create "Quarterly Report"
+primitive documents create "Quarterly Report" --owner user@example.com
+
+# Create or replace a record (--id optional — a unique id is generated when omitted;
+# --upsert-on <field> updates the record whose field value matches instead)
+primitive documents records save <document-id> <model-name> --data '{"name":"gear","qty":5}'
+
+# Merge fields into an existing record
+primitive documents records patch <document-id> <model-name> <record-id> --data '{"qty":6}'
+
+# Delete a record (prompts unless -y; deleting a missing record is a no-op)
+primitive documents records delete <document-id> <model-name> <record-id> -y
+
+# Apply an ordered multi-model operations blob atomically
+primitive documents records bulk <document-id> --data-file ops.json -y
+
+# Delete the whole document — records, Yjs update history, blobs, aliases, permissions
+primitive documents delete <document-id> -y
+```
+
+`records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "data", "precondition"? }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. `data` carries the record fields — the same key `records save` / `records patch` take — and is required and non-empty on `create` and `patch`; `delete` takes none. Any other key in an operation is rejected with a 400 naming the operation index, so a mis-keyed payload fails loudly instead of writing an empty record. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
+
+`documents create` goes through the same `POST /documents` endpoint every client uses. Ownership follows the token: an app-user token — member, admin, or owner — always creates the document owned by the caller (`--owner` is ignored for those tokens); a super-admin or assigned-console-admin token acts through an admin shadow app user, which owns the document unless `--owner` names another user. `--owner` takes a user id or an email (resolved before anything is created); a user not in the app fails the command without creating a document.
+
+`documents delete` is the document-level verb, not a record one: the server runs the same cascade the client SDK's `documents.delete()` triggers — Yjs state and update history, blob records and objects, aliases, user and group permissions, invitations, and collection memberships. It prompts unless `-y` is passed and refuses a user's root document. Deletion is authorized by the server: the document's owner, the app owner, and super-admin or assigned-console-admin tokens delete directly; everyone else — including app-role admins — can delete only when a containing collection's `document.delete` rule allows it. Refusals are surfaced verbatim at exit 1.
+
+Grant and revoke a user's access to a document. `grant` takes either `--user-id` or `--email` plus a `--permission` level of `reader` or `read-write`; re-granting for the same user updates the level in place. `revoke` targets a user by id argument or `--email`, and prompts for confirmation unless `-y` is passed.
+
+```bash
+# Grant a user reader (or read-write) access
+primitive documents permissions grant <document-id> --user-id <user-id> --permission reader
+primitive documents permissions grant <document-id> --email user@example.com --permission read-write
+
+# Revoke a user's access (by id argument or --email)
+primitive documents permissions revoke <document-id> <user-id>
+primitive documents permissions revoke <document-id> --email user@example.com -y
+```
 

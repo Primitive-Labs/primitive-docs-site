@@ -120,7 +120,7 @@ Whenever a page reads three or more independent collections from the same databa
 
 ### Gotchas
 
-- Pipeline steps need an explicit `filter` field, even if empty (`"filter": {}`). Omitting it fails `primitive sync push` with a 400 (`query step requires a "filter" field`) attributed to that operation.
+- Pipeline steps need an explicit `filter` field, even if empty (`"filter": {}`). Omitting it fails `primitive config push` with a 400 (`query step requires a "filter" field`) attributed to that operation.
 - Each step's `limit` matters — pipelines don't paginate. Per-step `limit` caps at 1000, a pipeline allows at most 10 steps, and step types are `query`/`count`/`aggregate` only. Pick limits that comfortably cover real data without blowing past the reasonable size of a single response.
 - Pipelines only span one database. If the page also needs data from a *different* database, that's a second call (e.g. a per-user portfolio DB plus a shared securities-ref DB).
 

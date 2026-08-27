@@ -90,7 +90,7 @@ Use when each workspace is a sharing unit and every member of that workspace nee
 ### Database — registered operation with CEL access
 
 ```toml
-# config/database-types/project.toml
+# config/database-type-configs/project.toml
 [[operations]]
 name = "listMyTasks"
 type = "query"
@@ -144,7 +144,7 @@ Both fire server-side before the write reaches storage. Clients cannot bypass th
 
 ### Database — real-time subscription
 
-Subscriptions are declared on the type config and apply to every database of that type. Push them with `primitive sync push`.
+Subscriptions are declared on the type config and apply to every database of that type. Push them with `primitive config push`.
 
 ```toml
 [[subscriptions]]
@@ -160,14 +160,15 @@ Subscribe from the client and pair it with an operation call for the initial sta
 
 ```swift
   let initial = try await client.databases.executeOperation(databaseId: dbId, name: "listMyTickets")
-  let unsub = try client.databases.subscribe(
+  let subscription = try client.databases.subscribe(
     databaseId: dbId,
-    subscriptionKey: "my-open-tickets",
-    options: DatabaseSubscribeOptions(onChange: { event in
-      if event.isOrigin { return } // this tab wrote it
-      applyChanges(event.changes)
-    })
-  )
+    subscriptionKey: "my-open-tickets"
+  ) { event in
+    if event.isOrigin { return } // this tab wrote it
+    applyChanges(event.changes)
+  }
+  // Hold the subscription for as long as you want changes — releasing it
+  // unsubscribes.
 ```
 
 Subscriptions deliver deltas only — always pair with an operation call for the initial state, and use semantically equivalent filters. See the Databases guide for the full frame shape (`originConnectionId`, `originUserId`, `isOrigin`, `isOriginUser`, `changeType`).

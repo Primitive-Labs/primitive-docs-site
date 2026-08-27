@@ -1,9 +1,10 @@
 # Agent Guide to Primitive Locks
 
-A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a `ttlMs` duration; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
+A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
 
 ## Client SDK Reference
 
+{{#lang ts}}
 | Call | Returns | Notes |
 |---|---|---|
 | `client.locks.acquire(key, { ttlMs, timeoutMs })` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `LockTimeoutError` when `timeoutMs` elapses first. |
@@ -14,48 +15,46 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 | `client.locks.list()` | `{ locks: LockListEntry[] }` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
 
 `LockHandle`: `{ key, handleId, leaseExpiresAt }`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttlMs` is required on every acquire and is capped at 24h server-side.
+{{/lang}}
+{{#lang swift}}
+| Call | Returns | Notes |
+|---|---|---|
+| `client.locks.acquire(key:ttl:timeout:)` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `JsBaoError` with `code == .lockTimeout` when `timeout` elapses first. |
+| `client.locks.tryAcquire(key:ttl:)` | `LockHandle?` | Single non-blocking attempt; `nil` when the key is held by another caller. |
+| `client.locks.release(_ handle:)` | `LockReleaseResult` | `released`, plus `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
+| `client.locks.renew(_ handle:ttl:)` | `LockRenewResult` | `renewed`, `leaseExpiresAt`, and `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
+| `client.locks.status(key:)` | `LockStatus` | `held`, plus `heldBy`, `holderKind`, `holderRunId`, `acquiredAt`, `leaseExpiresAt` while held. Reports `held == false` once the lease has expired. |
+| `client.locks.list()` | `LockListResult` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
+
+`LockHandle`: `key`, `handleId`, `leaseExpiresAt`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttl` and `timeout` are `TimeInterval`s in **seconds**. `ttl` is required on every acquire and is capped at 24h server-side.
+{{/lang}}
 
 ### Acquire and release
 
-`acquire` blocks; `timeoutMs` bounds the wait, `ttlMs` sizes the lease. Release in a `finally`:
+`acquire` blocks; the acquire timeout bounds the wait and the TTL sizes the lease. Always release, including on a thrown step:
 
-```typescript
-import { LockTimeoutError } from "js-bao-wss-client";
-
-const handle = await client.locks
-  .acquire(`portfolio-import:${userId}`, { ttlMs: 60_000, timeoutMs: 10_000 })
-  .catch((err) => {
-    if (err instanceof LockTimeoutError) return null; // already running
-    throw err;
-  });
-if (!handle) return; // couldn't get the key within timeoutMs
-
-try {
-  // ... exclusive work ...
-} finally {
-  await client.locks.release(handle);
-}
-```
+{{ example: locks/acquire }}
 
 ### Try without waiting
 
-```typescript
-const handle = await client.locks.tryAcquire(`refresh:${userId}`, { ttlMs: 30_000 });
-if (!handle) return; // someone else holds it
-try {
-  // ... exclusive work ...
-} finally {
-  await client.locks.release(handle);
-}
-```
+{{ example: locks/try-acquire }}
 
-### LockTimeoutError
+### Inspecting a key
 
-Thrown only by the blocking `acquire()` when it reaches `timeoutMs` without winning the key. `code: "LOCK_TIMEOUT"`; carries `key` and `timeoutMs`. Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `null`.
+{{ example: locks/status }}
+
+### The acquire timeout
+
+{{#lang ts}}
+`LockTimeoutError` is thrown only by the blocking `acquire()` when it reaches `timeoutMs` without winning the key. `code: "LOCK_TIMEOUT"`; carries `key` and `timeoutMs`. Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `null`.
+{{/lang}}
+{{#lang swift}}
+`JsBaoError` with `code == .lockTimeout` is thrown only by the blocking `acquire(key:ttl:timeout:)` when it reaches `timeout` without winning the key. Its `details` carry `key` and `timeoutMs` (the elapsed wait in milliseconds, as the server reports it). Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `nil`.
+{{/lang}}
 
 ## Sizing the Lease
 
-**The lease does not renew itself.** Size `ttlMs` to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous `ttlMs` or call `renew(handle, { ttlMs })` before the current lease expires. `renew` returning `{ renewed: false, reason: "lease_lost" }` means the lease already lapsed and the key changed hands — stop and re-acquire.
+**The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
 
 ## CLI
 
@@ -108,7 +107,7 @@ The lease-sizing rule applies to the acquire/release span exactly as it does on 
 
 ## Run-Scoped Declarative Lock
 
-A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — or `"fail"` — fail fast). Declare it as a `[workflow.lock]` block; only `key` is required:
+A workflow can hold a lock for its **entire run** — acquired before the first step and released on both the success and failure branches — so two runs targeting the same key are serialized end to end with no explicit steps. Config: `key` (templated against the run's `input`/`user`/`meta`), `ttlMs` (default 5 minutes, capped at 24h), `timeoutMs` (default 30s), `onContention` (`"block"` — wait then fail — `"fail"` — fail fast — or `"ignore"` — do not run and do not fail). Declare it as a `[workflow.lock]` block; only `key` is required:
 
 ```toml
 [workflow.lock]
@@ -118,12 +117,32 @@ timeoutMs = 30000
 onContention = "fail"
 ```
 
-The block is TOML-owned config that round-trips through `primitive sync pull`/`push`; removing it clears the lock.
+The block is TOML-owned config that round-trips through `primitive config pull`/`push`; removing it clears the lock.
+
+**What the losing run does** is `onContention`'s whole job:
+
+| Value | The losing run |
+|---|---|
+| `block` (default) | Waits up to `timeoutMs`, then fails with `errorCode: "LOCK_TIMEOUT"`. |
+| `fail` | Fails immediately with `errorCode: "LOCK_CONTENTION"`. |
+| `ignore` | Does not run and does not fail: it settles `status: "skipped"` with `skipReason: "LOCK_CONTENTION"`, carries no error, and emits no error events. |
+
+Pick `fail` when two concurrent runs must never happen and you want the alert. Pick `ignore` when losing the race is expected — a client double-tap, a nightly job that overlaps itself — so it stops reading as a crash in error analytics. An elided run is still stored and listed: `primitive workflows runs list <workflow-id> --status skipped` is the contention-volume view.
+
+Branch on the structured field, never on message text: `errorCode` is on every surface that carries `errorMessage` (the `run-sync` envelope, the run status endpoint, `listRuns`, the `workflowStatus` event) and `skipReason` sits next to `status`. Both are written by the platform from a closed set; an app cannot set or spoof either.
+
+**`ignore` requires `js-bao-wss-client` >= 2.1.0** (or the Swift client at or after the release that ships it). `skipped` is a new value on an existing status enum, so an older client's `waitFor` does not treat it as terminal and waits out its own timeout (15 minutes by default) instead of returning. Upgrade the client before switching a workflow to `ignore`.
+
+Inside a nested `workflow.call`, an elided child is a value rather than an error: the step reads `{ output: null, skipped: true, skipReason: "LOCK_CONTENTION", ok: false }`, the parent run continues, and a downstream step listing that step in `skipWhenSkipped` skips in turn. The child call is also recorded as its own run of the child workflow — an elided one lands with `status: "skipped"` and the calling run in `meta.parentRunId`, so `runs list <child-key> --status skipped` sees contention through `workflow.call` too.
 
 **Size `ttlMs` to cover the worst-case duration of the whole run.** The run holds the lease for its full lifetime with no periodic renewal; ownership is re-verified only when the durable engine replays. A run that executes continuously longer than `ttlMs` — many back-to-back compute or LLM steps with no durable pause to force a replay — can let its lease lapse while still running, at which point a second run can take the key over and both critical sections run concurrently. This is a deliberate tradeoff (the lease, not a heartbeat, is the safety bound), so the lease must be sized generously enough that a run never outlives it.
 
-A run-scoped lock is honored **only on the durable execution path**. A `syncCallable` workflow cannot declare one (the acquire-around-run lifecycle does not run under run-sync, so the lock would be silently skipped while the run reported success), and a `workflow.call` into a lock-declaring workflow fails fast for the same reason (its child runs under run-sync). The server rejects the `syncCallable` + lock combination at save time. Honoring declarative locks under run-sync / `workflow.call` is tracked in [#1883](https://github.com/Primitive-Labs/js-bao-wss/issues/1883).
+A run-scoped lock is honored on **every** execution path: the durable path, `syncCallable` run-sync, and a `workflow.call` into a lock-declaring workflow (each acquires before the first step and releases on both the success and failure branches). A `syncCallable` workflow may therefore declare a `lock:`.
+
+- **Cross-path serialization.** All paths share one app-scoped lock namespace, so a durable `start()` run and a `run-sync` run that declare the same key block each other — the intended end-to-end serialization.
+- **Nested `workflow.call` re-entrancy.** A child that declares a key an ancestor in the same call chain already holds re-enters it: the child runs its body without re-acquiring and without releasing (the ancestor owns the lifecycle), so a chain never deadlocks on a lock it already holds.
+- **Concurrent same-run siblings are not mutually excluded.** A `forEach { workflow.call }` running children in-process (concurrency > 1) that each declare the *same fresh* key share one run and re-enter without acquiring — a run does not serialize against itself. **The imperative `lock.*` steps are not an escape hatch for this.** A `workflow.call` child inherits its parent's run identity, and every workflow-held lock — declarative or imperative — is owned by that identity, so two `lock.acquire` steps on one key inside a single run both return `acquired: true` with the same handle. No lock serializes a run against itself. To serialize concurrent branches, set the `forEach` step's `concurrency = 1`; to let them run concurrently without contending, give each branch its own key (template the key on the iteration item).
 
 ## Rate Limiting
 
-Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within `timeoutMs` and raises `LockTimeoutError` if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.
+Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within the acquire timeout and raises the acquire-timeout error if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.

@@ -11,7 +11,6 @@ This guide is the source of truth for what's actually in `src/workflows/`. Examp
 key = "my-workflow"               # required, unique per app
 name = "My Workflow"              # required
 description = "..."               # optional
-status = "draft"                  # draft | active | archived
 accessRule = "hasRole('admin')"  # optional CEL
 runAs = "caller"                  # caller (default) | system — see Execution identity
 capabilities = ["membership"]    # system-only opt-in grants
@@ -40,12 +39,16 @@ saveAs = "output"
 greeting = "Hello {{ input.name }}"
 ```
 
-Schema form rules: the sub-table headers must come after the scalar `[workflow]` keys (a sub-table header ends the parent table). `sync pull` always writes schemas as native tables regardless of the form the file had before; a JSON-encoded string (`inputSchema = "{\"type\":\"object\"}"`) is accepted on push, and pull only emits one when the schema contains a `null` TOML can't carry (logged with the workflow and field name). An absent schema omits the key entirely; an empty schema is an empty table. `primitive sync migrate-toml` rewrites legacy JSON-string schemas in local files to native form.
+Schema form rules: the sub-table headers must come after the scalar `[workflow]` keys (a sub-table header ends the parent table). `config pull` always writes schemas as native tables regardless of the form the file had before; a JSON-encoded string (`inputSchema = "{\"type\":\"object\"}"`) is accepted on push, and pull only emits one when the schema contains a `null` TOML can't carry (logged with the workflow and field name). An absent schema omits the key entirely; an empty schema is an empty table. `primitive config migrate-toml` rewrites legacy JSON-string schemas in local files to native form.
 
 A schema may also be a discriminated union: a top-level `oneOf` whose members are all `type = "object"` and share one property declared as a distinct single-literal `enum` — the server validates a value by branch-selecting on that property and checking only the matched member, and `oneOf` must be the schema's only top-level constraint (put shared fields inside each member).
 
 Workflow-level fields the engine actually reads:
-`perUserMaxRunning`, `perUserMaxQueued`, `perAppMaxRunning` (default 25), `perAppMaxQueued` (default 10000), `queueTtlSeconds` (default 43200), `dequeueOrder`, `accessRule`, `runAs` (default `caller` — see "Execution identity" below), `capabilities` (system-only grants), `inputSchema`, `outputSchema`, `requiresClientApply` (default `true` — see "Client apply" below), `syncCallable` (default `false` — see "Synchronous invocation" below). `sync push` forwards every one of these — `name`, `description`, `status`, `accessRule`, `runAs`, queue settings, schemas, `requiresClientApply`, step list — on both a fresh create and a push to an existing workflow, with two exceptions that need a direct CLI update instead: `syncCallable` on an existing workflow (the server re-validates it against the currently-active steps, so `sync push` omits it there — use `primitive workflows update --sync-callable true` after the new steps are live) and `capabilities` on an existing workflow (`sync push` persists `capabilities` on create only — grant or revoke them on an existing workflow with `primitive workflows update --capabilities <list>`, comma-separated, `""` to revoke all).
+`perUserMaxRunning`, `perUserMaxQueued`, `perAppMaxRunning` (default 25), `perAppMaxQueued` (default 10000), `queueTtlSeconds` (default 43200), `dequeueOrder`, `accessRule`, `runAs` (default `caller` — see "Execution identity" below), `capabilities` (system-only grants), `inputSchema`, `outputSchema`, `requiresClientApply` (default `true` — see "Client apply" below), `syncCallable` (default `false` — see "Synchronous invocation" below). `config push` forwards every one of these — `name`, `description`, `status`, `accessRule`, `runAs`, queue settings, schemas, `requiresClientApply`, `syncCallable`, `capabilities`, step list — on both a fresh create and a push to an existing workflow. The file is the whole picture: what it declares is what the workflow has after the push, and an empty `capabilities` array revokes every grant.
+
+**What it does not declare, it removes.** A push to an existing workflow sends every `[workflow]` field, so deleting a line converges the server rather than leaving the old value live: `description`, `accessRule`, `runAs`, `capabilities`, `inputSchema`, `outputSchema`, `[workflow.lock]` and `syncCallable` are **cleared**, and the five queue limits, `dequeueOrder` and `requiresClientApply` are **reset to their defaults** (4, 100, 25, 10000, 43200, `fifo`, `true`). `status` is on neither list: availability is server-owned (#2803), so a push never sends it and a file that still carries the key fails the push. `name` is the exception — it is required, so a `[workflow]` table without a non-empty `name` fails the push locally, naming the file. Pull before editing a workflow you did not author locally; a workflow edited in web-admin since your last sync is reported as a push conflict (a modified-timestamp check, overridable with `--force`) rather than silently overwritten. That check rides the update request, so it covers the files a push sends — a workflow unchanged since your last sync is skipped without a request, and `primitive config diff` is what shows its drift.
+
+An unrecognized key in the `[workflow]` table — or an unrecognized top-level table beside it (a workflow file carries `[workflow]`, `[[steps]]`, `[[configs]]`, `[metadata]`, `secrets`, `vars`, `[expr.cel]` and `include`, and nothing else) — is an error, not a shrug: `config push` names the file and the offending key or table and applies nothing, so a typo fails locally instead of being silently dropped. The mirror case is a CLI older than the server — `config pull` names every `[workflow]` key the server returned that this CLI version does not know and leaves it out of the file, rather than writing a key the next push would reject. Nothing is dropped without a message, and the round trip stays safe: push only sends what it knows, so the server keeps its stored values for the rest.
 
 ### Per-step common fields
 
@@ -61,13 +64,11 @@ All steps support these in addition to their own:
 | `saveAs` | Also store output under `outputs[saveAs]` |
 | `forEach` | Iterate over a list expression (path to array, or to `{items: [...]}`), or a `{ zip, as }` table for parallel-array iteration |
 | `as` | Loop variable name (default exposes `selected`) |
-| `maxItems` | forEach cap (default 200) |
+| `maxItems` | forEach cap (default 500 — clears a provider's native page size; raise it per step) |
 | `concurrency` | Parallel forEach lanes (integer 1-100; default 1 = sequential). Results preserve insertion order. |
 | `successWhen` | CEL predicate evaluated per forEach iteration to classify the result as functionally succeeded vs empty (see `forEach` below) |
 | `continueOnError` | Capture errors as `{ error, errorDetails, ok: false, errored: true }` instead of failing the workflow |
 | `skipWhenSkipped` | Array of earlier step ids. Before this step's own `runIf` is evaluated, skip this step (with the same `{ ok: false, skipped: true }` stub) if any listed upstream was skipped. Transitive; reacts only to `skipped: true`, not `errored: true`. Unknown/forward ids are tolerated at run time and warned at save time. |
-| `strict` | Throw if any template expression in this step is unresolved |
-| `strictParams` | Array of top-level param names to treat as strict-on-missing while others stay null-tolerant (a resolved `null` is still tolerated). `strict = true` covers everything and wins when both are set |
 
 ## Data flow
 
@@ -75,7 +76,7 @@ A run threads one JSON context through every step:
 
 1. **Input**: one JSON object per run — the `start()`/`runSync()` input, the webhook's mapped payload, or the cron trigger's configured input. Validated against `inputSchema` when declared. Top-level scalar properties are coerced to the declared type before the strict check where it's safe: number→`string` via `String()`, numeric string→`number`/`integer` via `Number()` (rejects `""`/NaN), number→`integer` only when integral, `"true"`/`"false"` (case-insensitive)→`boolean`. A non-coercible value (e.g. `"abc"`→number) fails the run with a clear type error. Per-property `coerce: false` opts out; unions/enums/null/nested are not coerced. Applies at every input site (durable run, `start`, `run-sync`, admin preview/run, and `workflow.call` child input), which makes explicit `| string`/`| number` filters at typed call sites optional no-ops.
 2. **Step config is templated at execution time**: steps have no implicit input argument — `{{ ... }}` expressions in config strings resolve against the run context (`input`, `steps.<id>`, `outputs.<saveAs>`, `secrets`, `meta`, forEach vars) just before the step runs (see [Templating](#templating)).
-3. **Output recording**: each step's JSON result is stored as `steps[id]`; `saveAs = "name"` also registers it as `outputs.name` — a stable alias that survives step-id renames. The engine stamps the uniform verdict (`ok`, plus `skipped`/`errored`) on every object entry; array and primitive results pass through unstamped.
+3. **Output recording**: each step's JSON result is stored as `steps[id]`; `saveAs = "name"` also registers it as `outputs.name` — a stable alias that survives step-id renames. The engine stamps the uniform verdict (`ok`, the execution `state`, its `succeeded`/`failed`/`skipped` booleans, plus `errored` on a captured failure) on every object entry; array and primitive results pass through unstamped.
 4. **Final result**: `outputs.output` if any step used `saveAs = "output"`, otherwise the full `outputs` map (see [Output contract](#output-contract)). Every step's input and output stays on the run record.
 
 ## Step types
@@ -212,12 +213,58 @@ promptKey = "summarizer"      # required, must be active
 saveAs = "summary"
 # configId = "..."             # optional, override active config
 # modelOverride = "gpt-4o"     # optional
+# expect = "text"              # optional, and the default — content is the model's text
 
 [steps.variables]
 text = "{{ input.content }}"
 ```
 
-Output: result from the prompt config's provider — typically `{ content, role, metrics }`.
+Output: `{ content, metrics, promptKey, configName, model, renderedSystemPrompt, renderedUserPrompt }`.
+
+**`expect` types `content` — and nothing else does.** The step declares what it expects back; the prompt config's `outputFormat` governs only the provider request and the HTTP execute response, so activating a different config never retypes what downstream steps receive:
+
+| `expect` | `content` |
+|---|---|
+| omitted or `"text"` | The model's output text, exactly as the provider returned it — never auto-parsed (even when it is valid JSON) and never fence-stripped (even when the active config sets `outputFormat = "json"`). |
+| `"json"` | The parsed JSON value — object, array or primitive. The step strips markdown code fences itself, then parses. Unparseable output **fails the step** with a non-retryable error naming the prompt key and config. |
+
+`expect` must be a literal `"json"` or `"text"` — it is a static control field, never templated; any other value is rejected when you save the workflow.
+
+```toml
+[[steps]]
+id = "sentiment"
+kind = "prompt.execute"
+promptKey = "sentiment-extractor"   # a prompt whose config constrains the model to JSON
+expect = "json"                     # content is the parsed object
+saveAs = "sentiment"
+
+[steps.variables]
+text = "{{ input.content }}"
+
+[[steps]]
+id = "record"
+kind = "database.mutate"
+databaseId = "{{ input.databaseId }}"
+operationName = "saveSentiment"
+
+[steps.params]
+mood = "{{ steps.sentiment.content.mood }}"
+score = "{{ steps.sentiment.content.score }}"
+```
+
+Pair `expect = "json"` with a config that actually constrains the provider — that is what makes the parse reliable, and the constraint is provider-specific:
+
+- **openrouter**: `outputFormat = "json"` sends `response_format: { type: "json_object" }` (provider JSON mode).
+- **gemini**: `outputFormat = "json"` only normalizes the response (fence stripping on the HTTP execute path); the request-side constraint comes from the config's `outputSchema`, which is the gemini-only structured-output field (see the prompts guide).
+
+Either way the step parses what it gets (it strips fences itself), so an unconstrained config is not a syntax error — it is just a model free to answer with prose, which then fails the step.
+
+Two failure modes to know:
+
+- **Declared json, unparseable output** → the prompt step fails non-retryably (a retry would just re-bill another arbitrary generation). It never silently degrades to a string.
+- **Traversing a text-typed `content`** → `{{ steps.summarize.content.title }}` against a text step is an unresolved reference, so it **fails the step that references it** (strict templating). Either declare `expect = "json"` on the prompt step, or rescue the reference: `{{ steps.summarize.content.title | default: "" }}`.
+
+Migrating a workflow that relied on the old behavior (the step used to guess by trying `JSON.parse`): add `expect = "json"` to the prompt step. Note the step output has **no `raw` field** — the completion is stored exactly once, in `content`.
 
 ### `integration.call`
 
@@ -248,6 +295,8 @@ Optional: `attachments`, `multipartFields` (for `bodyMode = "multipart"`).
 `[steps.request.form]` sends an `application/x-www-form-urlencoded` body — a table of `{{ }}`-templated key/value pairs the platform URL-encodes (null/undefined/empty values omitted; array values repeat the key; the platform sets `Content-Type: application/x-www-form-urlencoded` unless a header already sets it). It's mutually exclusive with `body` and with `bodyMode = "raw"|"multipart"`; combining them is rejected at push time by the TOML validator and at runtime with `REQUEST_BODY_CONFLICT` (400). (This is a workflow-step surface only — the typed client `integrations.call` request has no `form` field.)
 
 Integration `defaultHeaders` and `staticQuery` resolve `{{secrets.KEY}}` from app secrets — workflow steps cannot put secrets into `request.headers` directly without exposing them in step output snapshots. Put secrets in the integration config.
+
+The integration's own `accessRule` gates this step (the `prompt.execute` step is gated the same way by the prompt's `accessRule`). `fromWorkflow()` is true here and false for a direct client call, so `accessRule = "fromWorkflow()"` (or `fromWorkflow('<this-workflow-key>')`) is the usual rule for a workflow-only integration. A `runAs: "system"` run binds no user, so a `user.*` or `isMemberOf(...)` rule is false for it and there is no admin bypass. An integration with **no** stored rule refuses the step in both run modes — the step fails non-retryably with `Integration access denied`. See the integrations guide's caller-access section.
 
 ### `database.query` / `mutate` / `count` / `aggregate` / `pipeline` / `applyToQuery`
 
@@ -293,7 +342,40 @@ now = "2026-04-27T00:00:00Z"
 # default cap (1000) fails the step instead of truncating.
 ```
 
-Workflows have no *database* batch-write step kind. To apply a set of database updates, run `forEach` over a `database.mutate` step (see `forEach` below), or use `database.applyToQuery` for query-driven updates. (Document writes are different: see `document.save`/`patch`/`delete` batch mode and `document.bulkUpdate` below.)
+To update every record matching a server-side filter without enumerating items, use `database.applyToQuery`; to write a *known set* of records, use `database.batch` below.
+
+### `database.batch` / `database.batchForUser`
+
+Write a set of records through ONE registered mutation operation, in one step and one operation call — the shape a paginated ingest needs (a page of an external sync landed as a single step run, instead of one call and one step-run row per record).
+
+```toml
+[[steps]]
+id = "fetch"
+kind = "integration.call"
+integrationKey = "plaid"
+
+[steps.request]
+method = "POST"
+path = "/transactions/sync"
+
+[[steps]]
+id = "land-page"
+kind = "database.batch"
+databaseId = "{{ input.dbId }}"
+operationName = "upsertTransaction"       # must name a MUTATION operation
+batch = "{{ steps.fetch.data.added }}"    # array of objects; each item = one call's params
+# Output: { importedOps, failedOps, results: [{ index, success, ids, error? }] }
+```
+
+- `batch` must be an **array of objects** after templating; each item is one invocation's params, passed through untouched (there is no step-level `params` to merge). One operation call, one database round trip and **one step-run row** regardless of size. Cap: 100 000 items — but batch per external *page*, not per whole dataset: `results` grows with N and rides in the run state.
+- `importedOps` / `failedOps` count emitted **ops**, not items — a multi-step mutation definition emits several ops per item, so the counts can exceed `results.length`. They are deliberately not named `imported`/`failed`: the engine reserves `failed` (with `state`/`succeeded`/`skipped`) on every step entry and overwrites it with the boolean verdict.
+- `results` is **item-level and positional** — exactly one entry per `batch` item, in order. An item whose definition emitted no op at all (e.g. a patch step skipped because its id resolved empty) reports `success: false`; a skipped write is never reported as a success.
+- **A per-item failure does not throw.** The underlying batch is non-atomic, so 99 of 100 records can land: the step COMPLETES, `steps['land-page'].ok` is false, and every failure is named in `results`. Gate downstream work with `runIf = "steps['land-page'].ok"`. (Contrast `database.mutate`, which is all-or-nothing and fails the step.)
+- An **empty `batch` succeeds** as a no-op (`{ importedOps: 0, failedOps: 0, results: [] }`, `ok` true) without calling the server — the last page of a sync returning zero rows must not fail the pipeline.
+- **Two tiers of validation.** Rejections the platform can make *before* writing anything fail the whole batch, non-retryably: unknown parameters or a failed coercion, an operation that does not exist or is not a mutation, an access denial on ANY item (the operation's access rule and every per-parameter rule are enforced per item), more than 100 000 items. Problems the database only sees as it applies an op — a missing/empty `upsertOn` value, an unregistered unique index, a unique-constraint violation, a failed condition, a hook denial — are **per-item** failures: that item reports `success: false` while its siblings commit.
+- **Re-running converges** when the operation's save is keyed with `upsertOn`: each item resolves to the same canonical record id, so a step re-run after a crash updates instead of duplicating — nothing to configure on the step. Caveat for duplicates *inside one batch*: items matching an already-existing record converge (applied in order, last write wins), but two items sharing a key no record has yet each get a fresh id and the later one fails with a unique-constraint violation. **Dedupe the page before the step.**
+- `database.batchForUser` is the system-only subject variant (`runAs = "system"`, plus `userId` — `step.userId ?? input.userId`), like the other `database.*ForUser` kinds: CEL `user.*` and the database's triggers describe the SUBJECT user while the system actor stays audit metadata.
+- `dryRun` is not supported on this kind.
 
 ### `document.query` / `queryOne` / `count` / `save` / `patch` / `delete`
 
@@ -372,6 +454,16 @@ runIf = "outputs.tracker.documentId == null"
 # ... create the user's tracker document
 ```
 
+### Document writes obey the model's declared field types
+
+Every document write — `save`/`patch` in both modes, and `bulkUpdate` — type-checks each supplied value against the model's declared field types inside the write transaction, before anything is persisted:
+
+- **Convertible → converted.** The `1`/`0` a database read yields for a `boolean` column (SQLite has no boolean type — the common case when `records` comes straight from `database.query`) is stored as `true`/`false`; a numeric string in a `number` field becomes a number; a number in a `string` field is stringified. Same conversion table as `inputSchema` and database-operation params.
+- **Not convertible → non-retryable step failure** naming the model, field, declared type and offending value. `"maybe"` or `2` in a `boolean` field, an object in a `number` field. The rejection rolls back its own transaction: a single write and a `bulkUpdate` write nothing, while a batch `records` write is one transaction per 100-record chunk, so a failure in a later chunk leaves earlier chunks committed.
+- **Untouched:** `null`, fields the model doesn't declare, and `stringset` payloads (arrays / `{ $add, $remove, $clear }`) — but an array or op-object aimed at a declared *scalar* field is a type error. `date` fields take an ISO-8601 date string (`"2026-08-14"`, optionally with a time — including the space-separated `"2026-08-14 12:30:00"` a SQL read yields) *or* an epoch number, and nothing else: `"not-a-date"` fails, and so does a string only a locale parser understands (`"08/14/2026"`, `"August 14, 2026"`) or a day the calendar doesn't have (`"2026-02-30"`).
+- Enforcement reads the model schema embedded in the document, so a model no client has saved yet has nothing to enforce.
+- **Not only workflow steps.** The contract sits in the shared server-direct write path, so the document-records REST API reaches it too — `POST` / `PATCH` / `DELETE documents/:documentId/records/:model` and `records/bulk`, which the `primitive documents records` commands drive. Those now answer **400**, naming the field, for an unconvertible value they previously accepted and stored (`2` or `"maybe"` in a `boolean` field), so a script corrupting a record that way starts failing instead; a convertible value still succeeds, so a script feeding a `1` into a `boolean` field keeps its `200` and now stores `true`. Collaborative client writes over the live connection are unaffected: they apply document updates directly and never enter this path.
+
 ### `document.save` / `patch` / `delete` — batch mode (`records` / `recordIds`)
 
 Each write step works in exactly one of two modes, never mixed: singular (`recordId` [+ `data`]) or batch (`records` for `save`/`patch`, `recordIds` for `delete`). Batch mode is keyed off the array field being present at all (not off `recordId` being absent) — supplying both a singular and an array field on the same step is a hard non-retryable error. Batch mode resolves the document ACL once and applies every record in one Yjs transaction + one persist + one broadcast **per chunk**, instead of the per-record cost of a `forEach` fan-out.
@@ -427,18 +519,18 @@ kind = "document.bulkUpdate"
 documentId = "{{ outputs.doc.documentId }}"
 saveAs = "applied"
 operations = [
-  { model = "Account",  action = "create", id = "{{ input.newAccountId }}", fields = { name = "Growth", balance = 0 } },
-  { model = "Ledger",   action = "patch",  id = "{{ input.ledgerId }}", fields = { rebalancedAt = "{{ now }}" } },
+  { model = "Account",  action = "create", id = "{{ input.newAccountId }}", data = { name = "Growth", balance = 0 } },
+  { model = "Ledger",   action = "patch",  id = "{{ input.ledgerId }}", data = { rebalancedAt = "{{ now }}" } },
   { model = "Position", action = "delete", id = "{{ input.staleId }}" },
 ]
 ```
 
-Operation shape: `{ model, action, id, fields? }`. The `action` vocabulary is exactly `create` | `patch` | `delete` — not add/update/save.
+Operation shape: `{ model, action, id, data, precondition? }`. The `action` vocabulary is exactly `create` | `patch` | `delete` — not add/update/save. `data` holds the record fields and is **required and non-empty** on `create` and `patch`; `delete` takes none. Any other key in an operation is rejected before anything is written — including the retired `fields` and `record` spellings, whose error names `data`.
 
 | `action` | `id` | Semantics |
 |---|---|---|
 | `create` | **required, caller-supplied ULID** (must match `^[0-9A-HJKMNP-TV-Z]{26}$` — 26 uppercase Crockford chars) | Strict create — fails if the id already exists. The server never mints ids for this step. |
-| `patch` | required, non-empty string | Merges `fields` — fails if the id doesn't exist. |
+| `patch` | required, non-empty string | Merges `data` — fails if the id doesn't exist. |
 | `delete` | required, non-empty string | Removes the record; an id that doesn't exist is a no-op (contributes 0 to `deleted`). |
 
 Output: `{ applied, added, updated, deleted }` — `added`/`updated` list `{ model, id }` per committed create/patch in input order; `deleted` is the count actually removed.
@@ -446,7 +538,7 @@ Output: `{ applied, added, updated, deleted }` — `added`/`updated` list `{ mod
 Rules and edge cases:
 
 - **Cap = 500 operations**, a separate constant from batch mode's 100-record chunk — and **never chunked** (chunking would break the atomicity that is this step's point). Over 500 is rejected non-retryably before any write.
-- **Mint create ids with <span v-pre>`{{ ulid }}`</span>** (template helper) for statically-known counts, or the script `ulid()` builtin when a script builds the operations array dynamically — pre-minting is what lets a later operation in the same blob reference a record an earlier operation creates.
+- **Mint create ids with `{{ ulid }}`** (template helper) for statically-known counts, or the script `ulid()` builtin when a script builds the operations array dynamically — pre-minting is what lets a later operation in the same blob reference a record an earlier operation creates.
 - **Validation-first, then fail-fast.** A structural pass (shape, cap, ULID well-formedness, known `action`) runs before any write; failures are non-retryable and name the offending operation index and model. State-dependent failures (create-collision, patch-miss, unique-index violation) abort inside the transaction — nothing commits — and are also non-retryable. Transient storage/broadcast failures stay retryable.
 - **Operations apply in listed order** within the one transaction.
 - **Caller-mode ACL is checked once** at write level: the caller needs `read-write` on the document; denial is non-retryable and nothing commits. An empty `operations` array is a clean no-op.
@@ -474,9 +566,9 @@ version = "{{ steps.read.output.record.version }}"   # apply only if version sti
 
 Failure semantics:
 
-- A failed `precondition`/`ifNotExists` throws `CONDITION_NOT_MET` — a **non-retryable** classified failure. Nothing is written (the transaction rolls back). It is not auto-retried, so a step that must retry until it wins writes an explicit read → compute → conditional-write loop (e.g. `forEach` over a small range, or `runIf` on the prior attempt's `code`), not a bare retry.
+- A failed `precondition`/`ifNotExists` throws `CONDITION_NOT_MET` — a **non-retryable** classified failure. Nothing is written (the transaction rolls back). It is not auto-retried, so a step that must retry until it wins writes an explicit read → compute → conditional-write loop (e.g. `forEach` over a small range, or `runIf` on the prior attempt's `code`), not a bare retry. Capture the attempt with `continueOnError = true` and read the code back from `steps.<id>.code` for a plain step, or `steps.<id>.errors[0].code` / `steps.<id>.items[0].code` for an attempt made inside a `forEach`.
 - **Field-equality only.** Operators (`$gt`, `$in`, …) and combinators (`$and`/`$or`) in a `precondition` are rejected non-retryably at validation with a clear error — they are not silently ignored. Express richer conditions by reading first and comparing in a `transform`/`script`, then gating the write on a scalar field.
-- **`document.bulkUpdate`** takes a per-operation `precondition` too (`{ model, action, id, fields?, precondition? }`); a failed precondition on any operation is fail-fast for the **whole blob** — nothing commits, matching the step's all-or-nothing semantics.
+- **`document.bulkUpdate`** takes a per-operation `precondition` too (`{ model, action, id, data, precondition? }`); a failed precondition on any operation is fail-fast for the **whole blob** — nothing commits, matching the step's all-or-nothing semantics.
 
 ### `document.create` — mint a new document mid-run
 
@@ -498,7 +590,7 @@ id = "apply"
 kind = "document.bulkUpdate"
 documentId = "{{ steps.make-doc.documentId }}"
 operations = [
-  { model = "Holding", action = "create", id = "{{ ulid }}", fields = { symbol = "VTI", shares = 10 } },
+  { model = "Holding", action = "create", id = "{{ ulid }}", data = { symbol = "VTI", shares = 10 } },
 ]
 ```
 
@@ -703,6 +795,8 @@ userId = "{{ item.userId }}"
 
 Add `forEach` to fan out: the child runs once per item (use `concurrency` for parallel lanes) and the step returns the array of child results. For app-wide, restartable fan-out over the whole user roster, use `iterate-users` instead.
 
+Each call is recorded as its own run of the child workflow: `workflows runs list <child-key>` shows it (`running` while it executes, then `completed`/`failed`), with its own step runs to inspect and the calling run in `meta.parentRunId`. Debug a failing child there instead of from the parent's one-line step error.
+
 ### `email.send`
 
 Two modes; pass exactly one of `templateType` or `htmlBody`.
@@ -725,7 +819,7 @@ htmlBody = "<p>Download: {{ outputs.upload.signedUrl }}</p>"
 textBody = "Download: {{ outputs.upload.signedUrl }}"
 ```
 
-`to` is a single address (string), not an array. Built-in templates: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Register custom types with `primitive email-templates set <type>`. Hourly rate limit: 100 workflow emails per app per hour.
+`to` is a single address (string), not an array. Built-in templates: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Register a custom type by authoring `email-templates/<type>.toml` and running `primitive config push`. Hourly rate limit: 100 workflow emails per app per hour.
 
 ### `notification.send`
 
@@ -832,12 +926,23 @@ saveAs = "topUsers"
 ```
 
 Valid `queryType` values (dotted form, exact strings):
-`overview.dau`, `overview.wau`, `overview.mau`, `overview.growth`, `daily-active`, `rolling-active`, `cohort-retention`, `users.top`, `users.search`, `users.detail`, `users.snapshot`, `events`, `events.grouped`, `workflows.top`, `prompts.top`, `integrations`. `users.detail` and `users.snapshot` require `userUlid`.
+`overview.dau`, `overview.wau`, `overview.mau`, `overview.growth`, `daily-active`, `rolling-active`, `cohort-retention`, `users.top`, `users.search`, `users.detail`, `users.snapshot`, `events`, `events.grouped`, `errors.groups`, `workflows.top`, `prompts.top`, `integrations`. `users.detail` and `users.snapshot` require `userUlid`.
+
+**Step output: `{ queryType, data, ok }`.** The payload sits under `data` — read `{{ outputs.topUsers.data.results }}`, not `{{ outputs.topUsers.results }}`. `data` is the analytics query's response body verbatim (the step dispatches to the same handler as the REST endpoint), so the shape depends on `queryType`:
+
+| `queryType` | `data` |
+| --- | --- |
+| `overview.dau` / `overview.wau` / `overview.mau` | `{ value, previous, deltaPct }` — `previous` is the preceding non-overlapping window (the current one ends at query time, so it carries a partial final day); `deltaPct` is a fraction (`0.25` = +25%), and `1` is the sentinel for a zero base |
+| `daily-active` / `rolling-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }] }` |
+| `errors.groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar }] }` — `daily` is **sparse** (no bucket for a day with no events), so divide by `window_days`, not `daily.length`, for a per-day baseline. `exemplar` is a raw sample of one failure (`{ message, action, scope_key, step_id, run_id, at }`) or `null` |
+| everything else | see the per-type table in [Analytics](AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.md) |
+
+Every payload also carries a diagnostic `_timing`. `ok` is the engine's uniform step verdict, not a field the query returns.
 
 Optional fields:
 
 - `groupBy` — for `events.grouped`. One of `action`, `feature`, `day`, `route`, `country`, `deviceType`, `plan`.
-- `filters` — for `events` and `events.grouped`. Array of `{ field, operator, value }` (max 10 entries; values capped at 200 chars). Same field/operator set as the `/analytics/events` REST endpoint.
+- `filters` — for `events` and `events.grouped`. Array of `{ field, operator, value }`; values are capped at 200 chars. Same field/operator set as the `/analytics/events` REST endpoint. **At most 10 entries** — an eleventh fails the step non-retryably with the endpoint's 400 body, whose `error` reads `Too many filters: N. Maximum is 10.`, so the run stops rather than returning an aggregate narrowed to the first ten.
 - `page` — 0-indexed page number for the `events` feed.
 - `query` — search string (email or ULID) for `users.search`.
 
@@ -856,7 +961,7 @@ saveAs = "billingUpgrades"
 
 ### `script`
 
-Runs a sandboxed [Rhai](https://rhai.rs/) script over JSON input and returns JSON. Use it for transforms too involved for a templated `transform` step (nested reshaping, derived fields, array map/filter/reduce). The sandbox is **side-effect-free** — no network or storage access — and deterministic except for the `ulid()` builtin (mints fresh record ids, e.g. for `document.bulkUpdate` creates), so script steps are safe to retry and easy to test. The [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md) covers the script model, input/output contract, limits, error codes, and gotchas in full; this section is the step-level reference.
+Runs a sandboxed [Rhai](https://rhai.rs/) script over JSON input and returns JSON. Use it for transforms too involved for a templated `transform` step (nested reshaping, derived fields, array map/filter/reduce). Full concept, input/output contract, `parse_json`, `ulid()`, per-step limits, error codes, and telemetry: [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md).
 
 ```toml
 [[steps]]
@@ -870,30 +975,10 @@ raw = "{{ steps.fetch.body }}"
 currency = "{{ input.currency }}"
 ```
 
-The referenced body (`transforms/normalize-order.rhai`):
-
-```
-let items = input.raw.items.filter(|i| i.qty > 0);
-let total = 0.0;
-for i in items { total += i.qty * i.price; }
-#{
-  currency: input.currency,
-  itemCount: items.len(),
-  total: total,
-}
-```
-
-Given `steps.fetch.body = { "items": [{ "sku": "a1", "qty": 2, "price": 5.0 }, { "sku": "b2", "qty": 0, "price": 9.0 }] }` and `input.currency = "USD"`, the step records `steps.normalize.output = { "result": { "currency": "USD", "itemCount": 1, "total": 10.0 }, "ok": true }` — the return value is wrapped under `result` (see Result nesting below).
-
-- `ref` (required) names a `Script` — a stored Rhai body, unique per app. Script bodies live in `transforms/<name>.rhai` in your sync directory and are mirrored to the server by `primitive sync push` (and pulled back by `primitive sync pull`); the `<name>` is the filename without `.rhai`. Script bodies are authored only through sync — no CLI command writes them; the `primitive scripts` command inspects scripts and manages their test cases (see the [Scripts guide](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md)).
-- `with` is the JSON context handed to the script. Inside the script the whole table is exposed as **`input.*`** (with `ctx.*` as an alias) — NOT as bare top-level variables. `let x = payload;` fails with `Variable not found: payload`; write `input.payload`. Also, `with` itself is a reserved Rhai keyword — a script can't declare a variable named `with`.
-- **Result nesting.** A script step's output is an envelope: `steps.<id>.output = { result: <return value>, ok: <bool> }`. The return value lives at `steps.<id>.output.result.*` and the success verdict at `steps.<id>.output.ok` (also mirrored at `steps.<id>.ok`); per-run telemetry sits in a sibling `steps.<id>.scriptMetrics`, not inside `output`. Unlike `transform`, whose result is the templated table directly (`steps.<id>.<field>`), wire downstream templates/`runIf` as `{{ steps.normalize.output.result.total }}` — not `{{ steps.normalize.output.total }}` or `{{ steps.normalize.total }}`.
-- **Script bodies resolve live at run time.** The runner looks up the script's active config body on each execution; there is no publish-time snapshot. Pushing a changed `.rhai` file (`primitive sync push`) creates a new config and activates it — referencing workflows pick up the new body on their next run with no re-publish step. Pin a specific config with `configId = "..."` on the step to bypass the active-config lookup when determinism is required.
-- Handy patterns: `parse_json(input.someJsonString)` for JSON-string fields (e.g. payload columns stored as strings); missing keys read as `()` (test with `h.symbol != ()`); `NaN`/`Infinity` can't survive JSON output — they serialize as `null`, so return a sentinel instead.
-- **`parse_json` parses any strict-JSON value** — object→map, array→array, plus primitives and `null` — so a field storing a JSON array string parses straight into an array. Input must be strict JSON (no trailing commas, comments, single quotes, or hex literals); invalid input fails the step with a non-retryable `SCRIPT_RUNTIME_ERROR` and a positioned message.
-- `limits` (optional) lets a step lower the per-run ceilings (`maxOperations`, `wallMsHint`, `maxOutputBytes`, `maxArrayLength`, `maxObjectKeys`, `maxNestingDepth`, `maxStringSize`, `maxCallDepth`, `maxLogBytes`); requested values are clamped at the app ceiling, never raised.
-- Deterministic failures (parse / compile / runtime / limit / validation) come back as a non-retryable step error so durable retries don't re-run a guaranteed failure; transient/transport errors throw and retry normally. The runtime fails closed — it never silently passes input through.
-- Each execution records per-step telemetry at `steps.<id>.scriptMetrics` — a sibling of the step's `output`, persisted on `WorkflowStepRun.scriptMetrics` (operation counts, input/output byte sizes, runtime version) — visible in run detail.
+- `ref` (required) names a `Script` — a stored Rhai body, unique per app, authored only through sync (`transforms/<name>.rhai`, mirrored by `primitive config push`/`pull`); see the Scripts guide's [Script model](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#the-script-model).
+- `with` is the JSON context handed to the script, templated by the engine before the script runs; see the Scripts guide's [Input and output](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#input-and-output) for how it's exposed inside the script, the `output`/`ok`/`scriptMetrics` result envelope, and `parse_json` gotchas.
+- `configId` (optional) pins a specific `ScriptConfig`, bypassing the active-config lookup the runner otherwise does on every execution — see [Live resolution at run time](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#live-resolution-at-run-time).
+- `limits` (optional) lowers the per-run ceilings; see [Per-step limits](AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md#per-step-limits) for the fields, bounds, and the fixed (non-lowerable) `with` input cap.
 
 ### `block.call`
 
@@ -914,7 +999,7 @@ content = "{{ steps.fetch.body }}"
 - `blockType` selects the runner it lowers to: `prompt` → `prompt.execute`, `integration` → `integration.call`, `script` → `script`, `workflow` → `workflow.call`. An unknown `blockType`, or an empty `blockKey`, fails the step non-retryably.
 - `input` is the unified input; per type it maps to the lowered step's own field — prompt `variables`, integration `request`, script `with`, workflow `input`. The type-specific field name still works and takes precedence over `input` (pass `variables` for a prompt, `request` for an integration, `with` for a script).
 - `configId` pins a specific config; `version` also pins one unless it's the `"active"` sentinel (the default — use the block's active config). Config/version pins apply to `prompt`, `integration`, and `script` blocks; a `workflow` block ignores them.
-- Passthrough fields reach the lowered step: prompts take `modelOverride`; integrations take `attachments` / `bodyMode` / `multipartFields`; scripts take `limits`.
+- Passthrough fields reach the lowered step: prompts take `modelOverride` and `expect` (the output-type declaration — same contract as on `prompt.execute`); integrations take `attachments` / `bodyMode` / `multipartFields`; scripts take `limits`.
 
 ### `iterate-users`
 
@@ -945,6 +1030,29 @@ reason = "preferences backfill"
 - Each user is processed by the `perUser.workflowKey` child workflow. The iterated user's id is injected into the child as `input.userId` automatically, so a child with no `perUser.input` block still reads `{{ input.userId }}`. `onPartialFailure` controls whether per-user failures stop the whole iteration or are tallied and skipped.
 - `perUser.input` values are rendered per user against a `user` binding (`user.userId`, `user.role`) with full template syntax — filters and fallbacks included (`{{ user.userId | upper }}`, `{{ user.role || 'member' }}`). A key set in `perUser.input` overrides the injected `userId` default (author-wins).
 - Prefer `iterate-users` over a hand-rolled `forEach` across a `users.list` query when the fan-out is app-wide and long-running; `forEach` is better for bounded, in-run collections.
+- **`forEach` on an `iterate-users` step is rejected at save time** (`'iterate-users' cannot be used with forEach`): the step already fans out over the entire roster, so nesting it in a loop multiplies the whole user base by the loop length. Put the `iterate-users` step in a child workflow and `forEach` over `workflow.call` if you genuinely need a per-item app-wide pass.
+
+**Filtering by a metadata value.** A `metadataFilter` block fans out over only the users whose `"user"`-resource metadata matches. The roster is still enumerated in full, but non-matching users are skipped **before** dispatch (no child run at all), so don't write the "dispatch a child for everyone and bail inside it" pattern:
+
+```toml
+[[steps]]
+id = "summaries"
+kind = "iterate-users"
+iterationName = "nightly-portfolio-summary"
+[steps.metadataFilter]
+category = "billing"                      # a category defined for resourceType "user"
+key = "status"                            # a key declared in that category's schema
+in = ["trialing", "active", "past_due"]   # exactly one of: eq | in | exists
+[steps.perUser]
+workflowKey = "portfolio-summary-one-user"
+```
+
+- Exactly one operator: `eq = <string|number|boolean>` (strict — `1` ≠ `"1"`), `in = [<values>]` (non-empty), or `exists = true|false`. `category`/`key` are static (no `{{ }}`, no `#`); `eq`/`in` values may be templates and render **once** at the start of the iteration, so all pages use the same value (an unresolved reference fails the run before any child starts).
+- No metadata row for the category, no such key, or a null value → never matches `eq`/`in`, and is exactly what `exists = false` matches.
+- `stringset` and `date` fields accept only `exists` (an array can't equal a scalar; a date may be stored as epoch ms or ISO for the same instant).
+- The step result gains `filteredOutCount` (rejected rows), present — including `0` — exactly when `metadataFilter` is set; `totalProcessed` still counts only dispatched users.
+- An undefined category, an undeclared key, or an operand the declared field type can never hold fails the run by name instead of matching nobody; structural mistakes are rejected at save time (`steps[i].metadataFilter…`).
+- **No `readRule` evaluation.** Unlike `metadata.read`, this is a direct system-only read — the step acts *about* users, never *as* one (as `metadata.resolve` does). A category `readRule` does not gate it.
 
 ## Templating
 
@@ -1016,7 +1124,9 @@ Available filters (see `src/workflows/runner/templates.ts` for full list):
 
 Templates have **no arithmetic** (`{{ a + b }}` won't work). Move math into a step or filter chain.
 
-**Missing path sentinel.** In interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`), an unresolved path renders as `<missing: steps.x.y>` so it's visible in step output and logs. In single-expression mode (`"{{ steps.x.y }}"` alone) the raw value is `null` so downstream `runIf`/comparisons work naturally. A resolved `null` interpolates as `"null"`; a resolved empty string interpolates as `""`. A filter chain that **begins with `default`** (or `now`) rescues a missing path instead: `{{ steps.x.output.result | default: '' }}` renders `''` when the path is unresolved — including when step `x` was skipped and recorded no `output` at all. That makes `default` the idiom for skipped-step collapse in an output table: a field built from an optionally-skipped step yields the fallback value rather than `<missing: …>`. Set `strict = true` on the step to throw on any unresolved path instead, or `strictParams = ["userId", ...]` to make only the named top-level params strict-on-missing (a resolved `null` is still tolerated); `strict = true` covers everything and wins when both are set. When a template references a root outside the six valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`, `vars`), the strict-mode error lists them — catching typos like `{{ inputs.userId }}`.
+**An unresolved reference fails the step.** A `{{ }}` expression whose path is not in the run context fails the step non-retryably, in both interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`) and single-expression mode (`"{{ steps.x.y }}"` alone). The error names every unresolved expression in the step and the keys that were available; the step is recorded as `failed` with `templateWarnings` naming each path, so it reaches run history and error analytics like any other step failure. Nothing is substituted into the output. A path that *resolves* is never a failure whatever its value: a resolved `null` is typed `null` in single-expression mode and `"null"` in interpolation; a resolved empty string is `""` in both. To mark a reference optional, say so **at the expression** — `{{ steps.x.output.result | default: '' }}` or `{{ input.title || 'Untitled' }}`. `default` (and `now`) rescues a miss from anywhere in the filter chain, not only first position, and a bare `| default` renders `''`. That makes `| default:` required, not optional, for a field built from an optionally-skipped step. There is no workflow-level or step-level setting that changes any of this: `strict` and `strictParams` are accepted and ignored, since the failure they used to opt into is now universal. When a template references a root outside the six valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`, `vars`), the error lists them — catching typos like `{{ inputs.userId }}`. The statically-decidable half of that is caught earlier: `primitive config push` (and the definition-save API) rejects an expression that can never resolve — an unknown root, or a `{{ steps.<id>… }}` / `{{ outputs.<saveAs>… }}` naming something the file does not declare — naming the step, the expression and the valid roots. Contextual roots are scoped: `selected`, `user`, `md` and the built-ins are valid on any step, while `iteration`, `loop` and the loop's binding names (the explicit `as` — one name, or one per array in the `{ zip, as }` form — or `item` when `as` is omitted) are valid only inside a `forEach` step's other fields, never in the `forEach` source, which resolves before any item is bound. An expression carrying `| default` (or `| now`), a fallback chain ending in `''` or `0`, or anything undecidable such as a dynamic bracket key (`{{ steps[input.branch].output }}`) is left alone and stays a run-time concern.
+
+**Bare path fields resolve strictly too.** A `forEach` source, a `selector` path and a `runs` count are bare paths rather than templates, and they have no fallback syntax. The path must resolve: a source that resolves to an empty list (or a paginated object with empty `items`) iterates zero times as always, but one that does not resolve, or that resolves to a non-list, fails the step naming the path or the resolved type — unless the step's own `runIf` is evaluable at step level and false, in which case the step is skipped and the source is never resolved. For a genuinely optional list, make the producing step emit an empty one.
 
 ## `runIf` (CEL, not templates)
 
@@ -1025,10 +1135,16 @@ runIf = "input.shouldRun"                        # truthy
 runIf = "outputs.text.length < 1000"             # comparison
 runIf = "steps.check.isMember && input.amount > 0"
 runIf = "steps.previous.ok"                      # uniform verdict on every object result
-runIf = "!steps.fetch.skipped"
+runIf = "!steps.fetch.skipped"                   # booleans are always present, never absent
+runIf = "steps.fetch.succeeded && steps.fetch.output.count > 0"   # guard, then read
+runIf = "steps.charge.failed"                    # reacts to a captured failure"
 ```
 
-CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+CEL context: `input`, `selected`, `steps`, `outputs`, `meta`, `secrets`, `vars`, plus `iteration` (and `as`-var) inside `forEach`, and `expr.<name>` for any [named guard](#named-guards-expr) declared on the workflow. **Do NOT wrap in `{{ }}`** — `runIf` parses CEL directly. A CEL evaluation error fails the step (or is captured by `continueOnError`).
+
+`vars` is the app's full config-vars map — the same values `{{ vars.KEY }}` renders in a step's config, with no `vars = [...]` declaration required in the workflow. (Declared secrets are the opposite: `secrets` in a guard binds ONLY the keys the workflow's manifest declares, never the full app-secret map.) A guard reading a key the app doesn't hold throws `No such key: KEY`, so test presence first with `'KEY' in vars` or `vars.?KEY` when the var may not exist yet.
+
+The map is loaded once per engine invocation and bound into both guards and templates, so the two always agree within an invocation. A parallel `forEach` (`concurrency > 1`) runs each batch as its own durable child that loads its own snapshot: a var edited while such a step is in flight can be visible to one batch and not another, and each batch's own value governs which of its items run.
 
 ### Named guards (`expr.*`)
 
@@ -1049,7 +1165,7 @@ runIf = "expr.eligible"
 - **Definition scope is fixed and stripped.** Every named guard evaluates against the run-state scope only — `input`, `steps`, `outputs`, `meta`, `secrets`, `vars`, plus `user` in a `runAs: "caller"` run — *never* the reference site's `selected`, `iteration`, or `as`-var bindings. So `expr.isPremium` resolves identically at every reference site; a guard that needs a per-iteration value can't be a named guard.
 - **Resolution is by name, not textual expansion.** A referenced guard evaluates as its own expression against that fixed scope, and each guard is memoized per evaluation so wide reuse or a fan-out DAG stays cheap. A guard that throws (or fails to parse) fails the referencing `runIf` or switch `when` with a `RunIfError` named `expr.<name>` — the author's name, not the reference-site expression. At a `successWhen` site the classifier's error fallback applies instead: the error is logged and the iteration is classified `succeeded` (see [`successWhen`](#successwhen-functional-success-vs-empty)).
 - **References must form a DAG.** Cross-definition references are allowed; a reference cycle (`a` → `b` → `a`) is rejected at save time.
-- **Validation is developer-facing.** `primitive sync push` fails fast — and the server 400s — on an `expr.<name>` reference (in a definition body *or* a step guard) that names no declared definition, on a reference cycle, or on an empty definition body. `primitive sync pull` writes the `[expr.cel]` table back out, so definitions round-trip.
+- **Validation is developer-facing.** `primitive config push` fails fast — and the server 400s — on an `expr.<name>` reference (in a definition body *or* a step guard) that names no declared definition, on a reference cycle, or on an empty definition body. `primitive config pull` writes the `[expr.cel]` table back out, so definitions round-trip.
 
 ### Safe navigation
 
@@ -1102,7 +1218,11 @@ subject = "Update"
 htmlBody = "<p>Hi {{ member.name }}</p>"
 ```
 
+The source is a **bare path** into the run context (to an array, or to `{items: [...]}`) — not a template, unlike every other field on the step. A whole-value template wrapping one bare path (`forEach = "{{ steps.team.items }}"`) is unwrapped and resolves to the same array. Any other use of `{{ }}` in the source — a partial template (`"rows {{ steps.team.items }}"`), several expressions (`"{{ a }} {{ b }}"`), an empty expression (`"{{ }}"`), or a wrapped expression that is not a bare path (`"{{ steps.team.items || [] }}"`, `"{{ steps.team.items | default(1) }}"` — operators and filters work in the step's other fields, not in the source) — and an empty source string are rejected at push time; they could never resolve, and used to iterate zero times while reporting the step `completed`. A source that *resolves* to an empty list (or to `{items: []}`) iterates zero times with `ok: true` — that is the empty-collection case, not an error — while a source path that is not in the run context fails the step, unless the step's own `runIf` gates it: a gate the engine can evaluate at step level (one that reads no loop variable, e.g. `runIf = "steps.sync.ok"` beside `forEach = "steps.sync.body.added"`) is evaluated first, and when it is false the step is skipped and the source is never resolved. Kebab-case step ids are ordinary paths (`forEach = "{{ steps.list-securities.items }}"` works); a path segment with other punctuation needs the bracket form (`"{{ steps['odd.key'].items }}"`).
+
 Output is always `{ items: [...per-iter results], errors: [{index, error}], totalSucceeded, totalFailed, totalEmpty, ok }` — even when there are no errors. Results are ordered by input index regardless of completion order. `ok` is `true` iff every iteration succeeded (and the source was non-empty); use it in `runIf` on the next step.
+
+When an iteration fails under `continueOnError` and the failure was **classified** (e.g. a conditional write's `CONDITION_NOT_MET`), its `code` and `status` are preserved on both the error entry and the item — `steps.<id>.errors[0].code`, `steps.<id>.items[0].code` — so a following step can tell that failure apart from any other one. This holds for parallel (`concurrency > 1`) fan-out too.
 
 **Parallel forEach** — add `concurrency` to fan out iterations across multiple lanes:
 
@@ -1125,23 +1245,23 @@ When a parallel `forEach` batch's combined output exceeds the inline size limit 
 
 ### Batch database updates
 
-Workflows have no *database* batch-write step kind — a set of database updates is a `forEach` over a `database.mutate` step (add `concurrency` to parallelize):
+A set of database writes is a single `database.batch` step — one operation call and one step-run row for the whole set, instead of one of each per record:
 
 ```toml
 [[steps]]
 id = "import-contacts"
-kind = "database.mutate"
-forEach = "input.contacts"
-as = "contact"
-maxItems = 1000
+kind = "database.batch"
 databaseId = "{{ input.dbId }}"
 operationName = "createContact"
-[steps.params]
-name = "{{ contact.name }}"
-email = "{{ contact.email }}"
+batch = "{{ input.contacts }}"
+# Output: { importedOps, failedOps, results: [{ index, success, ids, error? }] }
+# Per-item failures do not throw: the step completes with ok = false and names
+# them in `results`. See the `database.batch` section above for the full contract.
 ```
 
-To mutate every record matching a server-side filter without enumerating items, use `database.applyToQuery` instead.
+Each item of `batch` is that invocation's params, so the array's shape must match the operation's parameters (rename fields in a `transform` step first if it doesn't).
+
+Reach for `forEach` over `database.mutate` only when each record genuinely needs its own step run — e.g. per-record retries, or per-record params that a template can't derive from the item. Use `database.applyToQuery` to mutate every record matching a server-side filter without enumerating items at all.
 
 ### Zip mode (parallel arrays by index)
 
@@ -1180,8 +1300,8 @@ The predicate runs against each iteration's `result` plus the usual `input`/`ste
 ## Error handling
 
 - **Default**: a failed step throws and the workflow fails.
-- `continueOnError = true`: failure is captured as `steps[id] = { error, errorDetails, ok: false, errored: true }` and execution continues.
-- `strict = true`: any unresolved template expression in the step throws with a path-listing error.
+- `continueOnError = true`: failure is captured as `steps[id] = { error, errorDetails, ok: false, errored: true }` and execution continues. A **classified** failure (e.g. a conditional write's `CONDITION_NOT_MET`) also carries `code` and `status` — see the verdict-namespace table below.
+- **Unresolved template reference**: any `{{ }}` expression in the step whose path does not resolve throws a non-retryable, path-listing error. Always on; mark a reference optional with `| default` / `||`.
 - `expect:` filter (in templates): runtime type check.
 - `[[compensate]]` block at the top level runs after a failure (when `continueOnError` is not set). Compensate steps see `steps._error = { message, stepId }`. Compensate runs only in sync execution paths (e.g., `executeWorkflowSync`); not all engine modes invoke it.
 
@@ -1231,34 +1351,44 @@ Every **object** entry in `steps[id]` carries a reserved verdict namespace along
 
 | Field | When set |
 |---|---|
+| `state: string` | On every object result. One of `"succeeded"`, `"failed"`, `"skipped"` — the step's execution outcome, derived from the fields below (`skipped` wins over `ok`) |
+| `succeeded`, `failed`, `skipped` | On every object result, as booleans mirroring `state`. Always PRESENT (`false` rather than absent), so `!steps.x.skipped` and `steps.x.succeeded && steps.x.output...` are safe on any entry |
 | `ok: boolean` | On every object result. `true` if the step ran and the runner classified it as successful; `false` for skipped, errored, or kind-specific failures (e.g. an `integration.call` that returned HTTP 5xx) |
-| `skipped: true` | The step's `runIf` evaluated falsy, or a step listed in its `skipWhenSkipped` was itself skipped. The runner did NOT execute. |
 | `errored: true` | The step threw but was captured by `continueOnError = true` |
 | `error`, `errorDetails` | Companion fields populated when `errored: true` |
+| `code`, `status` | Companion fields populated when `errored: true` **and** the failure was classified (e.g. `CONDITION_NOT_MET` / `409`). Absent when the failure carried no classification, so only branch on `steps.<id>.code` where a classified failure is the case you are testing for |
 
-`ok`, `skipped`, `errored`, `error`, and `errorDetails` are written by the engine and override any same-named field the runner would have produced. Downstream `runIf` and templates can rely on them whenever the step's result is an object — skipped and errored steps always are:
+`state`, `succeeded`, `failed`, `ok`, `skipped`, `errored`, `error`, and `errorDetails` are written by the engine and override any same-named field the runner would have produced. Downstream `runIf` and templates can rely on them whenever the step's result is an object — skipped and errored steps always are:
 
 ```toml novalidate
 runIf = "steps.fetch.ok"
-runIf = "!steps.fetch.skipped && !steps.fetch.errored"
+runIf = "!steps.fetch.skipped"
+runIf = "steps.fetch.failed"                # any failure, including one with no response body
+runIf = "steps.fetch.state == 'skipped'"
 ```
 
-When a step reads `steps.<upstream>.output.*` and that upstream can be skipped, a skipped upstream leaves no `output` key and an unguarded multi-segment read throws `No such key: output`. Two structural fixes: guard the read with safe navigation (`steps.fetch.?output.?items`), or declare `skipWhenSkipped = ["fetch"]` so the dependent auto-skips whenever `fetch` skips — its `runIf` is never evaluated. The skip is transitive and reacts only to `skipped: true` (an upstream that errored under `continueOnError` does not trigger it). List only earlier step ids; a save-time warning flags an unguarded skippable read or a `skipWhenSkipped` entry naming an unknown or forward step id.
+`state: "failed"` covers every way a step can fail while the run continues: a thrown failure captured by `continueOnError` (timeouts and transport errors included — no response body needed), a kind-specific failure such as an HTTP 5xx or a `body.error`, a `runIf` CEL error captured the same way, and a `forEach` with at least one errored iteration. Because the booleans are always present, testing `has(steps.x.skipped)` tells you nothing — test the value.
+
+The same verdict rides on steps executed during a `compensate` block, including compensation steps that skip or fail, so a later compensation step can branch on `steps.<earlier>.failed`.
+
+When a step reads `steps.<upstream>.output.*` and that upstream can be skipped, a skipped upstream leaves no `output` key and an unguarded multi-segment read throws `No such key: output`. Three structural fixes: lead with the upstream's verdict (`steps.fetch.succeeded && steps.fetch.output.count > 0` — the guard is `false`, not absent, so `&&` absorbs the read), guard the read with safe navigation (`steps.fetch.?output.?items`), or declare `skipWhenSkipped = ["fetch"]` so the dependent auto-skips whenever `fetch` skips — its `runIf` is never evaluated. The skip is transitive and reacts only to `skipped: true` (an upstream that errored under `continueOnError` does not trigger it). List only earlier step ids; a save-time warning flags an unguarded skippable read or a `skipWhenSkipped` entry naming an unknown or forward step id.
 
 ## Access control
 
-`accessRule` is a CEL expression. Evaluated when:
+`accessRule` is a CEL expression. **A caller workflow with no rule denies every non-admin start** (existing workflows included); `accessRule = "true"` restores open access, and a create without one is refused with `accessRule is required (use "true" for a workflow any app member may start)`. A refused start answers `403 { errorCode: "WORKFLOW_ACCESS_DENIED" }` on all three paths, with the cause (`no access rule` vs `denied`) only in the worker log.
+The refusal reaches Swift as a thrown `HttpError` with `serverCode == "WORKFLOW_ACCESS_DENIED"` — switch on that, not on the message text.
+Evaluated when:
 - A client calls `workflows.start()`.
 - A `workflow.call` step invokes the workflow from another workflow.
 
 NOT evaluated for inbound webhook or cron triggers (those bypass it entirely — a webhook handles its own auth, e.g. a Stripe signature). A webhook- or cron-triggered workflow must be `runAs: "system"` (see [Execution identity](#execution-identity-runas-system-workflows)), and a system workflow takes **no** `accessRule` — the rule is never evaluated on a system run, so a non-empty one is rejected at save/push time (see below). What prevents direct client invocation of a webhook workflow is the system-invocation gate plus the webhook's signature verification. Reserve `accessRule` for `runAs: "caller"` workflows, where it genuinely gates who may start a run.
 
 Behavior:
-- No rule → any authenticated app member can start.
+- No rule → **denied** for every caller but an app admin or owner (set `"true"` to allow any app member).
 - `admin`/`owner` always bypass.
 - Otherwise, evaluate against `user.userId`, `user.role`, plus `hasRole(role)`, `isMemberOf(groupType, groupId)`, `memberGroups(groupType)`.
 
-Set `accessRule` once in the `[workflow]` TOML block and it sticks: `primitive sync push` and `primitive workflows create --from-file` both apply it (an absent/empty rule is sent as "no rule" rather than dropped). To change it later without re-pushing the file, `primitive workflows update <id> --access-rule "<CEL>"` sets it (pass `--access-rule ""` to clear; omitting the flag leaves the existing rule untouched).
+Set `accessRule` in the `[workflow]` TOML block and push it — an absent or empty rule is sent as "no rule" rather than dropped, so removing the line clears the rule. To change it later, edit `workflow.accessRule` in the file and run `primitive config push --only workflow/<key>`.
 
 ## Execution identity (`runAs`, system workflows)
 
@@ -1300,13 +1430,13 @@ Four more capabilities gate the resource-lifecycle, collection-membership, and `
 
 A system-mode create attributes the resource to `sys:<appId>`. Missing capability fails the step non-retryably before anything is written; see [Resource lifecycle steps](#resource-lifecycle-steps) and [`collection.addDocument` / `collection.removeDocument`](#collectionadddocument-collectionremovedocument) for the per-kind detail.
 
-Grant or revoke `capabilities` on a workflow that already exists with `primitive workflows update <id> --capabilities <list>` (comma-separated; `""` revokes all) — `sync push` only persists `capabilities` when creating a new workflow (see above).
+Grant or revoke `capabilities` by editing the array in `workflows/<key>.toml` and pushing — `config push` forwards it on create and on update alike, and an empty array revokes every grant.
 
 **`iterate-users` is system-only.** A workflow containing an `iterate-users` step must set `runAs = "system"` — otherwise it's rejected at save time (`'iterate-users' is system-only and may appear only in a runAs:"system" workflow`).
 
 **The resource lifecycle and collection-membership steps run in both modes, capability-gated in system mode.** `database.create`/`delete`, `group.create`/`delete`, `collection.create`/`delete`, `collection.grantGroupPermission`, `collection.addDocument`, and `collection.removeDocument` all run in `runAs:"caller"` workflows under the caller's own CEL rules and doc access, exactly like the equivalent client call. In a `runAs:"system"` workflow, each instead requires its matching capability (`resource-provision`, `resource-teardown`, or `resource-grant` — see above); missing it fails the step non-retryably before anything is written. A system-mode create is attributed to the run's system principal (`createdBy: "sys:<appId>"`); a system-mode delete may only remove a resource with that attribution unless the workflow also holds `resource-teardown:any` — see [Resource lifecycle steps](#resource-lifecycle-steps).
 
-**No `accessRule` on a system workflow.** A `runAs:"system"` workflow with any non-empty `accessRule` is rejected at save time (`runAs:"system" workflows do not evaluate accessRule — remove the accessRule`) — a system run skips the rule entirely, so a constant (`"false"`), a role/group rule (`hasRole('admin')`), or a `user`-principal reference are all equally dead config. The only fix is to remove it. An absent/empty rule is fine. Enforced on every save path (create, version-create, metadata PATCH on the merged effective state, workflow-config create, and `sync push`).
+**No `accessRule` on a system workflow.** A `runAs:"system"` workflow with any non-empty `accessRule` is rejected at save time (`runAs:"system" workflows do not evaluate accessRule — remove the accessRule`) — a system run skips the rule entirely, so a constant (`"false"`), a role/group rule (`hasRole('admin')`), or a `user`-principal reference are all equally dead config. The only fix is to remove it. An absent/empty rule is fine. Enforced on every save path (create, version-create, metadata PATCH on the merged effective state, workflow-config create, and `config push`).
 
 ### Subject-user methods (system workflows)
 
@@ -1347,30 +1477,249 @@ Once a subject method returns a concrete `documentId`, the app-privileged `docum
 
 ## Inbound webhooks
 
-External services trigger workflows via inbound webhooks. This is the **inbound** half of a third-party integration; the **outbound** half — calling the provider's API — is a configured integration (see the Integrations guide). Most integrations need both. Define webhooks as `webhooks/*.toml` in the sync directory and push with `primitive sync push`:
+External services trigger workflows via inbound webhooks. This is the **inbound** half of a third-party integration; the **outbound** half — calling the provider's API — is a configured integration (see the Integrations guide). Most integrations need both. Define webhooks as `webhooks/*.toml` in the config directory and push with `primitive config push`:
 
 ```toml
 # config/webhooks/stripe-payments.toml
 [webhook]
-key = "stripe-payments"
+key = "stripe-payments"             # required, unique per app; names the receive URL
 displayName = "Stripe Payments"
 workflowKey = "process-stripe"
-verificationScheme = "stripe"     # stripe | github | slack | custom | none
-signingSecret = "{{secrets.STRIPE_WEBHOOK_SECRET}}"  # raw value, or a {{secrets.KEY}} reference
-status = "active"                 # active | paused; create defaults to active
+verificationScheme = "stripe"     # stripe | github | slack | discord | jwt | plaid | custom | none
+signingSecret = "{{secrets.STRIPE_WEBHOOK_SECRET}}"  # a whole {{secrets.KEY}} reference; nothing else is accepted
+# Availability is server-owned and is NOT authored here: a pushed webhook is in
+# service, `primitive webhooks enable|disable` is what changes that, and
+# `primitive webhooks archive` retires it (soft delete; keeps key and slot).
 # Optional: toleranceSeconds, deduplicationEnabled, deduplicationWindowMs,
-# secretGracePeriodMs, [webhook.allowedIps] cidrs, [webhook.inputMapping]
+# secretGracePeriodMs, maxBodyBytes, [webhook.allowedIps] cidrs, [webhook.inputMapping]
 ```
 
-`signingSecret` is required unless `verificationScheme = "none"`. It may be a raw value or a `{{secrets.KEY}}` reference (uppercase-led key, no spaces — the tighter form) into the app secret store; the reference is stored and re-emitted verbatim (never returned as a real secret) and resolved server-side against the app secrets immediately before HMAC verification. The referenced key must exist at create/update or the write is rejected. It **fails closed**: if the reference can't be resolved at delivery (secret deleted, or encryption key unset) the request is rejected with `401` (`rejectionReason: secret_unresolved`) rather than verifying against the literal reference; an unresolvable grace-window `previousSigningSecret` reference is dropped.
+### Public-key schemes: `[verification.<scheme>]`
+
+`discord`, `jwt` and `plaid` verify with public key material rather than a shared secret, so they take no `signingSecret` and are configured with a `[verification.<scheme>]` table that round-trips through `config pull`/`push`:
+
+The Admin Console edits all three — the same fields, including the jwt key-source choice, and `plaid`'s two credentials as picks from the app's secrets — and shows every scheme's stored configuration on the webhook's page.
+
+```toml
+[verification.discord]
+publicKey = "<64-char hex Ed25519 application public key>"
+# optional previousPublicKey for a rotation grace window
+```
+
+```toml
+[webhook]
+key = "provider-events"
+verificationScheme = "jwt"
+toleranceSeconds = 300
+deduplicationWindowMs = 360000     # must cover the freshness window (below)
+
+[verification.jwt]
+header = "X-Provider-Signature"    # required — the header carrying the compact JWS
+algorithms = ["ES256"]             # required — ES256/384/512 | RS256 | PS256 | EdDSA
+bodyHashClaim = "request_body_sha256"  # required — claim holding SHA-256 of the body
+bodyHashEncoding = "hex"           # hex (default) | base64 | base64url
+issuer = "https://provider.example.com"   # optional, checked when set
+audience = "https://api.example.com/hook" # optional, checked when set
+eventIdClaim = "jti"               # optional; defaults to the body-hash claim value
+jwks = { keys = [ { kid = "key-1", kty = "EC", crv = "P-256", x = "...", y = "..." } ] }
+```
+
+Every key needs a `kid`, the kids must be unique within the JWKS, and each one must be 1–128 characters from `A-Z`, `a-z`, `0-9`, `_`, `.` and `-` — the same shape the delivery path requires of the token's `kid` header. A kid outside that set (one holding a `/` or a `:`, say) is rejected at push time with `JWKS_KID_INVALID`, rather than stored as a key no delivery could ever select. A document fetched from a `jwksUrl` (below) is deliberately more tolerant: the tenant does not control what the provider publishes, so a key whose `kid` is outside that set is dropped and the remaining keys still verify deliveries — one odd key at the provider cannot take the whole webhook down. If dropping leaves no selectable key, the document is rejected and the delivery fails `key_fetch_failed`. The tradeoff is worth knowing: a provider key with an odd `kid` will never verify a delivery (`kid_unknown`) rather than failing loudly at fetch time; the platform logs a warning with the sent and kept key counts when it drops any.
+
+Exactly one key source is required: the inline `jwks` above, or `jwksUrl` — the provider's published JWKS endpoint, which is what Auth0, Okta and OIDC-style signers give you. Supplying both is a `400 JWKS_KEY_SOURCE_CONFLICT`, supplying neither is a `400`.
+
+```toml
+[verification.jwt]
+header = "X-Provider-Signature"
+algorithms = ["ES256"]
+bodyHashClaim = "request_body_sha256"
+jwksUrl = "https://tenant.auth0.com/.well-known/jwks.json"
+```
+
+`jwksUrl` is validated when the webhook is saved and again on every delivery, and a URL that fails is a `400 JWKS_URL_INVALID` at write time: `https` only, port 443 only, a hostname of two or more labels ending in an alphabetic TLD (so IP literals and single-label names are out), no reserved suffix (`.local`, `.internal`, `.home.arpa`, …), no credentials, no fragment, no `{{secrets.KEY}}` template, at most 2048 characters. The fetched document is subject to the same rules as an inline one (unique `kid`s, a `kty` on every key, no private material) — with the one exception above, that an unselectable `kid` is dropped rather than failing the document — plus transport limits — 64 KiB per document, 8 KiB per key, 50 keys, a 5-second timeout, redirects not followed.
+
+At delivery time the document is cached per webhook, so a burst of deliveries costs one fetch, not one each; a `kid` the cached document does not carry triggers at most one extra refresh a minute, which is what picks up a rotation that publishes and signs at the same moment. When a fetch fails, the last document fetched successfully keeps verifying deliveries for up to an hour; with no such document the delivery is rejected. Failures show on the delivery record as `key_fetch_failed`, `key_fetch_throttled` or `kid_unknown` — the same `rejectionReason` vocabulary the inline source uses, so nothing downstream changes.
+
+The `jwt` scheme accepts a delivery only when **all** of these hold, and returns `401` otherwise: the header is present and is a single compact JWS; the token's `alg` is in `algorithms` (the list is a closed asymmetric set — `none` and `HS*` cannot be configured, which closes algorithm confusion); its `kid` names a key in the configured JWKS (inline or fetched) whose type matches the pinned algorithm; the signature verifies; `iat` is present and inside `toleranceSeconds` (up to 60s of future skew allowed); and `bodyHashClaim` matches a SHA-256 of the delivered body bytes. `rejectionReason` on the delivery record distinguishes them: `sig_missing`, `sig_malformed`, `alg_not_allowed`, `kid_missing`, `kid_unknown`, `key_invalid`, `sig_invalid`, `sig_expired`, `body_hash_missing`, `body_mismatch`, `body_too_large`, `scheme_misconfigured`, `verifier_error` — plus `key_fetch_failed` and `key_fetch_throttled` when the keys come from a `jwksUrl`.
+
+### `plaid`: the JWT preset with keys fetched from Plaid
+
+Plaid signs deliveries the same way but publishes no JWKS — each key is fetched from Plaid's API by `kid`. `plaid` is that preset over the same mechanism, so the header (`Plaid-Verification`), the algorithm (`ES256`) and the body-hash claim (`request_body_sha256`, hex) are fixed in code and cannot be configured:
+
+```toml
+[webhook]
+key = "plaid-events"
+verificationScheme = "plaid"
+toleranceSeconds = 300
+deduplicationWindowMs = 360000     # same JWT-family bound as `jwt`
+
+[verification.plaid]
+environment = "sandbox"            # required — sandbox | production (an enum, never a URL)
+clientId = "{{secrets.PLAID_CLIENT_ID}}"   # required — must be a {{secrets.KEY}} reference
+secret = "{{secrets.PLAID_SECRET}}"        # required — must be a {{secrets.KEY}} reference
+```
+
+The key endpoint is derived from `environment` in code, so there is no way to point verification at another host: a `keyEndpoint`, `keyEndpointUrl`, `baseUrl` or `host` key in the table is rejected `400` (`PLAID_ENDPOINT_UNSUPPORTED`), as is an environment outside the enum or a literal credential (`CREDENTIAL_MUST_BE_SECRET_REF`). Those three keys are the whole table — any other key is rejected `400` (`PLAID_UNKNOWN_CONFIG_KEY`) rather than stored and ignored, so a setting that would never be checked cannot round-trip through `config pull`/`push` looking as though it took effect.
+
+### `custom` + `[verification.custom.detachedSignature]`: describe the provider's own scheme
+
+Never reach for `verificationScheme = "none"` because a provider signs differently from the eight built-ins — `none` accepts every request from anyone. Describe the provider's scheme instead. `custom` takes an optional `[verification.custom.detachedSignature]` table that declares how the signature is built; the platform verifies exactly as declared.
+
+The Admin Console edits the same table as JSON on the webhook's page and reads back the parts it covers in order. It checks only that the signature covers the body exactly once and that each part names one source; every other rule below is answered by the server, with its code.
+
+```toml
+[webhook]
+key = "acme-events"
+verificationScheme = "custom"
+signingSecret = "{{secrets.ACME_WEBHOOK_SECRET}}"
+toleranceSeconds = 300
+
+[verification.custom.detachedSignature]
+primitive = "hmac-sha256"          # the only primitive available today
+encoding = "base64url"             # hex | base64 | base64url
+signature = { header = "X-Acme-Signature" }        # omit `key` when the whole header is the signature
+# signature = { header = "X-Acme-Signature", key = "v1", prefix = "sha256=" }
+freshness = { from = { header = "X-Acme-Timestamp" }, format = "unixSeconds" }
+dedup = { signedBodyPointer = "/event/id" }        # optional — signature-covered id
+externalEventId = { untrustedHeader = "X-Acme-Delivery" }  # optional — display only
+
+[[verification.custom.detachedSignature.signedPayload]]
+header = "X-Acme-Timestamp"
+[[verification.custom.detachedSignature.signedPayload]]
+literal = "|"
+[[verification.custom.detachedSignature.signedPayload]]
+body = true
+```
+
+That declares HMAC-SHA256 over `<X-Acme-Timestamp>|<raw body>`.
+
+Rules, all enforced when you push rather than on the first live delivery — one function validates and compiles, so a configuration the write path accepted cannot fail structurally at delivery:
+
+| Rule | Rejection |
+|---|---|
+| The parts cover the body exactly once: exactly one `{ body = true }` part, `body` is exactly `true`, and no part names `body` alongside another key | `400 SIGNATURE_BODY_PART_REQUIRED` |
+| A `literal` separates any two variable-length parts — a `header` / `signatureField` part against `{ body = true }`, or two of them in a row. Without a separator the assembled bytes do not say where one part ends and the next begins, and a capture replays with bytes shifted across the boundary under the same signature. Every `literal` is a non-empty string, and a separating one must not overlap itself (no prefix of it is also a suffix): `\|`, `.`, `->` are fine, `::`, `..`, `abab` are not, because a self-overlapping separator matches across the boundary it marks and leaves the same two-way split. Any single character qualifies | `400 SIGNATURE_CONFIG_INVALID` |
+| `freshness.from` must also be one of the `signedPayload` parts — otherwise the value checked for staleness sits outside the signature | `400 FRESHNESS_NOT_SIGNED` |
+| `dedup.signedBodyPointer` is a bounded RFC 6901 pointer: ≤ 8 tokens, ≤ 64 chars each, ≤ 256 total, leading `/` | `400 SIGNATURE_POINTER_INVALID` |
+| `primitive` must be `hmac-sha256`. `ed25519` and `ecdsa-p256` are named in the vocabulary but not available here — use `verificationScheme = "discord"` for Ed25519, `"jwt"` for a JWS | `400 SIGNATURE_PRIMITIVE_UNSUPPORTED` |
+| Every configured header name is an HTTP field-name token; ≤ 8 parts and ≤ 1 KiB of `literal` text (a `header` or `signatureField` part is the sender's text, not yours, and is not counted); a `signatureField` part requires `signature.key`; `signature.key` and a `signatureField` name are ≤ 64 characters and carry no `,` or `=`, and `signature.prefix` is ≤ 64 characters and carries no comma when `signature.key` is set; a part carrying two variant keys where neither is `body`, and unknown keys at any level; the signature header cannot be a signed `{ header }` part and `signature.key` cannot be a `{ signatureField }` part | `400 SIGNATURE_CONFIG_INVALID` |
+
+Those are the write-time parts of the boundary rule; one more is checked per delivery, because it is a property of the delivery rather than of the configuration. A separator only locates the boundary if it does not also occur inside the values beside it, so a delivery whose `header` or `signatureField` value contains a `literal` next to it is refused with `sig_malformed`. With a non-overlapping separator neither value contains, every boundary is the first (or last) occurrence of that separator and the signed bytes read one way. Spell the separator the provider actually uses and expect the provider's own values not to carry it — an `rfc3339` timestamp beside a `.` separator only works for a provider that sends whole seconds, since a fractional second carries a `.` of its own. Some pairings can never verify: `-`, `:`, `T` and `Z` occur in every `rfc3339` timestamp, and `,`, a space and `:` in every `httpDate` one. `primitive webhooks test` refuses to preview a configuration whose timestamp cannot avoid its separator, naming the clash, rather than emitting headers the receiver rejects; where a rendering of the format does avoid it, that is the rendering the preview signs.
+
+`freshness.format` is `unixSeconds`, `unixMilliseconds`, `rfc3339` (offset required) or `httpDate` (IMF-fixdate only — the obsolete RFC 850 and asctime forms are `sig_malformed`). `httpDate` contains a comma, which is the `key=value` grammar's separator, so it can only be read from a header of its own, not a `signatureField`.
+
+`freshness` itself is optional: a provider that signs no timestamp omits it, and that webhook's dedup entries then **never expire** — the `github` rule, for the same reason (nothing bounds a replay but a permanent entry).
+
+`dedup.signedBodyPointer` resolves only after the signature verifies, and only to a non-empty string or a whole number; anything else falls back to `sha256:` of the signed payload, so no delivery is left keyless. `externalEventId.untrustedHeader` populates `meta.externalEventId` and nothing else — no configuration routes a header value into `dedupKey`, so a replay with that header edited is still answered `duplicate`.
+
+Rejection reasons on the declarative path are the existing vocabulary: `sig_missing` (the signature header or a signed header part is absent), `sig_malformed` (the header does not match the declared grammar, an undecodable signature, or a freshness value that fails its format), `sig_expired`, `sig_invalid`, `scheme_misconfigured` (a stored configuration that does not validate — never a silent fall back to the built-in `custom` format). Nothing the sender chooses produces `scheme_misconfigured`: that reason names the operator's configuration, and a configuration the write path accepted has already been checked.
+
+`primitive webhooks test <webhookId>` signs its preview from the declared configuration, so the headers it returns are ones a real delivery accepts. It answers `400 WEBHOOK_TEST_UNSUPPORTED_CONFIG`, naming the blocking part, when it cannot — reachable from a valid configuration by signing over a header an HTTP client may not set (`Host`, `Content-Length`, …); real deliveries from a provider that sets one itself still verify.
+
+Without the table, `custom` is unchanged: `t=<unix>,v1=<hmac hex>` in `X-Webhook-Signature` over `<t>.<body>`, `X-Webhook-Event-Id` as the external id. Other free-form keys under `[verification.custom]` are untouched.
+
+Both credential references must name app secrets that already exist — a create, an update that changes the config, or an update that switches the webhook onto `plaid` is rejected `400` rather than failing later as a `401`. The check is on the config actually changing (or on the scheme moving onto `plaid`), not on the field being sent: re-pushing an unchanged config on an unchanged scheme is accepted even after a referenced secret has been deleted, so one dead reference does not start failing every later `config push`. That webhook then fails closed at delivery instead, rejecting with a `401` (`secret_unresolved`).
+
+Every signature check the `jwt` scheme makes applies unchanged. The `jwt` settings `plaid` does not carry are `issuer`, `audience` and `eventIdClaim` — none of them is checked on a plaid delivery, and none may be written into `[verification.plaid]` (see above), so a plaid delivery's `externalEventId` is always the body-hash claim and there is no issuer or audience pinning. On top of those checks come the key-resolution outcomes, which appear on the delivery record as their own `rejectionReason` values:
+
+| `rejectionReason` | When |
+|---|---|
+| `secret_unresolved` | a credential reference no longer resolves — no request to Plaid is made |
+| `kid_unknown` | Plaid answered that it does not know the token's `kid` (a 400 whose `error_code` names the key) |
+| `key_expired` | Plaid returned the key with a non-null `expired_at` |
+| `key_fetch_failed` | Plaid was unreachable, timed out, or answered unusably — including any other 400, such as `INVALID_API_KEYS` after a credential rotation |
+| `key_fetch_throttled` | the webhook's key-fetch budget for this minute is spent (counted per worker instance, not globally) |
+
+Key rotation needs no configuration change: a new `kid` is simply an uncached one, fetched once and then served from cache (10 minutes fresh, 5 more stale). Unknown and expired keys are remembered for a minute, and an unreachable Plaid for ten seconds, so repeated deliveries do not become one outbound request each. Only an answer Plaid gives *about that `kid`* counts as a verdict on the key: a response the platform cannot recognise, or an error about the request or the credentials, is `key_fetch_failed` and leaves the previously-resolved copy in place. The fetch budget is charged only for `kid`s that have never resolved on that webhook, and a fetch that returns a key is refunded, so a flood of invented `kid`s cannot stop deliveries signed with the keys the webhook actually uses; when the budget is spent, a previously-resolved key is served for up to an hour rather than the delivery rejected. The one case the budget does not cover is a `kid` that is *both* brand-new and arriving while a flood has the budget spent — indistinguishable from an invented one before the fetch — so the first delivery on a freshly rotated key can be delayed by a sustained flood; the key already in use keeps verifying throughout.
+
+`externalEventId` for a `jwt` delivery is the body-hash claim unless `eventIdClaim` names another claim — and a configured `eventIdClaim` the token doesn't carry falls back to the body hash rather than leaving the delivery without a dedup key. So a captured delivery redelivered intact lands as `duplicate` inside the dedup window rather than firing a second run.
+
+That is why, for every scheme except `none`, `deduplicationEnabled` must stay `true`, `toleranceSeconds` must be greater than `0`, and `deduplicationWindowMs` must cover the whole window in which a captured delivery still verifies: `toleranceSeconds * 1000 + 60000` for the JWT family (`jwt` and `plaid`, whose future-skew allowance it is) and `toleranceSeconds * 2000` for the HMAC schemes (whose check is `|now - timestamp| <= tolerance`). A write that violates any of them is rejected `400` (`DEDUP_REQUIRED_FOR_SIGNED_SCHEME`, `DEDUP_WINDOW_TOO_SHORT`, `REPLAY_VALUE_OUT_OF_RANGE`). `deduplicationEnabled` is strictly typed on every scheme, `none` included: a non-boolean such as `0` or `"false"` is rejected (`REPLAY_VALUE_OUT_OF_RANGE`) rather than read as `false` or `true`. The rules are checked only when a write actually changes one of those values, so a webhook created before they existed keeps taking unrelated edits — but the next change to its replay settings has to leave a valid record behind. Those are write-time rules; at delivery time a signed webhook deduplicates whatever its record stores, and over at least the window above, so a record written before the rules existed still suppresses replays.
+
+On a signed scheme the key a delivery is deduplicated on comes only from material the signature covers. Where the provider signs an identifier of its own, that is the key: `stripe` uses the body's `id`, `slack` its `event_id`, `discord` the interaction `id`, and `jwt`/`plaid` the `eventIdClaim`. Where it doesn't, the key is a SHA-256 of the exact payload that was signed — the body for `github` and for `jwt`/`plaid`, `<t>.<body>` for `custom` — and a signed payload carrying no id falls back to the same hash.
+
+Every key carries a tag naming which of those it is: `sha256:<hex>` for a digest the platform computed over the signed payload, `id:<value>` for an identifier the delivery itself carried (including the `X-Webhook-Event-Id` header on `none`), and `cap:<hex>` for the lossless rehash of a key too long to index. The tags keep the two kinds of value from naming each other: without them a sender able to sign for the webhook could set an event id to the exact `sha256:` key a later, id-less delivery would produce, claim that key first, and have the legitimate delivery answered `duplicate` and never dispatched. An id that itself starts with a tag is nested inside `id:` rather than escaping it, and no ordinary derivation can produce a `cap:` key. `github` and `custom` keys are unchanged by the tagging; the `jwt`/`plaid` default key is now the canonical `sha256:` hex regardless of the `bodyHashEncoding` the provider uses. Editing or dropping `X-GitHub-Delivery` or `X-Webhook-Event-Id` on a captured delivery therefore changes nothing: the replay is answered `200 {"received": true, "duplicate": true}` and no second run fires. Those two headers still travel to the delivery log and to the workflow's `meta.externalEventId` as the provider's own id, for display and correlation — never as a security decision. The delivery log carries the derived key as `dedupKey` on accepted deliveries only — the `duplicate` row itself carries none, because the `duplicate` status is already the answer to "was this suppressed?"; the `dedupKey` on the accepted row is what tells you *which* earlier delivery it collapsed into. `primitive webhooks events <webhook-key> --json` carries it too. The reverse join is not available: a `duplicate` row shows `dedupKey` empty, and on `github`/`custom`/`none` its `externalEventId` comes from a header the signature does not cover, so a replay can have changed it. Correlate a suppressed delivery to its original by payload summary and timestamp instead.
+
+One `custom` behavior changes with this: the key is now `sha256:<hex>` of `<t>.<body>`, so the signed timestamp is part of it. A sender that retries the same logical event by **re-signing it with a fresh `t`** — the only retry `toleranceSeconds` lets through, and the normal one for a Stripe-style scheme — now produces a different key and fires the workflow a second time, where it used to be suppressed by the shared `X-Webhook-Event-Id`. That is deliberate (a header the signature does not cover cannot decide anything), but if your `custom` sender retries that way, make the workflow idempotent or move the event id into the signed body.
+
+`github` is the one built-in scheme whose dedup entries **never expire** (a declarative `custom` configuration with no `freshness` is the other case, for the same reason). GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
+
+On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_inactive` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
+
+One delivery outcome is a `503`: `Failed to record webhook delivery`, when the platform verified the delivery but could not write the `accepted` row that carries its dedup key. The workflow is **not** started in that case. That row is the only durable record that the delivery ran, so dispatching without it would leave the delivery replayable — for the whole window, and permanently on `github` — and a `503` asks the sender to retry, which is the resolution: the retry re-runs the whole path and either records the delivery and dispatches it, or fails the same way. Size your provider's retry policy to cover it. Unlike the `202` for `workflow_inactive`, this one *wants* the retry. It applies only where a dedup key was actually due: a delivery whose target workflow doesn't exist yet, and a `none` webhook with `deduplicationEnabled: false`, keep their previous best-effort logging and still dispatch.
+
+Any credential inside a `[verification.*]` table must be a `{{secrets.KEY}}` reference, and the reference must be the WHOLE value — the table is stored in cleartext, so a literal would be readable, and so would the literal half of a mixed value like `"sk_live_abcd{{secrets.SUFFIX}}"`. A write carrying either is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`). A `{{secrets.KEY}}` reference is returned verbatim on every read path, so a compliant table survives a `pull` → `push` round trip unchanged. A literal written before this rule existed is **not**: every read path (`GET`, the admin API, and therefore `config pull`) returns it as `[redacted]`. Pushing a file that still holds `[redacted]` is rejected `400` (`CREDENTIAL_MUST_BE_SECRET_REF`) — including on an edit that changed something else entirely — until the real value is moved into the app secret store and the table references it.
+
+The separate rule that a referenced key must EXIST (`400` `MISSING_CONFIG_SECRET_REF`) applies only to the paths the ACTIVE scheme resolves at delivery — today `[verification.plaid]`'s `clientId` and `secret`. A table for some other scheme is inert, so a `stripe` webhook that still carries a `[verification.plaid]` section naming deleted keys stays editable.
+
+Bodies are verified over the raw bytes, so a payload that is not valid UTF-8 verifies correctly on every scheme. A body over the webhook's size cap is rejected `401` (`body_too_large`) before it is read, on every scheme including `none`. The cap defaults to 5 MiB and is set per webhook with `maxBodyBytes` (platform maximum 25 MiB); a value above the maximum, or a non-positive one, is rejected `400` at write time on both the tenant and admin APIs, and an unset value uses the 5 MiB default.
+
+The `[verification.<scheme>]` table owns the stored config once a file declares a `[verification]` section: removing the scheme's table (leaving a bare `[verification]`) clears it on the next push, which is how a compromised key is revoked through `sync`. A file with no `[verification]` section at all leaves the stored config untouched.
+
+`signingSecret` is required for `stripe`, `github`, `slack` and `custom`, and must be a **whole** `{{secrets.KEY}}` reference into the app secret store — nothing else is accepted, on either the tenant or the admin API, on create, update and `rotate-secret`:
+
+| Write | Result |
+|---|---|
+| a raw value, or a mixed value like `"sk_live_abcd{{secrets.SUFFIX}}"` | `400` `SIGNING_SECRET_MUST_BE_SECRET_REF`, carrying the `primitive secrets set KEY --value <value>` remediation |
+| a reference to a key that does not exist | `400` naming the missing key |
+| any non-null value on `none` / `discord` / `jwt` / `plaid` | `400` `SIGNING_SECRET_NOT_SUPPORTED_FOR_SCHEME` |
+| `signingSecret: null` on a scheme that requires one | `400` — the field is never silently blanked |
+| a whole reference to an existing key | accepted, stored trimmed and canonical (`{{secrets.KEY}}`) |
+
+The Admin Console edits the same field as a picker over the app's secrets, with an inline row that creates one and writes the reference; it is shown only for the schemes that take a signing secret.
+
+The reference is stored and returned verbatim (it carries no secret material), so a `pull` → `push` round trip is unchanged. The gate is on the value the record ends up with and fires only when it CHANGES, so re-pushing an unchanged reference whose secret was later deleted is accepted rather than aborting the push.
+
+Switching a webhook onto a scheme that uses no signing secret **clears** `signingSecret`, `previousSigningSecret` and the rotation timestamp; switching back means supplying a reference again (a bare switch back is rejected naming `signingSecret`).
+
+Every read path reports a derived `signingSecretStatus` — and, since the same classification applies to the grace slot, a `previousSigningSecretStatus` with the identical four values:
+
+| value | meaning |
+|---|---|
+| `reference` | `signingSecret` holds a whole reference and is returned verbatim |
+| `legacy-literal` | the stored value is a raw secret, from before this field became reference-only: it is never returned and `config pull` writes no `signingSecret` line, but deliveries still verify with it. Writes are what is blocked — any update to the webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` unless that same update supplies a `{{secrets.KEY}}` reference. (Switching to a scheme with no signing secret also clears the literal, but only if the webhook no longer needs to verify senders — `verificationScheme: "none"` accepts every request, signed or not.) `rotate-secret` is blocked the same way — rotating would move the raw value into the grace slot, where it would keep verifying while the webhook reported itself as migrated — so migrating a literal is a hard cutover with no overlap window |
+| `malformed-reference` | the stored value carries reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, `{{vars.KEY}}`, `whsec_a{{b`), **or** an otherwise-valid reference carrying an invisible character (a zero-width space, a byte-order mark). **Not** a working legacy literal: reference text is public — it round-trips into version-controlled TOML — so it is never used as a signing key, and every signed delivery is already rejected `401` (`rejectionReason: secret_unresolved`, `cause: malformed-reference`). Writes are blocked the same way as `legacy-literal`; the remediation is to store the real signing secret and point the field at it |
+| `unset` | no signing secret. Normal for `none` / `discord` / `jwt` / `plaid`; on a signing scheme it is an unusable webhook — every signed delivery is rejected `401` (`rejectionReason: signing_secret_unset`), because an empty HMAC key is as forgeable as none at all |
+
+A second, orthogonal axis reports what is *wrong with* a stored value, as `signingSecretHealth` / `previousSigningSecretHealth`:
+
+| value | meaning |
+|---|---|
+| `ok` | nothing known to be wrong. Always the value for a `reference`, a `malformed-reference` (which is never used as a key) and `unset` |
+| `weak-literal` | the stored value is a grandfathered literal shorter than 16 characters — too short to be a strong HMAC key. Advisory only: deliveries verify exactly as before, and the value, its length and any prefix of it are never disclosed |
+
+Branch on "is it `ok`?", not on the list of members: this axis is deliberately open and more members may be added, so an unrecognized value should read as "needs attention".
+
+Resolution **fails closed**: if the reference can't be resolved at delivery (secret deleted, or the platform's secret encryption key unset) the request is rejected `401` (`rejectionReason: secret_unresolved`) rather than verifying against the literal reference text; an unresolvable grace-window `previousSigningSecret` reference is dropped rather than passed to the verifier. A `legacy-literal` value is not a reference and does not fail closed — it is the key itself. A `malformed-reference` value is not a key either, and does fail closed.
+
+The migration gate is skipped where there is nothing to force off: an **archived** webhook, and a write whose only change is a transition to `paused` or `archived`. So you can always pause or archive a webhook whose signing secret has not been migrated.
+
+**Rotation is key rotation.** A key holds exactly one value, so `primitive secrets set KEY --value <new>` is a sharp cutover. To accept both secrets during a provider's overlap window, create a second key and rotate onto it:
+
+```bash
+primitive secrets set STRIPE_WEBHOOK_SECRET_2 --value whsec_new...
+primitive webhooks rotate-secret <webhookId> --secret "{{secrets.STRIPE_WEBHOOK_SECRET_2}}"
+```
+
+`rotate-secret` requires a scheme that uses a signing secret (`400` otherwise), takes a whole reference to an existing key, moves the previous reference into `previousSigningSecret`, sets the rotation timestamp, and returns the serialized webhook. Rotating onto the key already in use is rejected — it would provide no overlap. It is also rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` while the current slot holds a raw value (`legacy-literal` or `malformed-reference`), so nothing withheld ever reaches the grace slot.
+
+The previous reference keeps verifying for `secretGracePeriodMs` (24 hours by default). That window is bounded at 30 days: a larger value is rejected `400` `SECRET_GRACE_PERIOD_OUT_OF_RANGE` on every write surface, and a webhook that already stores a larger one has it capped at the maximum when a delivery is checked — reads report the capped value, so what you see is what is enforced. `0` cuts over the moment the rotation lands. Re-sending an already-stored over-bound value unchanged is accepted, so `config push` on a webhook configured before the bound is not broken by it.
+
+Each referenced credential consumes one of the app's 100 secret slots, so an app with many signed webhooks needs one key per webhook.
 
 Receive endpoint: `POST /app/{appId}/webhook/{webhookKey}`. The platform verifies the signature per `verificationScheme`, then starts `workflowKey` with the event payload as input; `inputMapping` (e.g. `"data.object"`) extracts a nested path first. A webhook-triggered workflow is `runAs: "system"`, so what stops a client from starting it directly with a crafted payload is the system-invocation gate (members get a 403) plus the signature verification — not `accessRule`, which a system workflow doesn't evaluate on the trigger (see [Access control](#access-control)).
 
-CLI: `primitive webhooks list | get | create | update | delete | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_not_active`). `active` and `paused` are the settable statuses (`create` and `update` reject anything else, and `create` defaults to `active`); `archived` is reserved for delete and only appears on read — `list --status` filters by `active`, `paused`, or `archived`.
+CLI: `primitive webhooks list | get | disable | enable | archive | rotate-secret | test | events <webhook-key>` — `events` lists recent deliveries (accepted / rejected / duplicate / `workflow_inactive`); `--json` adds each delivery's `dedupKey`. **Availability is server-owned (#2803)**: `status` is not a TOML key and is refused on every create/update body (admin and tenant alike), a new or pushed webhook is always `active`, and `disable`/`enable` are its only writers. `archived` is written by the delete flow, whose CLI spelling is `primitive webhooks archive <id>` (#2907) — a soft delete that keeps the row, its `webhookKey` and its capped slot, refuses deliveries, and cannot be undone. `list --status` filters by `active`, `inactive` (which also matches a legacy stored `paused`), or `archived`.
 
-`webhooks test <webhook-key> --payload '<json>'` delivers and signs that JSON object exactly as given — pass the event directly (e.g. `'{"type":"charge.succeeded","data":{"id":"ch_1"}}'`), not wrapped in `{"payload": ...}`. Omitting `--payload` (or passing a non-object) sends a canned `{"type":"webhook.test", ...}` ping instead.
+An app holds at most **50 webhooks**, counting archived ones — the count is what bounds every per-webhook budget (body cap, delivery rows, remote-JWKS key fetches) for the app as a whole. A create past it is rejected `400` `WEBHOOK_LIMIT_REACHED` on both the tenant and admin APIs (never a `409`, so `config push` cannot mistake it for a key conflict), and `primitive config push` checks up front how many webhooks the `webhooks/` directory would create and refuses, before writing anything, a push that would leave the app past the limit. Only creates count against it: an app at (or already over) the limit can still push its existing config — webhooks, workflows, databases and vars alike. Apps already over the limit keep working; only new creates are refused. An API delete, a console delete and `primitive webhooks archive` all archive, so none of them frees a slot. `primitive config push --prune` does: it is the one prune path that hard-deletes instead of archiving, so a webhook whose TOML you deleted is removed permanently, freeing its slot and releasing its `key` for reuse — deliberate (an archiving prune would burn a slot per cycle with no way to reclaim it from `sync`) but irreversible, and unlike every other pruned resource type. A hard delete does not delete the webhook's delivery rows, but its id stops resolving, so `primitive webhooks events <id>` on it answers "not found" — read the history first. The tenant `GET /app/{appId}/api/webhooks` returns active webhooks only; use `primitive webhooks list --status archived` (or the admin list, which applies no status filter) to see the archived rows that are still holding slots.
 
-A `workflow_not_active` delivery means the bound workflow was draft or archived when the event arrived: the request is acked with HTTP 202 `{ received: true }` (so the sender doesn't retry) but the workflow is **not dispatched**. Activate the workflow and resend — these events are excluded from deduplication, so the resend isn't dropped as a duplicate. Binding a webhook to a not-yet-active workflow succeeds and returns a non-blocking `warning` carrying `WORKFLOW_NOT_ACTIVE`.
+`webhooks test <webhook-key> --payload '<json>'` **signs** that JSON object exactly as given and returns the signed request body plus the signature headers — it does **not** post them to the receive endpoint, so it dispatches no workflow and writes no delivery row. Pass the event directly (e.g. `'{"type":"charge.succeeded","data":{"id":"ch_1"}}'`), not wrapped in `{"payload": ...}`. Omitting `--payload` (or passing a non-object) signs a canned `{"type":"webhook.test", ...}` ping instead. To exercise the real path, send the returned body with the returned headers to `POST /app/{appId}/webhook/{webhookKey}` yourself. That delivery is where the `github` consequence bites: the key is `sha256(body)` and `github` entries never expire, so replaying the same signed body is answered `duplicate` the second time and does not dispatch — permanently, with recreating the webhook as the only reset. Vary the payload between real test deliveries (any byte change is a different key). The canned ping carries a fresh timestamp, so it is safe to repeat.
+
+`webhooks test` returns `200` only when the headers it hands back are ones the receiver would accept; every other case is a `400` carrying a `code`, on which the CLI prints the message with its code and exits non-zero. `WEBHOOK_TEST_SIGNING_UNSUPPORTED` means the scheme is verified with public key material only (`discord`, `jwt`, `plaid`) so no preview signature can exist — use `primitive webhooks verify` on a captured delivery instead. `WEBHOOK_TEST_SIGNING_SECRET_WITHHELD` means the `signingSecret` is still a raw stored value: deliveries keep verifying with it, but the row is unmigrated, so store the value with `primitive secrets set` and point the field at a `{{secrets.KEY}}` reference. `SIGNING_SECRET_MUST_BE_SECRET_REF` and `MISSING_CONFIG_SECRET_REF` mean the secret is unset, blank, malformed, or its app secret is gone — deliveries there are already rejected. `verificationScheme = "none"` is the one unsigned `200`, because a `none` delivery genuinely carries no signature — a successful preview, printed with its signed body and headers and exit `0`.
+
+`webhooks verify <webhook-id> --header 'Name: value' [--header …] (--body '<text>' | --body-file <path>)` runs the webhook's configured verifier over a delivery you captured and reports the verdict, the scheme, and the rejection reason — the same vocabulary `webhooks events` shows. Exit `0` when the signature verifies, non-zero otherwise. `--body-file` is read as raw bytes and sent base64-encoded when they are not valid UTF-8, so the verifier sees exactly the captured bytes. Nothing is delivered, and the check is deliberately absent from `webhooks events`, which stays the record of real deliveries. It answers SIGNATURE verification only: status and IP allowlist are checked before verification and handshake rules and deduplication after it, so `verified: true` does not promise the delivery would have dispatched. `none` is refused rather than answered — it checks no signature. Over the API: `POST /admin/api/apps/{appId}/webhooks/{webhookId}/verify` with `{ headers, rawBody }` or `{ headers, bodyBase64 }` (exactly one body form; `headers` as a flat object or ordered `[name, value]` pairs). A bad signature is a `200` verdict; a `400` (`WEBHOOK_VERIFY_BODY_INVALID`, `WEBHOOK_VERIFY_HEADERS_INVALID`, `WEBHOOK_VERIFY_SCHEME_UNSUPPORTED`) means the request itself was malformed.
+
+A `workflow_inactive` delivery means the bound workflow was not dispatchable when the event arrived: the request is acked with HTTP 202 `{ received: true }` (so the sender doesn't retry) but the workflow is **not dispatched**. The event's `rejectionReason` names which case it was — `WORKFLOW_INACTIVE` for a disabled workflow (run `primitive workflows enable <key>` and resend) or `WORKFLOW_ARCHIVED` for a retired one (re-point the webhook, or hard-delete the archived holder and push the workflow's file again). These events are excluded from deduplication, so a resend isn't dropped as a duplicate. Binding a webhook to either succeeds and returns a non-blocking `warning` carrying the matching code.
 
 ## Cron triggers
 
@@ -1380,13 +1729,13 @@ A cron trigger fires a workflow on a clock schedule. It is one of the ways to in
 
 ### Critical rules
 
-1. **Cron triggers fire workflows, not arbitrary code.** Create the workflow first (`status = "active"` with an active config/revision), then point the trigger at it via `workflowKey`.
+1. **Cron triggers fire workflows, not arbitrary code.** Create the workflow first — push it, and confirm it is in service and has an active config/revision — then point the trigger at it via `workflowKey`. Availability is server-owned: `primitive workflows enable|disable` is what changes it, and a pushed workflow starts in service. Retirement is `primitive workflows archive <id>` / `primitive cron-triggers archive <id>` — the delete flow's soft path, which keeps the row and its key (and the trigger's capped slot) and cannot be undone.
 2. **Set `requiresClientApply = false` on the target workflow.** Cron-triggered workflows almost always want this — otherwise the run sits in `apply_pending` forever because no client is listening.
 3. **Set an IANA `timezone` whenever the schedule has a user-visible hour.** `0 9 * * *` in UTC is 2am in Los Angeles.
 4. **`overlapPolicy` is `"skip"` (default) or `"allow"`.** There is no `"queue"`. `"skip"` checks whether the previous run is still active and increments `skippedCount`; `"allow"` always fires. Use `"allow"` only when each firing is independent and idempotent.
-5. **Per-app cap is 50 cron triggers.**
+5. **Per-app cap is 50 cron triggers**, archived ones included: `primitive cron-triggers archive` retires a trigger and cancels its schedule but frees neither its slot nor its `triggerKey`. Only a hard delete does — remove the file and run a confirmed `primitive config push --prune`.
 
-### Creating (TOML / `primitive sync`)
+### Creating (TOML / `primitive config`)
 
 ```toml
 # config/cron-triggers/nightly-digest.toml
@@ -1397,7 +1746,9 @@ cron = "0 9 * * *"
 timezone = "America/Los_Angeles"
 workflowKey = "send-digest"
 overlapPolicy = "skip"
-state = "active"
+# Availability is server-owned and not authored here: a pushed trigger is in
+# service, `primitive cron-triggers enable|disable` is what changes it, and
+# `primitive cron-triggers archive` retires it (soft delete; keeps key and slot).
 
 # Optional: static input passed to the workflow on every fire
 [rootInput]
@@ -1410,7 +1761,7 @@ firedAt = "{{now}}"
 ```
 
 ```bash
-primitive sync push
+primitive config push
 ```
 
 The TOML key `key` maps to the API field `triggerKey`. The field name is `cron` (not `schedule`).
@@ -1428,34 +1779,20 @@ The TOML key `key` maps to the API field `triggerKey`. The field name is `cron` 
     rootInput: ["digestType": "daily"],   // NOT `input`
     inputMapping: ["firedAt": "{{now}}"]  // merged over rootInput; {{now}} = fire time
   ))
-  // trigger.triggerId is a ULID — use it for get/update/pause/test/delete.
+  // trigger.triggerId is a ULID — use it for get/update/disable/test/delete.
 ```
 
-Via the CLI:
+From the CLI, a trigger is TOML plus a push — `config create` scaffolds the file from the type's defaults:
 
 ```bash
-primitive cron-triggers create \
-  --key nightly-digest \
-  --name "Nightly Digest" \
-  --cron "0 9 * * *" \
-  --workflow-key send-digest \
-  --timezone "America/Los_Angeles" \
-  --overlap-policy skip       # skip (default) | allow
-
-# With per-firing input passed to the workflow:
-primitive cron-triggers create \
-  --key nightly-digest --name "Nightly Digest" --cron "0 9 * * *" \
-  --workflow-key send-digest \
-  --input '{"reportType":"daily","priority":"high"}'
-
-# Or map fields from the trigger firing context into the workflow input:
-primitive cron-triggers create \
-  --key nightly-digest --name "Nightly Digest" --cron "0 9 * * *" \
-  --workflow-key send-digest \
-  --input-mapping '{"runId":"$triggerId","at":"$firedAt"}'
+primitive config fields cron-trigger                 # key, displayName, cron, timezone, workflowKey, overlapPolicy, state
+primitive config create cron-trigger nightly-digest  # writes cron-triggers/nightly-digest.toml
+primitive config push --only cron-trigger/nightly-digest
 ```
 
-The CLI flags are `--key`, `--name`, `--cron`, `--workflow-key`, `--overlap-policy`, `--timezone`, `--input`, `--input-mapping` — NOT `--schedule` or `--workflow`. `--input` is a literal payload; `--input-mapping` projects fields from the firing context into the workflow input. Both are also accepted by `cron-triggers update`.
+`[rootInput]` in that file is a fixed payload sent on every firing; `[inputMapping]` projects the firing context (`$triggerId`, `$firedAt`) onto the workflow input.
+
+The TOML keys are `key`, `displayName`, `cron`, `timezone`, `workflowKey`, `overlapPolicy` and `state` under `[cronTrigger]`, plus the `[rootInput]` and `[inputMapping]` tables — the field is `cron`, not `schedule`, and `workflowKey`, not `workflow`.
 
 #### Wrong
 
@@ -1473,7 +1810,7 @@ The CLI flags are `--key`, `--name`, `--cron`, `--workflow-key`, `--overlap-poli
 | `rootInput` | No | JSON object, merged into workflow input. |
 | `inputMapping` | No | JSON object, merged AFTER `rootInput`. Supports `{{now}}` substitution. |
 | `description` | No | Free text. |
-| `state` | Update only | `"active"` / `"paused"` / `"archived"`. Set on update; create always starts `"active"`. |
+| `status` | Read only | `"active"` / `"inactive"` / `"archived"`. Server-owned: create always produces `"active"`, `disable`/`enable` are the only writers, and delete writes `"archived"`. It is not settable through `update`. |
 
 ### Cron expression syntax
 
@@ -1496,7 +1833,7 @@ Supported per field: `*`, exact (`5`), range (`5-10`), step on wildcard (`*/5`),
 | First of every month | `0 0 1 * *` |
 | Every 15 min, business hours, Mon–Fri | `*/15 9-17 * * 1-5` |
 
-Invalid expressions are rejected at create time. If the cron later becomes unparseable (rare), the trigger transitions to `state: "error_paused"` with `lastError` set; alarms stop until you call `resume`.
+Invalid expressions are rejected at create time. If the cron later becomes unparseable (rare), the trigger goes to `status: "inactive"` with `lastError` set; alarms stop until you call `enable`.
 
 ### Workflow input shape
 
@@ -1520,12 +1857,12 @@ run.meta.manual     // true if started via cronTriggers.test()
 ```swift
   _ = try await client.cronTriggers.list()                         // excludes archived
   _ = try await client.cronTriggers.get(triggerId: triggerId)      // includes runtime.scheduledAlarmAt
-  _ = try await client.cronTriggers.update(                        // change cron/timezone/state etc.
+  _ = try await client.cronTriggers.update(                        // change cron/timezone etc.
     triggerId: triggerId,
     params: UpdateCronTriggerParams(cron: "0 8 * * *", timezone: "America/New_York")
   )
-  _ = try await client.cronTriggers.pause(triggerId: triggerId)    // cancels the pending alarm
-  _ = try await client.cronTriggers.resume(triggerId: triggerId)   // clears lastError, reschedules
+  _ = try await client.cronTriggers.disable(triggerId: triggerId)  // cancels the pending alarm
+  _ = try await client.cronTriggers.enable(triggerId: triggerId)   // clears lastError, reschedules
   _ = try await client.cronTriggers.test(triggerId: triggerId)     // fire NOW; does not touch schedule
   _ = try await client.cronTriggers.delete(triggerId: triggerId)   // soft delete (archive)
 ```
@@ -1536,10 +1873,11 @@ run.meta.manual     // true if started via cronTriggers.test()
 primitive cron-triggers list
 primitive cron-triggers get <trigger-id>          # includes runtime.scheduledAlarmAt
 primitive cron-triggers test <trigger-id>         # fire now; does NOT affect schedule
-primitive cron-triggers pause <trigger-id>
-primitive cron-triggers resume <trigger-id>
-primitive cron-triggers delete <trigger-id>
+primitive cron-triggers disable <trigger-id>
+primitive cron-triggers enable <trigger-id>
 ```
+
+Deleting a trigger from the CLI is deleting `cron-triggers/<key>.toml` and running `primitive config push --prune`. Editing one is editing that file. `pause`/`resume` are operational rather than configuration: they write a runtime field that is deliberately not a TOML key, so a later push cannot resume a trigger you paused, and `config diff` reports it as "operationally disabled; configuration unchanged" rather than as drift.
 
 ### Querying cron-triggered runs
 
@@ -1565,14 +1903,13 @@ There is no `triggerSource` filter on `workflows.listRuns()`. Cron runs are iden
 
 ### Debugging cron triggers
 
-Trigger states:
+Trigger status:
 
 - `active` — scheduled, alarm armed.
-- `paused` — manual pause; alarm cancelled until `resume`.
-- `error_paused` — set automatically when a fire fails hard (the target workflow is **not found**, or a binding/runtime error), when the cron expression becomes unparseable, or after 50 consecutive skips against a **not-active** target. `lastError` is populated (carrying `WORKFLOW_NOT_FOUND` or `WORKFLOW_NOT_ACTIVE`). Call `resume` to clear and reschedule.
-- `archived` — soft-deleted; never returns from list.
+- `inactive` — out of service; the alarm is cancelled until `enable`. Either an operator ran `disable`, or the platform stopped it automatically — when a fire fails hard (the target workflow is **not found**, or a binding/runtime error), when the cron expression becomes unparseable, or after 50 consecutive skips against a target with **no active configuration**. In the automatic cases `lastError` says which (carrying `WORKFLOW_NOT_FOUND` or `WORKFLOW_NO_ACTIVE_CONFIG`); `enable` clears it and reschedules.
+- `archived` — soft-deleted; never returns from list. `enable` refuses it: re-create the trigger by pushing its file again.
 
-A target workflow that is draft or archived (**not active**) does NOT error-pause on the first fire: the fire is skipped and rescheduled, `lastError` is set to `WORKFLOW_NOT_ACTIVE`, and `consecutiveNotActiveCount` increments. It auto-recovers once the workflow is activated (the counter resets and `lastError` clears); only after 50 consecutive not-active skips does it escalate to `error_paused`. A target that is **not found**, by contrast, error-pauses immediately.
+A target workflow that is **inactive** or **archived** does NOT take the trigger out of service: the fire is skipped and rescheduled indefinitely, and `lastError` is set to `WORKFLOW_INACTIVE` or `WORKFLOW_ARCHIVED`. Both are deliberate operator acts, so the trigger waits rather than punishing the operator with a second thing to undo; an inactive target auto-recovers once `primitive workflows enable <key>` runs, and an archived one waits for the binding to be re-pointed. A target that is active but has **no resolvable configuration** still advances `consecutiveNotActiveCount` and stops the trigger after 50 consecutive skips, and one that is **not found** stops it immediately.
 
 `skippedCount` increments when `overlapPolicy: "skip"` blocks a fire because the prior run is still active — distinct from `consecutiveNotActiveCount`.
 
@@ -1592,22 +1929,22 @@ key = "nightly-digest"
 requiresClientApply = false
 ```
 
-`primitive sync push` pushes this flag. You can also set it via the CLI:
+`primitive config push` applies this flag on create and on update alike:
 
 ```bash
-primitive workflows create --from-file workflow.toml --requires-client-apply false
-primitive workflows update <workflow-id> --requires-client-apply false
+primitive config set workflow/nightly-digest workflow.requiresClientApply=false
+primitive config push --only workflow/nightly-digest
 ```
 
 ## Synchronous invocation
 
-Opt a workflow into synchronous invocation by setting `syncCallable = true` in the TOML (pushed by `primitive sync push`) or via `primitive workflows update --sync-callable true`. Once set, a caller can invoke the workflow and receive the final envelope in a single round-trip — useful for short, latency-sensitive tasks like input validation, enrichment lookups, or webhook handlers that must reply with a result.
+Opt a workflow into synchronous invocation by setting `syncCallable = true` in the TOML and pushing it — on a new workflow and an existing one alike. Once set, a caller can invoke the workflow and receive the final envelope in a single round-trip — useful for short, latency-sensitive tasks like input validation, enrichment lookups, or webhook handlers that must reply with a result.
 
 Server-side constraints on a `syncCallable` workflow:
 
 - **Step kinds are restricted.** The server validates step kinds against a sync-compatible list when the flag is set (or when steps are pushed against a sync-callable workflow). Long-running or suspending kinds (`event.wait`, `delay` over the timeout) reject at save time with `Workflow contains sync-incompatible steps`.
-- **No run-scoped `lock:`.** A `syncCallable` workflow cannot also declare a run-scoped `lock:`. The declarative-lock acquire-around-run lifecycle runs only on the durable execution path, not under run-sync, so a lock on a sync-callable workflow would be silently skipped while the run still reported success. The server rejects the combination at save time with `Workflow lock is incompatible with syncCallable`, and a `workflow.call` into a workflow that declares a lock fails fast for the same reason (its child runs under run-sync). Honoring declarative locks under run-sync / `workflow.call` is tracked in [#1883](https://github.com/Primitive-Labs/js-bao-wss/issues/1883).
-- **Timeout.** The invocation timeout defaults to 5s (`timeoutMs`) and is capped server-side at 30s; anything above the ceiling clamps silently. Exceeding it resolves with `status: "timeout"` in the envelope. The timeout ends the **call**, not the execution: work is not interrupted at the boundary, so side effects from steps still in flight (database writes, emails) can land after the envelope resolves. The run record is finalized `terminated` before the response returns — the envelope's `run.status` reads `terminated`, and the record never transitions to `completed`. `getStatus` targets durable `start()` runs; a sync run's final state comes back in the envelope's `run` and appears in `workflows.listRuns()`. Step-run records are salvaged only when execution settles within a short grace window at the boundary — a timed-out run typically persists no step runs. Recovery: never poll for completion after a timeout; treat the run as incomplete, reconcile against actual resource state with idempotent cleanup or retry, and re-invoke with a **new** `runKey` — the sync path has no `forceRerun`, so the same `runKey` returns the terminated run without re-executing. When the final outcome must be knowable, prefer `start()`: a durable run's record reaches a real terminal status pollable via `getStatus`.
+- **Run-scoped `lock:` is honored.** A `syncCallable` workflow may declare a run-scoped `lock:`: the acquire-around-run lifecycle now runs under run-sync and through `workflow.call`, not only on the durable path. All paths share one app-scoped lock namespace, so a durable `start()` run and a `run-sync` run of the same key serialize against each other. A nested `workflow.call` that declares a key an ancestor already holds re-enters it (runs without re-acquiring); concurrent same-run `workflow.call` siblings declaring the same fresh key are NOT mutually excluded (a run does not serialize against itself). The imperative `lock.*` steps are not an escape hatch for this: a `workflow.call` child inherits its parent's run identity, and every workflow-held lock is owned by that identity, so two `lock.acquire` steps on one key inside a single run both return `acquired: true` with the same handle. To serialize concurrent branches, set the `forEach` step's `concurrency = 1`; to let them run concurrently without contending, give each branch its own key.
+- **Timeout.** The invocation timeout defaults to 5s and is capped server-side at 30s; anything above the ceiling clamps silently. Exceeding it resolves with `status: "timeout"` in the envelope. The timeout ends the **call**, not the execution: work is not interrupted at the boundary, so side effects from steps still in flight (database writes, emails) can land after the envelope resolves. The run record is finalized `terminated` before the response returns — the envelope's `run.status` reads `terminated`, and the record never transitions to `completed`. `getStatus` targets durable `start()` runs; a sync run's final state comes back in the envelope's `run` and appears in `workflows.listRuns()`. Step-run records are salvaged only when execution settles within a short grace window at the boundary — a timed-out run typically persists no step runs. Recovery: never poll for completion after a timeout; treat the run as incomplete, reconcile against actual resource state with idempotent cleanup or retry, and re-invoke with a **new** `runKey` — the sync path has no `forceRerun`, so the same `runKey` returns the terminated run without re-executing. When the final outcome must be knowable, prefer `start()`: a durable run's record reaches a real terminal status pollable via `getStatus`.
 - **Apply still applies.** A sync-callable workflow may still have `requiresClientApply = true`, in which case the synchronous call resolves with `status: "apply_pending"` and the normal `claimApply`/`confirmApply` flow takes over. Most sync-callable workflows want `requiresClientApply = false`.
 
 Long-running workflows should keep using `start()` plus the WebSocket / polling lifecycle.
@@ -1618,7 +1955,7 @@ Call `workflows.runSync` and await the final envelope:
   let result = try await client.workflows.runSync(
     workflowKey: "validate-coupon",
     input: ["code": code],
-    timeoutMs: 5000 // default 5000; server caps at 30000
+    timeout: 5 // seconds; default 5, server caps at 30
   )
   // RunSyncWorkflowResult: runId, runKey, status, output?, error?, run?, existing?
   // status: "completed" | "failed" | "terminated" | "timeout" | "apply_pending"
@@ -1635,43 +1972,83 @@ Both invocation methods are generic: `start<Input>(...)` types the `input`, and 
 
 ## Workflow lifecycle
 
-A workflow needs `status = "active"` AND one of (active configuration | published revision) before clients can run it.
+A workflow needs to be `active` AND have one of (active configuration | published revision) before clients can run it. Availability is one server-owned `status` — `active | inactive | archived` — and is **not** a TOML key: every created or pushed workflow is active, and `primitive workflows disable <key>` / `enable <key>` (or the console's action) plus the delete flow are its only writers. A file that still carries a `[workflow] status` line fails `config push` with a message naming the verb.
 
 | Status | Active config/revision? | Client can run? | CLI preview? |
 |---|---|---|---|
-| `draft` | either | no | yes |
 | `active` | yes (required) | yes | yes |
-| `archived` | – | no | no |
+| `inactive` | either | no (`409 WORKFLOW_INACTIVE`) | yes — preview is a diagnostic |
+| `archived` | either | no (`409 WORKFLOW_ARCHIVED`) | no — it has been deleted |
 
-Setting `status = "active"` without an active config or revision returns: `Cannot activate workflow without a configuration`.
+`primitive workflows enable` on a workflow with no active config or revision returns: `Cannot activate workflow without a configuration`. A row stored before this model may still carry `draft`, which reads `inactive`.
 
-`primitive workflows delete <id>` (the default) is a **soft delete**: it archives the workflow and keeps its `workflowKey` reserved, so recreating a workflow under the same key fails with `workflowKey already exists (held by an archived workflow <id>)`. Free the key for reuse with a hard delete — `primitive workflows delete <id> --hard` — which also cascades to the workflow's configurations, runs, step runs, and test cases.
+Deleting is two acts. A plain admin `DELETE` (and the console's **Archive**) **retires** the workflow: `status` becomes `archived`, and nothing else changes — its configurations, revisions, runs, step runs and test cases all stay, so the run history keeps resolving what it points at. An archived workflow is refused by every dispatch path, cannot be brought back with `enable`, and goes on holding its `workflowKey`, so re-creating under that key fails with `workflowKey already exists (held by an archived workflow <id>)`. `DELETE ?hard=true` (the console's **Delete permanently**, and what `primitive config push --prune` sends) **destroys**: the full cascade, which is also what frees the key. So the config-as-code way to retire a workflow permanently is to remove `workflows/<key>.toml` and run a confirmed `primitive config push --prune`; to bring the key back after archiving, hard-delete the holder first and then push the file again — a bare re-push cannot clear a server-owned `archived`.
 
-`primitive sync push` creates a default configuration automatically when a workflow is first created and updates it on subsequent pushes. Each push of `[[steps]]` updates the active configuration's steps in place. `primitive workflows update <id> --from-file <toml>` pushes a revised body (metadata + steps) to an existing workflow the same way without the full sync directory — it overwrites the active configuration in place and is live immediately; explicit `update` flags override the TOML's metadata.
+`primitive config push` creates a default configuration automatically when a workflow is first created and updates it on subsequent pushes. Each push of `[[steps]]` updates the active configuration's steps in place, live immediately.
 
 ### Configurations vs revisions
 
-- **Configurations** (recommended): named, mutable groupings of steps. One is `activeConfigId`. Created automatically on first sync push.
-- **Revisions**: immutable snapshots created via `primitive workflows publish`. Prefer configurations.
+- **Configurations** (recommended): named, mutable groupings of steps. One is `activeConfigId`. Created automatically on first config push.
+- **Revisions**: immutable snapshots minted by a legacy publish path that no longer exists (the command and its endpoint are gone; the endpoint answers `404`). Read-only history now — the engine still runs a legacy revision for a workflow that has one, but nothing creates or promotes revisions. Use configurations.
+
+#### Migrating a legacy workflow to the configurations model
+
+A workflow with no active configuration is one created before the model existed. `config push` still writes its body to the legacy DRAFT slot, and nothing promotes that slot any more, so the pushed steps never run — the push warns and names this migration. It is a pure TOML change in the app repo:
+
+1. **Identify one — with a read that does not change it.** `primitive workflows list --json` reports `activeConfigId: null` for a legacy workflow. Prefer it over `primitive workflows get`: reading a workflow's DETAIL is not neutral (see the note below), and a `config push` of its steps warning that they landed in the legacy draft slot is the other signal.
+2. **`primitive config pull`.** What you get is the active configuration's body when the detail read already migrated the workflow (a copy of the revision that was running), and the DRAFT slot's body when it did not. The draft is not necessarily what runs: if it was edited after the last publish, the two differ. Compare the pulled steps against the latest revision before activating anything — you are about to make the file's body live.
+3. **Write the sidecar.** Put the body in `workflows/<key>.configs/<name>.toml` and set `activeConfigName = "<name>"` in the `[workflow]` table of `workflows/<key>.toml`. The sidecar is required: on an existing workflow, `activeConfigName` must name a config that exists or one authored as a sidecar in the same push — a name matching neither fails the push rather than renaming the live config.
+4. **`primitive config push`.** It creates the config from the sidecar and activates it. The workflow is on the configurations model from here, and the warning stops.
+5. **Optionally `primitive config pull` again** to normalize the layout: the live config's body moves to the top of `workflows/<key>.toml` and its sidecar goes away (pull writes sidecars only for the non-live configs).
+
+> **Reading the detail migrates it.** Fetching a workflow's detail — `primitive workflows get`, `config pull`, `config push`, the console — auto-migrates a workflow that has no configurations: the server copies its latest revision, or the draft slot when there is no revision, into a configuration named `default` and activates it. For a workflow with a published revision that changes no behaviour (what already ran keeps running) and completes the move for you, so steps 2-4 become "pull, edit, push" like any other workflow. For a draft-only workflow it makes the DRAFT live, so look at the draft before that first read if the distinction matters. It is also why a `config push` can land steps in the draft slot and then report that the workflow now runs a configuration copied from its latest revision: push again with `--force` to write those steps to it.
+
+### Run status vocabulary
+
+A **run**'s status (distinct from the workflow's `active`/`inactive` availability above) is always one of nine values. The same set is used by `getStatus`, `listRuns`, `terminate`, the `workflowStatus` event, the CLI, and the persisted run record.
+
+| Status | Terminal? | Meaning |
+|---|---|---|
+| `queued` | no | Accepted, waiting to start executing. |
+| `running` | no | Executing. |
+| `apply_pending` | no (settles `waitFor`) | Server-side work finished; waiting for the client apply handler. |
+| `apply_claimed` | no (settles `waitFor`) | An apply handler has claimed the run. |
+| `completed` | yes | Finished successfully. |
+| `failed` | yes | Finished with an error; `error` / `errorMessage` is set. |
+| `terminated` | yes | Stopped before finishing — `terminate()`, a `runSync` timeout, or a disabled user. |
+| `missing` | — | The run's execution can no longer be resolved. |
+| `skipped` | yes | Did not run: its declarative lock was held and the workflow declared `onContention = "ignore"`. Carries `skipReason` (`LOCK_CONTENTION`), no error, and emits no error events. |
+
+Compare against these values directly — do not map spellings client-side. The server reconciles a run's state before answering, so:
+
+- The value is the same across every surface for the same run, with one deliberate exception: for an apply-flow run the `workflowStatus` event reports `completed` with `needsApply: true`, where `getStatus` and `listRuns` report `apply_pending`.
+- Reading a status never changes the run's recorded state, and a `terminated` run never later reads as `completed`.
+- A run whose execution has just ended can briefly report `running` while the platform publishes its output, so `status` and `output` never contradict each other. Treat a non-terminal read as "not finished yet, keep polling" rather than proof the run is still executing. `run.status` on the same response carries the recorded terminal status throughout, and `waitFor` handles the window for you.
+- `listRuns --status <value>` (and `?status=` over the API) accepts these values; an unrecognised value is rejected with `400` rather than silently matching nothing.
+
+A failed run may also carry `errorCode`, the platform's own classification of the failure: `LOCK_CONTENTION` (lost a declarative-lock race under `onContention = "fail"`) or `LOCK_TIMEOUT` (exhausted an `onContention = "block"` budget). It is `null` for every failure the platform does not classify. Branch on `errorCode` / `skipReason` rather than matching `errorMessage` text — both are server-written from a closed set, and an app cannot set either one.
+
+One value outside this set exists and is deliberate: `runSync`'s response envelope reports `status: "timeout"` when the in-request budget expired. That describes the **call**, not the run — the same envelope's `run.status` carries the canonical `terminated`.
 
 ## CLI
 
 ```bash
 # Sync (recommended for everything; sync dir auto-resolves to .primitive/sync/<env>/<appId>/)
-primitive sync init
-primitive sync pull
-primitive sync diff
-primitive sync push --dry-run
-primitive sync push
+primitive config init
+primitive config pull
+primitive config diff
+primitive config push --dry-run
+primitive config push
 
-# Workflow CRUD (when not using sync)
-primitive workflows list [--status active] [--json]
+# Authoring (TOML only — there is no workflows create/update/delete)
+primitive config fields workflow                    # every [workflow] key, type, required, default
+primitive config create workflow order-intake       # scaffold workflows/order-intake.toml
+primitive config push --only workflow/order-intake  # apply just this workflow
+# Delete: remove workflows/<key>.toml, then `primitive config push --prune`
+
+# Reading
+primitive workflows list [--status active|inactive] [--json]
 primitive workflows get <workflow-id>
-primitive workflows create --from-file workflow.toml [--requires-client-apply false]
-primitive workflows update <workflow-id> --status active
-primitive workflows update <workflow-id> --from-file workflow.toml   # push a revised body (metadata + steps) in place, live immediately; explicit flags above override TOML values
-primitive workflows delete <workflow-id>           # archive (soft delete; the workflowKey stays reserved)
-primitive workflows delete <workflow-id> --hard --yes   # also frees the workflowKey for reuse
 
 # Inspect / reset iterate-users iterations
 primitive workflows iterations list [--app <id>] [--json]
@@ -1691,43 +2068,48 @@ primitive workflows preview <workflow-id> --draft --wait
 #   3. active configuration (default)
 #   4. draft (fallback if no active config)
 
-# Draft / publish (revision flow)
-primitive workflows draft update <workflow-id> --from-file workflow.toml
-primitive workflows publish <workflow-id>
-
-# Configurations
+# Configurations — read from the CLI, written as TOML
 primitive workflows configs list <workflow-id>
 primitive workflows configs get <workflow-id> <config-id>
-primitive workflows configs create <workflow-id> --name "production" --from-file workflow.toml
-primitive workflows configs update <workflow-id> <config-id> --from-file workflow.toml
-primitive workflows configs activate <workflow-id> <config-id>
-primitive workflows configs duplicate <workflow-id> <config-id> --name "experiment-v2"
-primitive workflows configs archive <workflow-id> <config-id>
+# A named config's BODY is a sidecar file: workflows/<key>.configs/<name>.toml.
+# The live config is `activeConfigName` in the `[workflow]` table of
+# workflows/<key>.toml, and it is authoritative on create AND update.
+# `config pull` writes a sidecar for every config except the live one, whose body
+# is the `steps` at the top of the workflow file. `config push` applies both.
+
+# Operational, not configuration: take a workflow out of service from anywhere,
+# with no checkout. Changes no TOML field, so `config diff` reports the object as
+# "operationally disabled; configuration unchanged" rather than as drift.
+primitive workflows disable <workflow-id>
+primitive workflows enable <workflow-id>
 
 # Run inspection
-primitive workflows runs list <workflow-id> [--status pending|running|completed|failed]
+primitive workflows runs list <workflow-id> [--status queued|running|apply_pending|apply_claimed|completed|failed|terminated|missing|skipped]
 primitive workflows runs status <workflow-id> <run-id>
 primitive workflows runs steps <workflow-id> <run-id>
 primitive workflows runs step-detail <workflow-id> <run-id> <step-id>
 primitive workflows runs error <workflow-id> <run-id>
 primitive workflows runs failures <workflow-id>
 
-# Test cases
+# Test cases — authored at workflows/<key>.tests/<case>.toml, applied by
+# `primitive config push`; `config fields workflow` lists the keys.
 primitive workflows tests list <workflow-id>
-primitive workflows tests create <workflow-id> --name "Basic" --vars '{"x":1}' --contains '["expected"]'
 primitive workflows tests run <workflow-id> <test-case-id>
 primitive workflows tests run-all <workflow-id>
 
-# Analytics (CLI-side)
-primitive workflows analytics overview --days 7
-primitive workflows analytics top --days 7
+# Analytics — under the analytics noun, not this one
+primitive analytics workflows --window-days 7 --limit 10
 ```
+
+Workflow analytics live under the `analytics` noun, the single home for per-subject analytics (workflows, prompts, integrations). The `workflows analytics` group was removed. Migrate `workflows analytics top --days N --json` to `primitive analytics workflows --window-days N --json`: same endpoint, same payload, but the default window changed from 7 days to 30 — pass `--window-days 7` explicitly to keep the old default. `workflows analytics overview` was **retired without a replacement**, not moved: the `analytics/workflows/overview` endpoint it called was never registered server-side, so it always returned 404. `analytics workflows` is not that view — it ranks individual workflows by runs (with success rate, median, P95 and tokens per row) rather than reporting app-wide workflow totals. See the analytics guide for what the REST API does expose.
 
 `runs list` includes a `DELAY` column (`queueDelayMs`); `runs status` includes "Execution started" (`executionStartedAt`), "Queue delay" (`queueDelayMs`), and "Create call" (`createCallDurationMs`, the wall-clock time of the run's underlying create call) lines. `executionStartedAt` and `queueDelayMs` are `null` while the run is still queued.
 
+`runs failures` is the triage view: failed runs only, with `STEP` and `ERROR` columns naming the failed step and the cause, so repeated failures group at a glance instead of needing one `runs error` call per run. Its `--json` emits the shared inspection item shape inside `{ items }` — group on `detail.errorTitle`, and pivot to `runs error <workflow-id> <run-id>` for the caret-annotated expression and step input/config. An empty `STEP` means the run failed with no attributable step (a launch-time abort, a reclaimed run, or output-schema validation after every step completed) — the message is still there. The HTTP payload spells that as an explicit `null`; the CLI's `--json` omits the key entirely, so test for "missing or null". See the inspection guide for the full field table.
+
 All inspection commands take `--json`.
 
-Every `<workflow-id>` argument above — CRUD, draft/publish, configs, runs — accepts the workflow **key** as well as the ULID. The value is tried as an id first (the id wins when both exist), then as a key lookup scoped to the app and case-insensitive; an unknown value exits non-zero with `Workflow not found for id or key "<arg>"`. The `workflows tests` commands take the ULID. Don't generalize to cron triggers: `cron-triggers` ops take the `triggerId`, never the trigger key.
+Every `<workflow-id>` argument above — get, preview, configs, runs — accepts the workflow **key** as well as the ULID. The value is tried as an id first (the id wins when both exist), then as a key lookup scoped to the app and case-insensitive; an unknown value exits non-zero with `Workflow not found for id or key "<arg>"`. The `workflows tests` commands take the ULID. Don't generalize to cron triggers: `cron-triggers` ops take the `triggerId`, never the trigger key.
 
 
 ```bash
@@ -1735,7 +2117,7 @@ Every `<workflow-id>` argument above — CRUD, draft/publish, configs, runs — 
 primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
 ```
 
-A run that aborts during **setup** — before any step executes (resolving its config/revision, loading steps, or validating `input` against `inputSchema`) — is still marked `failed` with the real error message, and records one synthetic step with id `__setup__` and kind `setup`. So `runs steps` is never empty and `runs error` always names the failure, even when no author-defined step ran.
+A **durable** run (started with `primitive workflows preview` or `workflows.start()`) that aborts during **setup** — before any step executes (resolving its config/revision, loading steps, or validating `input` against `inputSchema`) — is still marked `failed` with the real error message, and records one synthetic step with id `__setup__` and kind `setup`. So `runs steps` is never empty and `runs error` always names the failure, even when no author-defined step ran. A `syncCallable` run does not synthesize that step: a setup abort there records no step run, so `runs steps` is empty and `STEP`/`failedStepId` is blank — the error message is still recorded on the run.
 
 ### Reusable step fragments
 
@@ -1743,12 +2125,15 @@ A workflow TOML can pull shared `[[steps]]` blocks out of fragment files via `in
 
 ```toml
 # config/workflows/onboard.toml
+# `include` is a TOP-LEVEL key: it must come BEFORE the [workflow] header. A
+# blank line does not close a table, so writing it under [workflow] parses as
+# `workflow.include` and `config push` rejects it as an unrecognized key.
+include = ["common-validation", "common-audit"]
+
 [workflow]
 key = "onboard"
 name = "Onboard new user"
-status = "active"
-
-include = ["common-validation", "common-audit"]
+accessRule = "true"
 
 [[steps]]
 id = "create-account"
@@ -1756,13 +2141,148 @@ kind = "database.mutate"
 # ...
 ```
 
-Fragments live at `<workflowDir>/../workflow-fragments/<name>.toml` and contain only `[[steps]]` tables (no `[workflow]` block, no further `include`). The CLI expands `include` references before `sync push` — the server only ever stores the flattened step list. Step ids must be unique across the expanded set; collisions are reported with both source locations. Use `primitive workflows expand <file>` to print the expanded result.
+Fragments live at `<workflowDir>/../workflow-fragments/<name>.toml` and contain only `[[steps]]` tables (no `[workflow]` block, no further `include`). The CLI expands `include` references before `config push` — the server only ever stores the flattened step list. Step ids must be unique across the expanded set; collisions are reported with both source locations. Use `primitive workflows expand <file>` to print the expanded result.
+
+**Expansion order: all included steps come first, then the workflow's own `[[steps]]`** — no matter where the `include` sits in the file. Fragments expand in the order they appear in the `include` array, each contributing its steps in file order; the workflow's own steps follow, also in file order. Writing `include` below your own `[[steps]]` does not push the fragment's steps later. To run something ahead of an included fragment, lift that work into a fragment of its own and list it earlier in `include`. Steps execute in expanded order, so `primitive workflows expand <file>` is the authoritative check on sequencing.
+
+**`config pull` preserves the fragment form.** Pull never flattens a fragment-authored file just to write the server's step list back. If the file's expansion already equals the running config, pull leaves the file on disk untouched (comments and formatting included). If the server drifted but its step list still *starts* with exactly what the includes expand to — steps appended in the console, or changed workflow metadata — pull rewrites the file with the `include` blocks intact and the uncovered server steps in the workflow's own `[[steps]]`; re-expanding that file reproduces the server's step list in order, so the next `config diff` reads as synced. Only when the running steps no longer begin with the fragment's expansion (a fragment's steps were edited or dropped server-side, or a step was inserted between them) is the fragment form unrepresentable: pull then writes the fully expanded steps and logs which step diverged.
+
+**Parameterized includes.** The `[[include]]` array-of-tables form passes parameters into a fragment and can gate all of its steps behind one condition:
+
+```toml
+# config/workflows/onboard.toml
+[[include]]
+fragment = "lifecycle-email"          # required
+runIf = "input.plan == 'pro'"         # optional
+[include.with]
+id = "welcome"
+subject = "Welcome aboard"
+retries = 3
+```
+
+```toml
+# config/workflow-fragments/lifecycle-email.toml
+[[steps]]
+id = "{{ params.id }}-subject"
+kind = "transform"
+saveAs = "emailSubject"
+runIf = "input.emailOptIn"
+[steps.output]
+subject = "{{ params.subject }} — {{ input.appName }}"
+maxRetries = "{{ params.retries }}"
+```
+
+- Allowed keys in an `[[include]]` table: `fragment` (required), `with`, `runIf`. Any other key is an error.
+- One form per file: mixing bare strings and `[[include]]` tables in a single `include` array is an error.
+- `{{ params.X }}` is substituted at expand time from that include's `with` table, anywhere in the fragment's steps — ids, strings, nested tables, arrays. Dotted paths (`{{ params.email.subject }}`) resolve into nested `with` tables. A reference with no matching key is a hard error naming the fragment and the include.
+- A whole-string `{{ params.X }}` splices the raw typed value (`maxRetries` above expands to the number `3`); an embedded reference stringifies the value into the surrounding text.
+- Only the `params.` namespace is touched. Every other `{{ ... }}` template (`{{ input.appName }}` above) passes through verbatim for the server to render at run time, and no `params.` reference survives expansion.
+- An include-level `runIf` is ANDed onto every expanded step: both present → `(<includeRunIf>) && (<stepRunIf>)`; one present → that one; neither → no `runIf`. The example above yields `runIf = "(input.plan == 'pro') && (input.emailOptIn)"`.
+- Include the same fragment more than once with different `with` tables to get several parameterized copies — derive the step ids from `{{ params.* }}` so the expanded ids stay unique.
 
 ### Operation `$params` validation
 
-When a workflow references a registered database operation via `database.query`/`mutate`/etc., the CLI checks that every `$params.X` substitution in the operation's TOML maps to a declared `[[operations.params]]` entry at `sync push` time. A typo like `$params.proectId` is reported with the file path and line number of the offending `[[operations]]` block instead of silently no-opping at runtime.
+When a workflow references a registered database operation via `database.query`/`mutate`/etc., the CLI checks that every `$params.X` substitution in the operation's TOML maps to a declared `[[operations.params]]` entry at `config push` time. A typo like `$params.proectId` is reported with the file path and line number of the offending `[[operations]]` block instead of silently no-opping at runtime.
 
 ## Client SDK
+
+**Default to generated invoker factories, not raw `client.workflows.start`/`runSync` calls with a string-literal `workflowKey`.** Once a workflow's `inputSchema`/`outputSchema` are pushed, run `primitive workflows codegen` and call the workflow through the generated factory it emits — see [Typed invocation (codegen)](#typed-invocation-codegen) just below. A typo'd `workflowKey`, an input built to the wrong shape, or drift between a `result.output` cast and the workflow's actual output schema after a TOML change all fail at build time through the factory instead of only surfacing at run time. [Manual invocation](#manual-invocation-raw-workflowkey) further down — raw calls with a string key and an untyped/hand-cast `input`/`output` — is the fallback for a workflow with no schema to generate from, not the default pattern for application code.
+
+
+### Typed invocation (codegen)
+
+Generate typed invocation wrappers from each workflow's `inputSchema`/`outputSchema`:
+
+```bash
+primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
+```
+
+The command reads `workflows/*.toml` from the auto-resolved config directory (`--dir <path>` overrides; `--app <app-id>` disambiguates when several apps are synced — with more than one match and neither flag, it errors rather than guessing) and emits **one `<key>.generated.swift` per workflow** (default output `<config-dir>/workflows/generated/`; stale generated files for removed workflows are cleaned up on full runs). Reserved `__internal.*` workflows are skipped; malformed schema JSON fails the command. A single `[workflow-key]` argument matches the TOML file stem and generates just that file.
+
+Each generated file declares `<Key>Input` / `<Key>Output` `Codable` types plus a factory function (camelCase of the key; a leading digit gets a `_` prefix, a Swift keyword is backtick-escaped) returning a `<Key>Workflow` struct that pins the workflow key so it can't drift from its types:
+
+```swift
+import JsBaoClient
+
+let wf = createCheckoutSession(client)
+let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123")) // input: CreateCheckoutSessionInput
+res.output?.checkoutUrl                                                                 // output: CreateCheckoutSessionOutput?
+
+let status = try await wf.getStatus(runKey: "run-1")   // status.output: CreateCheckoutSessionOutput?
+```
+
+Generated factory members:
+
+- `start` and `getStatus` are emitted for **every** non-reserved workflow, each `async throws`. `getStatus` binds `output` to `<Key>Output?` (schema-less → `JSONValue`), so an async-only workflow with no `runSync` still gets a typed status fetch. `runSync` is emitted **only** when the workflow has `syncCallable = true` (the server rejects run-sync otherwise) and returns `RunSyncResult<<Key>Output>`.
+- `input` is a **required** argument when the schema rejects `{}` (i.e. has required properties), optional (`= nil`, sending `{}`) otherwise. The workflow key is pinned inside the wrapper, so callers can't override it.
+- The wrappers delegate to the additive generic overloads on the client — `client.workflows.runSync<Input, Output>(...)`, `start<Input>(...)`, and `getStatus<Output>(...)` accept the same type parameters if you prefer to bind them by hand.
+- Type mapping mirrors the server's schema validator: scalar `type` → Swift scalar, `enum` → a nested `String`-raw `enum`, `object` + `properties`/`required` → a `struct` (open objects gain an `extra: [String: JSONValue]` catch-all; `additionalProperties: false` omits it), `array` + `items` → `[T]`. A qualifying discriminated-union `oneOf` (see below) → an `enum` with associated values. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `JSONValue`. A schema-less workflow gets `Input`/`Output` of `JSONValue`.
+- After a CLI upgrade, `primitive workflows codegen --lang swift --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
+
+An app scaffolded from the iOS starter template ships this wiring already: `./run.sh` and `./run-ios.sh` regenerate workflow invokers alongside model types through `scripts/codegen.sh`, and `bash scripts/codegen.sh --check` runs the same staleness gate offline (it reads only the local workflow TOMLs — no network or sign-in), so it fits a pre-commit hook or CI.
+
+### Discriminated-union (`oneOf`) schema outputs
+
+`inputSchema`/`outputSchema` support an opt-in tagged-union mode: a `oneOf` array whose members are **all** `type: "object"`, sharing exactly one property declared as a distinct single-literal scalar `enum` in every member — that property is auto-detected as the discriminant (there is no way to name it explicitly). The server validates a value by branch-selecting on the discriminant and checking only the matched member; an unmatched or non-object value is a validation error.
+
+```toml
+[[workflow.outputSchema.oneOf]]
+type = "object"
+required = [ "status", "checkoutUrl" ]
+[workflow.outputSchema.oneOf.properties.status]
+type = "string"
+enum = [ "ok" ]
+[workflow.outputSchema.oneOf.properties.checkoutUrl]
+type = "string"
+
+[[workflow.outputSchema.oneOf]]
+type = "object"
+required = [ "status", "message" ]
+[workflow.outputSchema.oneOf.properties.status]
+type = "string"
+enum = [ "error" ]
+[workflow.outputSchema.oneOf.properties.message]
+type = "string"
+```
+
+Codegen renders a qualifying `oneOf` as an `enum` with one case per member (named after the member's discriminant value), each carrying that member's branch `struct`; decode is keyed on the discriminant. The caller narrows with a `switch`:
+
+```swift
+let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123"))
+if let output = res.output {
+  switch output {
+  case .ok(let ok): ok.checkoutUrl       // narrowed to the "ok" member
+  case .error(let err): err.message      // narrowed to the "error" member
+  }
+}
+```
+
+Rules and failure modes:
+
+- `anyOf` is **not** supported for tagged unions — an all-object `anyOf` throws a codegen error suggesting `oneOf`; an `anyOf` with any non-object member renders `JSONValue` as before.
+- A `oneOf` that looks like a tagged union but is defective — a single member, no discriminator, or an ambiguous one (more than one candidate property) — **throws a codegen error** rather than silently falling back to `JSONValue`. Fix the schema (add/remove a candidate property, or give every member a distinct literal) rather than working around the error.
+- A tagged union must carry `oneOf` as its **only** top-level constraint — combining it with sibling `type`/`properties`/`required`/`additionalProperties`/`items`/`enum` is rejected; put shared constraints inside each member instead.
+- A `oneOf` with any non-object member (a scalar/mixed union) is not interpreted as a tagged union at all — it falls through to the `JSONValue` rendering like any other unsupported keyword, no error.
+
+### Wiring codegen into your build
+
+Run `primitive workflows codegen --lang swift` as part of the app's regular codegen step (a pre-build script or CI job) alongside model codegen, so the generated invokers stay current with every workflow push:
+
+```bash
+primitive workflows codegen --lang swift -o Sources/App/Workflows/Generated
+```
+
+In a config-as-code repo shared by several clients — the workflow TOML lives outside any one client's checkout, as it typically does for an iOS client paired with a web client — point `--dir` at the shared root instead of relying on auto-resolution:
+
+```bash
+primitive workflows codegen --dir ../config --lang swift -o Sources/App/Workflows/Generated
+```
+
+`--check` (`primitive workflows codegen --lang swift --check`) belongs in CI next to `primitive databases codegen --check`, so stale generated invokers fail the build instead of drifting silently.
+
+### Manual invocation (raw `workflowKey`)
+
+Reach for these only when a workflow has no `inputSchema`/`outputSchema` to generate from, or for one-off exploration outside a codegen'd app — application code should call through the generated factories above instead.
 
 Start a workflow, check its status, and list recent runs:
 
@@ -1835,104 +2355,74 @@ Inspect the per-step debug records of a run:
   }
 ```
 
-The step records carry `{ stepRunId, runId, stepKind, status, input, output, error, startedAt, endedAt, ... }`.
+The step records carry `{ stepRunId, runId, stepKind, status, input, output, error, startedAt, endedAt, ... }`. A step's `status` is `running` while it executes, then `completed`, `failed`, `skipped`, or `error_captured` (the step errored but the workflow captured the error and continued, so the run is not failed by it). Step records are written as the run goes: reading them on an in-flight run returns the finished steps plus a `running` row for the current one, finalized in place when the step ends — and a run that ends while a step is still `running` (aborted mid-step) closes that row as `failed`.
 
 `runKey` is scoped as `${contextDocId}#${runKey}`. Calling `start` with an existing `runKey` returns `{ existing: true, ... }` unless `forceRerun: true`.
-
-
-### Typed invocation (codegen)
-
-Generate typed invocation wrappers from each workflow's `inputSchema`/`outputSchema`:
-
-```bash
-primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
-```
-
-The command reads `workflows/*.toml` from the auto-resolved sync directory (`--sync-dir <path>` overrides; `--app <app-id>` disambiguates when several apps are synced — with more than one match and neither flag, it errors rather than guessing) and emits **one `<key>.generated.swift` per workflow** (default output `<sync-dir>/workflows/generated/`; stale generated files for removed workflows are cleaned up on full runs). Reserved `__internal.*` workflows are skipped; malformed schema JSON fails the command. A single `[workflow-key]` argument matches the TOML file stem and generates just that file.
-
-Each generated file declares `<Key>Input` / `<Key>Output` `Codable` types plus a factory function (camelCase of the key; a leading digit gets a `_` prefix, a Swift keyword is backtick-escaped) returning a `<Key>Workflow` struct that pins the workflow key so it can't drift from its types:
-
-```swift
-import JsBaoClient
-
-let wf = createCheckoutSession(client)
-let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123")) // input: CreateCheckoutSessionInput
-res.output?.checkoutUrl                                                                 // output: CreateCheckoutSessionOutput?
-
-let status = try await wf.getStatus(runKey: "run-1")   // status.output: CreateCheckoutSessionOutput?
-```
-
-Generated factory members:
-
-- `start` and `getStatus` are emitted for **every** non-reserved workflow, each `async throws`. `getStatus` binds `output` to `<Key>Output?` (schema-less → `JSONValue`), so an async-only workflow with no `runSync` still gets a typed status fetch. `runSync` is emitted **only** when the workflow has `syncCallable = true` (the server rejects run-sync otherwise) and returns `RunSyncResult<<Key>Output>`.
-- `input` is a **required** argument when the schema rejects `{}` (i.e. has required properties), optional (`= nil`, sending `{}`) otherwise. The workflow key is pinned inside the wrapper, so callers can't override it.
-- The wrappers delegate to the additive generic overloads on the client — `client.workflows.runSync<Input, Output>(...)`, `start<Input>(...)`, and `getStatus<Output>(...)` accept the same type parameters if you prefer to bind them by hand.
-- Type mapping mirrors the server's schema validator: scalar `type` → Swift scalar, `enum` → a nested `String`-raw `enum`, `object` + `properties`/`required` → a `struct` (open objects gain an `extra: [String: JSONValue]` catch-all; `additionalProperties: false` omits it), `array` + `items` → `[T]`. A qualifying discriminated-union `oneOf` (see below) → an `enum` with associated values. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `JSONValue`. A schema-less workflow gets `Input`/`Output` of `JSONValue`.
-- After a CLI upgrade, `primitive workflows codegen --lang swift --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
-
-### Discriminated-union (`oneOf`) schema outputs
-
-`inputSchema`/`outputSchema` support an opt-in tagged-union mode: a `oneOf` array whose members are **all** `type: "object"`, sharing exactly one property declared as a distinct single-literal scalar `enum` in every member — that property is auto-detected as the discriminant (there is no way to name it explicitly). The server validates a value by branch-selecting on the discriminant and checking only the matched member; an unmatched or non-object value is a validation error.
-
-```toml
-[[workflow.outputSchema.oneOf]]
-type = "object"
-required = [ "status", "checkoutUrl" ]
-[workflow.outputSchema.oneOf.properties.status]
-type = "string"
-enum = [ "ok" ]
-[workflow.outputSchema.oneOf.properties.checkoutUrl]
-type = "string"
-
-[[workflow.outputSchema.oneOf]]
-type = "object"
-required = [ "status", "message" ]
-[workflow.outputSchema.oneOf.properties.status]
-type = "string"
-enum = [ "error" ]
-[workflow.outputSchema.oneOf.properties.message]
-type = "string"
-```
-
-Codegen renders a qualifying `oneOf` as an `enum` with one case per member (named after the member's discriminant value), each carrying that member's branch `struct`; decode is keyed on the discriminant. The caller narrows with a `switch`:
-
-```swift
-let res = try await wf.runSync(input: CreateCheckoutSessionInput(priceId: "price_123"))
-if let output = res.output {
-  switch output {
-  case .ok(let ok): ok.checkoutUrl       // narrowed to the "ok" member
-  case .error(let err): err.message      // narrowed to the "error" member
-  }
-}
-```
-
-Rules and failure modes:
-
-- `anyOf` is **not** supported for tagged unions — an all-object `anyOf` throws a codegen error suggesting `oneOf`; an `anyOf` with any non-object member renders `JSONValue` as before.
-- A `oneOf` that looks like a tagged union but is defective — a single member, no discriminator, or an ambiguous one (more than one candidate property) — **throws a codegen error** rather than silently falling back to `JSONValue`. Fix the schema (add/remove a candidate property, or give every member a distinct literal) rather than working around the error.
-- A tagged union must carry `oneOf` as its **only** top-level constraint — combining it with sibling `type`/`properties`/`required`/`additionalProperties`/`items`/`enum` is rejected; put shared constraints inside each member instead.
-- A `oneOf` with any non-object member (a scalar/mixed union) is not interpreted as a tagged union at all — it falls through to the `JSONValue` rendering like any other unsupported keyword, no error.
 
 ## WebSocket events
 
 Requires an active WebSocket (e.g., from `client.documents.open(docId)`).
 
 ```swift
-  let started = client.events.on(.workflowStarted) { (e: WorkflowStartedEvent) in
-    // e.workflowKey, e.runId, e.runKey?, e.instanceId?, e.contextDocId?, e.meta?
+// Each payload type names its own event, so `stream(for:)` needs nothing else to
+// resolve the subscription. Each loop is the body of its own SwiftUI `.task` —
+// the loop's isolation is the task's own, so under `.task` it is the main actor.
+func watchWorkflowStarts(client: JsBaoClient) async {
+  for await e in client.stream(for: WorkflowStartedEvent.self) {
+    // also: e.workflowId, e.runKey, e.instanceId, e.contextDocId, e.meta
+    print(e.workflowKey, e.runId)
   }
+  // Leaving the loop (or cancelling the task) unsubscribes.
+}
 
-  let status = client.events.on(.workflowStatus) { (e: WorkflowStatusEvent) in
-    // e.status: "completed" | "failed" | "terminated"
+func watchWorkflowStatus(client: JsBaoClient) async {
+  for await e in client.stream(for: WorkflowStatusEvent.self) {
+    // e.status: "completed" | "failed" | "terminated" | "skipped"
+    // e.errorCode is set when status is "failed"; e.skipReason when status is
+    //   "skipped" ("LOCK_CONTENTION") — branch on these, not on message text
     // e.needsApply == true if requiresClientApply and not yet applied
     // also: e.runKey, e.runId, e.output, e.error, e.contextDocId, e.meta
+    print(e.workflowKey, e.status)
   }
+}
+
+// Waiting for one occurrence instead of every one. `nextEvent` returns the first
+// event the predicate accepts, throws `JsBaoError(code: .unavailable)` if the
+// timeout elapses first, and throws `CancellationError` if the calling task is
+// cancelled. Start the wait before triggering the work you are waiting on — an
+// event that already fired is not redelivered.
+func awaitWorkflowStart(client: JsBaoClient, runId: String) async throws {
+  let started = try await client.nextEvent(WorkflowStartedEvent.self, timeout: 30) {
+    $0.runId == runId
+  }
+  print(started.workflowKey, started.runId)
+}
 ```
 
-The `workflowStatus` event uses `"completed"`. The `getStatus` method returns `"complete"`. These differ in the SDK — handle both if your code shares logic.
+The `workflowStatus` event and `getStatus` report the same vocabulary — see [Run status vocabulary](#run-status-vocabulary). The event fires only on a terminal transition, so its `status` is always `completed`, `failed`, `terminated`, or `skipped` — and it carries `errorCode` / `skipReason` alongside, so a listener can branch on the structured field.
 
-Subscribe through `client.events.on(_:)`; hold the returned `EventSubscription` for as long as you want the handler live.
+Subscribe through `client.stream(for:)` — a `for await` loop in a `.task`, which unsubscribes when the loop ends — or through `client.observeOnMainActor(_:handler:)` when you need a main-actor callback, holding the returned `EventSubscription` for as long as you want the handler live.
 
+`client.nextEvent(_:timeout:where:)` is the one-shot form: it awaits the first event the predicate accepts, throws `JsBaoError` with code `.unavailable` on timeout (default 10 seconds), and throws `CancellationError` if the calling task is cancelled.
+
+### `workflows.waitFor`
+
+`workflows.waitFor` wraps the `workflowStatus` frame in a single awaitable call instead of a manual event listener.
+
+- Event-driven: subscribes to the `workflowStatus` frame, plus one reconcile fetch immediately after subscribing to close the started-before-subscribed race; re-runs that reconcile on reconnect. No polling.
+- Settles on every terminal state (`completed` / `failed` / `terminated` / `apply_pending` / `apply_claimed` / `skipped`), including `"failed"` — a failing run is a normal result, not an error. `skipped` needs `js-bao-wss-client` >= 2.1.0 (or the Swift client at or after the release that ships it): an older client does not recognise it as terminal and waits out its own timeout.
+- Fails only on timeout (`JsBaoError` code `WORKFLOW_WAIT_TIMEOUT`; the default wait is 15 minutes) or when `runId` doesn't resolve to a run (`NOT_FOUND`).
+
+```swift
+let result = try await client.workflows.waitFor(
+    runId: runId,
+    options: WaitForWorkflowOptions(timeout: 60)
+)
+// result: WaitForWorkflowResult { status: String, output: JSONValue?, error: String?, skipReason: String? }
+// skipReason is set when status == "skipped" ("LOCK_CONTENTION"); nil otherwise
+```
+
+`WaitForWorkflowOptions.timeout` is a `TimeInterval` in **seconds** (default 900 — 15 minutes). `waitFor(runId:as:options:)` decodes `output` into a `Decodable` type instead of a raw `JSONValue`. Pass a `timeout` of `0` (or any non-positive value) to disable the timeout — the call and its listeners then live until the run terminates, so only do that for runs you know will end. Cancelling the awaiting `Task` tears the wait down and throws `CancellationError`.
 
 ## Apply pattern
 
@@ -2019,7 +2509,8 @@ If a step output contains sensitive data, do NOT `saveAs`. Pipe it directly into
 Cron- and webhook-triggered workflows almost always want `requiresClientApply = false`. Otherwise the run sits in `apply_pending` forever because no client is listening.
 
 ```bash
-primitive workflows update <workflow-id> --requires-client-apply false
+primitive config set workflow/<key> workflow.requiresClientApply=false
+primitive config push --only workflow/<key>
 ```
 
 ### Wrong: assuming `email.send` accepts an array `to`
@@ -2071,12 +2562,13 @@ Only persist a separate database row when you need durable history beyond the wo
 ## Limits / TTLs
 
 - Workflow runs: cleaned up after **45 days** (preview runs: **7 days**).
-- `forEach`: 200 items default, override with `maxItems`.
+- `forEach`: 500 items default, override with `maxItems`. Over the cap the step fails non-retryably before any iteration runs.
 - `collect`: 10 pages / 10000 items default.
 - `analytics.query`: 50 queries per run.
 - `analytics.write`: 25 events per step.
 - `workflow.call`: max depth 10; circular calls throw.
 - Cron triggers: 50 per app.
+- Webhooks: 50 per app, archived ones included (hard-delete to free a slot).
 - `meta` payload: 1KB.
 - App secrets via templates/CEL: read-only, available as `secrets.KEY`.
 
@@ -2085,11 +2577,14 @@ Only persist a separate database row when you need durable history beyond the wo
 | Symptom | Likely cause |
 |---|---|
 | `404 WORKFLOW_NOT_FOUND` on start/run-sync | No workflow with that key in this app context |
-| `409 WORKFLOW_NOT_ACTIVE` ("Workflow '<key>' is not active") | The workflow exists but its status is draft/archived — activate it with `status = "active"` |
-| `400 WORKFLOW_NO_ACTIVE_CONFIG` | Active status but no active config/revision — run `primitive sync push` |
+| `409 WORKFLOW_INACTIVE` ("Workflow '<key>' is inactive") | The workflow exists but is out of service — run `primitive workflows enable <key>` |
+| `409 WORKFLOW_ARCHIVED` | The workflow was retired by a delete. `enable` will not bring it back: hard-delete the archived holder (delete it in the console, or remove its file and run `primitive config push --prune`), then re-add the file and push |
+| `400 WORKFLOW_NO_ACTIVE_CONFIG` | Active status but no active config/revision — run `primitive config push` |
+| `400 WEBHOOK_LIMIT_REACHED` on a webhook create | The app holds 50 webhooks, archived ones included. Deleting a webhook's TOML and running `primitive config push --prune` frees a slot; an API or console delete only archives and does not. |
+| `409 WEBHOOK_KEY_EXISTS` on a webhook create | The app already has a webhook with that `key` — an archived one still holds it; hard-delete to release it. `primitive config push` converges on this `409` by adopting the existing webhook and updating it in place, so it surfaces only on direct API calls. |
 | `Cannot activate workflow without a configuration` | Push steps before activating |
-| `Workflow has no draft or configuration to preview` | First `primitive sync push` to create a config, or use `primitive workflows draft update` |
+| `Workflow has no draft or configuration to preview` | Run `primitive config push` first — the push creates the workflow's configuration |
 | Run stuck in `apply_pending` | `requiresClientApply = true` but no client running `define()` for that key. Set to `false` for server-only workflows. |
 | `existing: true` on `start()` | A run with the same `(contextDocId, runKey)` already exists. Use a different `runKey` or `forceRerun: true`. |
-| `Step "X": required field "Y" is empty` | A template expression resolved to `""`. Check the path; consider `strict = true` to surface earlier. |
+| `Step "X": required field "Y" is empty` | A template expression resolved to a real but empty value (`""`). A path that does not resolve at all fails earlier, with `unresolved template expression`. |
 | `runIf expression failed` | CEL syntax error or unknown identifier in `runIf`. Don't use `{{ }}` inside. |

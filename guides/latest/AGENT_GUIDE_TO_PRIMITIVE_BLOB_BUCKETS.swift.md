@@ -107,14 +107,13 @@ preset = "authenticated"                    # public | authenticated | admin-onl
                                             # is governed entirely by the rule set (see below)
 ```
 
-The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive sync` reads from `config/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive sync push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
+The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `config/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
 
-Or via CLI:
+Scaffold and apply it:
 
 ```bash
-primitive blob-buckets create \
-  --key avatars --name "User avatars" \
-  --ttl permanent --preset authenticated
+primitive config create blob-bucket avatars       # writes the file from the type's defaults
+primitive config push --only blob-bucket/avatars  # applies just this bucket
 ```
 
 ### Access presets
@@ -150,7 +149,12 @@ Change a bucket's access at runtime without recreating it (admin/owner only) wit
   )
 ```
 
-From the CLI: `primitive blob-buckets update <id-or-key> --preset <preset>` switches the preset (clearing any attached rule set); `--rule-set-id <id>` attaches a rule set (making the bucket `custom`). `--name` and `--description` update those fields. At least one flag is required; `--preset` and `--rule-set-id` are mutually exclusive, and clearing a rule set requires moving to a preset in the same call.
+From the CLI, a bucket's settings are TOML: `preset` switches the access model (clearing any attached rule set), `ruleSetId` attaches a rule set (making the bucket `custom`), and `name`/`description` are plain fields. `preset` and `ruleSetId` are mutually exclusive — a file declaring both is rejected, and moving off a rule set means setting a preset in the same push.
+
+```bash
+primitive config set blob-bucket/avatars bucket.preset=admin-only
+primitive config push --only blob-bucket/avatars
+```
 
 ### TTL tiers
 

@@ -8,7 +8,7 @@ Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (p
 |--------|-------------|
 | OAuth (Google) | Primary auth, redirect-based |
 | Magic Link | Passwordless email link |
-| OTP | 6-digit email code (10 min expiry) |
+| OTP | 6-digit email code (15 min expiry) |
 | Passkey | WebAuthn for returning users (requires existing account) |
 
 Each method must be enabled in the Admin Console. Check availability with `getAuthConfig()` before showing UI.
@@ -39,20 +39,32 @@ In the starter template this wiring is owned for you by the template's `userStor
   const config = await client.getAuthConfig();
   // {
   //   appId, name, mode, waitlistEnabled,
-  //   googleOAuthEnabled, googleClientId, hasOAuth, redirectUris,
-  //   passkeyEnabled, passkeyRpId, passkeyRpName, passkeyRpConfig, hasPasskey,
-  //   appleSignInEnabled, hasApple, magicLinkEnabled, otpEnabled
+  //   googleOAuthEnabled,
+  //   googleClients: { clients: { web: { clientId, redirectUris, usable }, … } },
+  //   passkeyEnabled, passkeyRpConfig, hasPasskey,
+  //   appleSignInEnabled, hasApple, emailSignInEnabled
   // }
 
   const methods = {
-    google: config.hasOAuth,
-    magicLink: config.magicLinkEnabled,
-    otp: config.otpEnabled,
+    // Google registers a client per platform, so availability is the provider
+    // being enabled AND this platform's entry being usable. `checkOAuthAvailable()`
+    // computes the same thing; sharing one predicate is what keeps a rendered
+    // button clickable.
+    google: googleWebClientAvailable(config),
+    // ONE email capability: one request sends one email carrying both a code
+    // and (when a link can be issued) a link, so there is no method to offer.
+    // `magicLinkEnabled` / `otpEnabled` are still reported, both equal to this.
+    email: config.emailSignInEnabled,
     passkey: config.hasPasskey,
   };
 ```
 
-`hasOAuth` is true when Google OAuth is enabled (the flag defaults to enabled when both `googleClientId` and the server-side `googleClientSecret` are configured). `magicLinkEnabled` and `otpEnabled` default to `true` unless explicitly disabled in the Admin Console.
+Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+
+Availability is the provider being enabled **and** your platform's entry being usable, together.
+`checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.
+
+`emailSignInEnabled` reports whether email sign-in is available at all — ONE flag, because one request sends one email carrying both a code and (when a link can be issued) a link. It defaults to `true` unless explicitly disabled. `magicLinkEnabled` and `otpEnabled` are still reported for already-published clients and always equal it; new code reads `emailSignInEnabled`.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)
@@ -70,18 +82,19 @@ In the starter template this wiring is owned for you by the template's `userStor
 
 ## Server App Settings ↔ Client Contract
 
-Server-side app settings must align with the origin the client app is served from. These settings live in `config/app.toml` and sync with `primitive sync push` — **edit the TOML and push as the default path** so the server stays in lockstep with what's checked in. The `primitive apps update --flag` calls below are a quick imperative escape hatch; a flag change mutates the server but leaves `app.toml` stale, so the next `primitive sync push` silently reverts it unless you mirror the change back into the TOML. Inspect the live values with `primitive apps get`; the relevant fields:
+Server-side app settings must align with the origin the client app is served from. These settings live in `config/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
 
 | Server field | Contract | Set via |
 |---|---|---|
-| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `sync push`; `--cors-origins "<o1>,<o2>"` for a one-off |
-| `redirectUris` | OAuth callbacks are validated against this whitelist — a non-listed callback URL returns 400 `Invalid redirect URI`. | Not in `app.toml` — `primitive apps update --redirect-uris "<uri1>,<uri2>"` (non-localhost must be https) or the Admin Console |
-| `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `sync push`; `--base-url <url>` for a one-off |
-| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `magicLinkEnabled`, `passkeyEnabled` + `[auth.passkeys]`, `otpEnabled`) → `sync push`. |
+| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
+| `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
+| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
 
-**CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin (`primitive apps update --cors-origins`; inspect with `primitive apps get`). Common triggers: serving on a non-default port, or a newly deployed domain.
+**CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin to `[cors].allowedOrigins` and running `primitive config push --only app`; inspect with `primitive apps get`. Common triggers: serving on a non-default port, or a newly deployed domain.
 
-Dev → prod checklist: add the production origin to `[cors].allowedOrigins` and set `[app].baseUrl` in `app.toml`, `primitive sync push`, add the production OAuth callback to `redirectUris` (`primitive apps update --redirect-uris` or Admin Console — not in `app.toml`), and re-check `getAuthConfig()` reports the expected methods.
+Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production sign-in-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
 
 ---
 
@@ -90,8 +103,9 @@ Dev → prod checklist: add the production origin to `[cors].allowedOrigins` and
 ### Start the flow
 
 ```typescript
-  const hasOAuth = await client.checkOAuthAvailable();
-  if (hasOAuth) {
+  // True when Google OAuth is enabled AND the `web` client entry is usable.
+  const googleAvailable = await client.checkOAuthAvailable();
+  if (googleAvailable) {
     // Redirects the browser to Google. Code after this does not run on success.
     await client.startOAuthFlow(continueUrl);
   }
@@ -181,24 +195,41 @@ correctly skipped.
 
 ---
 
-## Magic Link
+## Email Sign-In (One Email, Both Credentials)
 
 ### Request + verify
 
+One request sends ONE email carrying a 6-digit code and — when a link can be
+issued — a sign-in link. Nothing chooses a method: the user types the code or
+opens the link, and consuming either one retires both.
+
 ```typescript
-  // Request the email. Requires oauthRedirectUri on the client, or pass
-  // an explicit redirectUri here.
-  await client.magicLinkRequest(email, {
+  // `redirectUri` is optional and defaults to the client's oauthRedirectUri.
+  // With no target at all the email carries the code alone, rendered from the
+  // same template. A target that IS sent must match the app's non-empty
+  // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
+  // URI` — nothing degrades to code-only on your behalf (#2967).
+  await client.emailSignInRequest(email, {
     redirectUri: "https://app.example.com/auth/magic-callback",
   });
 
-  // On the callback page, read ?magic_token=... and verify it.
-  const { user, isNewUser, promptAddPasskey } =
-    await client.magicLinkVerify(magicToken);
-  // Token is now stored on the client and the WS auto-connects.
+  // Finish by typing the code from the email...
+  const { user, isNewUser } = await client.otpVerify(email, code);
+
+  // ...or by clicking the link in the same email, which lands on the callback
+  // page with ?magic_token=... — see the magic-link callback example. Either
+  // one retires both: one email signs the user in once.
 ```
 
-`magicLinkRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`) and throws `Error("Redirect URI not configured")` if neither is set.
+Link issuance is **fail-closed**. The email carries a link only when the request
+names a redirect target AND that target matches the app's non-empty
+`emailRedirectUris`. With no target, or an empty allow-list, the same
+`email-sign-in` template renders code-only; a target that misses a non-empty
+allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
+link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
+no endpoint renders any other sign-in template, so that removal holds.
+
+`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone. `magicLinkRequest` and `otpRequest` remain as **deprecated** aliases of the same issuance path.
 
 ### Reading the token (callback page)
 
@@ -228,17 +259,11 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
 
 ---
 
-## OTP (Email Code)
+## Finishing With the Code
 
-```typescript
-  await client.otpRequest(email);
+The code half of the same email is verified with the OTP verify call, unchanged:
 
-  // User enters the 6-digit code from the email.
-  const { user, isNewUser } = await client.otpVerify(email, code);
-  // Token is now stored on the client and the WS auto-connects.
-```
-
-`otpVerify` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
+`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
 
 ### Error handling
 
@@ -279,11 +304,11 @@ To accept an invitation server-side at verify time (so the deferred grant resolv
   }
 ```
 
-> **Caveat on OTP disabled.** When OTP is disabled the request endpoint returns a plain 400 with the message `"OTP authentication is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the OTP UI on `getAuthConfig()`'s `otpEnabled` up front instead.
+> **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
 
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, and `RESERVED_EMAIL_FOR_ADMIN` — compare those as string literals.
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
-The same `AuthError` codes apply to `magicLinkRequest`/`magicLinkVerify` and `passkey*` methods.
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify` and `passkey*` methods.
 
 ---
 
@@ -361,6 +386,9 @@ These are the canonical events.
 ```typescript
   // Token refresh failed or server invalidated session — prompt re-login.
   client.on("auth-failed", ({ message, reason }) => {
+    // reason: "refresh_failed" when a 401 on a request triggered the refresh;
+    // otherwise the trigger cause itself (e.g. "networkMode:online"), with
+    // "refresh_invalid" as the fallback. The launch refresh emits no event.
     redirectToLogin();
   });
 
@@ -388,6 +416,8 @@ These are the canonical events.
   client.on("auth:logout", () => clearSensitiveUI());
   client.on("auth:logout:complete", () => navigateHome());
 ```
+
+A rejected token refresh reports a `reason` from a small, stable set. The launch-time refresh emits no failure event at all — a signed-out start is not an auth failure. A refresh triggered by a 401 on a request reports `reason: "refresh_failed"` (with no message). A refresh from any other trigger reports the trigger itself as the `reason` (the same cause vocabulary as the success event, e.g. `"networkMode:online"`, `"ws-challenge"`), with `"refresh_invalid"` as the fallback when no trigger is attached. Branch on `reason`, and treat unknown values as a generic failure — the set may grow.
 
 **Don't:**
 
@@ -476,7 +506,7 @@ const doc = await client.openDocument(id);     // before await client.waitForAut
 
 ## JWT Persistence
 
-Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. `getAuthPersistenceInfo()` reports whether persistence is on.
+Optional — opt in through the client's `auth` options so a relaunch reuses the short-lived token while it's still within the refresh window, instead of forcing a fresh sign-in. The client reports whether persistence is on.
 
 ```typescript
   const client = await initializeClient({
@@ -544,9 +574,9 @@ Logout fires `auth:logout` immediately and `auth:logout:complete` when finished.
 
 ## Auth State in Apps
 
-The neutral signal is the client's own auth state: `client.isAuthenticated()` is the live boolean, and `client.waitForAuthReady()` gates work until auth (and offline DBs) are ready — see [Token Inspection & Manual Token](#token-inspection--manual-token) for the compiled calls. Gate the app's main layout on that signal so child views can assume an authenticated user, and react to auth loss centrally. The patterns below are **framework wiring** around that flag — the starter template implements them; if you're not using it, replicate them.
+The neutral signal is the client's own auth state: `client.isAuthenticated()` is the live boolean, and `client.waitForAuthReady()` waits until a user is authenticated, returning the `userId` and auth `mode` (`online`/`offline`) — it resolves on sign-in, not on mere client readiness, and times out if nobody signs in. See [Token Inspection & Manual Token](#token-inspection--manual-token) for the compiled calls. Gate the app's main layout on that signal so child views can assume an authenticated user, and react to auth loss centrally. The patterns below are **framework wiring** around that flag — the starter template implements them; if you're not using it, replicate them.
 
-The template ([primitive-app-template](https://github.com/Primitive-Labs/primitive-app-template)) provides a `userStore` (Pinia) and `AppLayout` that mirror `client.isAuthenticated()` into a reactive `userStore.isAuthenticated`.
+The template ([primitive-vue-template](https://github.com/Primitive-Labs/primitive-vue-template)) provides a `userStore` (Pinia) and `AppLayout` that mirror `client.isAuthenticated()` into a reactive `userStore.isAuthenticated`.
 
 ### Two key flags (template store)
 
@@ -654,6 +684,8 @@ If you're using the template, this route is already wired in `src/router/routes.
 
 There is **no `primitive test-users` CLI command**. The bypass is server-side: an OTP request for an email shaped like `<base-local>+primitivetest<suffix>@<base-domain>` accepts the magic code `"000000"` instead of the emailed code, but **only when the base address is on the app's `testAccountBaseEmails` whitelist**.
 
+This is the recommended sign-in for local/dev builds as well as CI: sign in through the app's real login UI with a derived address and `"000000"`, so routine development exercises the production auth flows on short-lived, member-scoped tokens.
+
 ```typescript
   // Requires the app owner to have added "alice@example.com" to the app's
   // testAccountBaseEmails whitelist. Then any `alice+primitivetest<suffix>@example.com`
@@ -672,9 +704,9 @@ Guardrails:
 - Only `+primitivetest<suffix>` derivatives are eligible. The bare base is never a test account.
 - First verify provisions the derived user through the standard signup path and returns the real `isNewUser`, so first-run/new-user flows are testable through the bypass. Signup-mode gates apply as 403s exactly like a normal signup: `INVITATION_REQUIRED` (invite-only, no invitation), `ADDED_TO_WAITLIST` (invite-only with waitlist — the address is added), `DOMAIN_NOT_ALLOWED` (domain mode); an `inviteToken` is honored and provisions with the invitation's role (member-role invitations only — see the reserved-email boundary below).
 - Issued tokens are short-lived (~30 minutes) and carry a `primitiveBypass: true` claim that gets re-checked on every request, so removing the base from the whitelist revokes sessions immediately.
-- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles.
+- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths (e.g. starting a `runAs = "system"` workflow from the client) need a real admin sign-in.
 
-Manage the whitelist with `primitive apps update --test-account-bases …` (max 50 bases per app), or in the web-admin settings UI — both edit the same `testAccountBaseEmails` list.
+The whitelist is `[app].testAccountBaseEmails` in `app.toml` (max 50 bases per app), applied with `primitive config push --only app`. The web-admin settings UI edits the same list.
 
 **Invite-only apps: pre-create the member.** A fresh derived address on an invite-only app is gated at the email step (`INVITATION_REQUIRED` / `ADDED_TO_WAITLIST`) before any code is accepted. For CI, skip the invitation flow: `primitive users create <base>+primitivetest-<x>@<domain>` adds the membership directly (no invitation email), and the OTP sign-in with `"000000"` then proceeds as an existing member (the response's `isNewUser` is `false` — pre-created members can't exercise new-user flows).
 
@@ -686,21 +718,7 @@ Manage the whitelist with `primitive apps update --test-account-bases …` (max 
 
 ## Customizing Email Templates
 
-The Magic Link, OTP, and other emails Primitive sends can be customized via the CLI:
-
-```bash
-primitive email-templates list                       # all types + override status
-primitive email-templates get magic-link             # subject + body + variables
-primitive email-templates variables magic-link       # available {{vars}}
-primitive email-templates set magic-link \
-  --subject "Sign in to MyApp" \
-  --html-file ./emails/magic-link.html \
-  --text-file ./emails/magic-link.txt
-primitive email-templates test magic-link            # send test email
-primitive email-templates delete magic-link          # revert to default
-```
-
-Overrides are tracked by `primitive sync` (TOML in `email-templates/`). Custom templates can be triggered from `email.send` workflow steps — see the [Workflows guide](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md).
+The `email-sign-in` email is one of the transactional types Primitive sends; override it with a custom subject and branded HTML/text body — and delete the `{{#if magicLink}}` block if the app should never send a clickable link. The retired `magic-link` and `otp` types are no longer rendered by any endpoint; a stored override for either is kept and listed as retired, with migration guidance. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are triggered from `email.send` workflow steps.
 
 ---
 
