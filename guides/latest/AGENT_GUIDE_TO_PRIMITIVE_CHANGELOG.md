@@ -68,6 +68,7 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ### Fixed
 
+- **Integration test cases run the request they declare.** A test run executed `GET /` regardless of the case's documented method, path, body and `inputVariables`; it now runs exactly what the case's TOML declares, and a case's fixtures are its only attachments.
 - **CLI: pushing a prompt with several configs works on the first push.** A fresh multi-config prompt no longer fails with "Config name already exists" and lands without re-runs; the seeded config takes its authored name, and a config validation failure is attributed to the entry that caused it, activation included.
 - **JavaScript client: a truncated `documents.list()` response no longer evicts documents.** Eviction now follows the full scope walk instead of trusting a short page, so documents a client still has access to stay available locally.
 - **CLI: `config push` adopts what local sync state never recorded.** Webhooks, integrations, blob buckets, and group/collection type configs that already exist on the server are adopted by key instead of failing the push as conflicts; a genuine mismatch is reported naming both values.

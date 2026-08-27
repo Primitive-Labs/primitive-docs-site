@@ -8,7 +8,7 @@ Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (p
 |--------|-------------|
 | OAuth (Google) | Primary auth, redirect-based |
 | Magic Link | Passwordless email link |
-| OTP | 6-digit email code (10 min expiry) |
+| OTP | 6-digit email code (15 min expiry) |
 | Sign in with Apple | Native one-call sign-in (`signInWithApple`); gate on `hasApple` |
 | Passkey | Native one-call sign-in/registration via `AuthenticationServices`; for returning users |
 
