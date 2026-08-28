@@ -8,6 +8,25 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ### New
 
+- **JavaScript client:** passkey sign-in and registration start calls accept an optional `rpId`, so a native or multi-domain app can name the relying party it wants instead of relying on the request origin.
+- **Swift client:** `AuthConfig(passkeyRpId:)` — or a per-call `rpId:` — names the passkey relying party explicitly.
+- **CLI:** environments accept a `webUrl` (a normalized web origin), and `primitive init` scaffolds the universal-link setup for a combined iOS + web app: the association file and an https sign-in link that opens the app where it is installed.
+- **Swift template:** `run-ios.sh` boots a simulator dedicated to the app and waits for the boot it started, instead of sharing whatever simulator was already open.
+
+### Fixed
+
+- A passkey start request naming a relying party the app does not configure is rejected with a typed `PASSKEY_RP_NOT_CONFIGURED` error (both SDKs) instead of being silently redirected to another relying party.
+- Document shares granted to an email address before the recipient signs up now resolve reliably: every pending grant is found at signup rather than only the first batch, a just-granted share appears on the recipient's first listing, and the app's allowed-domains policy is applied when the grant resolves.
+- **JavaScript client:** a failed OAuth code exchange throws a typed auth error carrying the server's error code instead of a generic failure.
+- **CLI:** `integrations tests` verbs resolve the integration by key or ID and fail clearly when they cannot, instead of acting on the wrong integration.
+- **CLI:** `scripts tests` names the local case files it skips because they are not registered in the pushed config.
+- **CLI:** `email-templates` help no longer lists retired template types.
+- **Swift template:** distribution resolves the App Store Connect key path from the app root, so fastlane finds it regardless of the working directory.
+
+## 2026-08-27
+
+### New
+
 - **Webhook verification schemes.** Inbound webhooks can verify requests with a JWT scheme (fetching keys from a remote JWKS URL), a declarative custom detached-signature configuration, or the built-in Plaid preset — all configurable in the admin console.
 - **Metadata reverse lookup.** A resource can be found by a unique metadata value, in the JavaScript client, the Swift client, and the CLI.
 - **Document record aggregation.** Documents gained a records `aggregate` endpoint matching the databases one, and the CLI's `documents records` and `databases records` groups expose the same verb set.
@@ -28,6 +47,10 @@ User-visible changes in each production release of the Primitive platform, newes
 - **Swift client: workflow factory parity.** Generated workflow factories gain the JavaScript extras — `terminate`, cron-trigger `create`/`update`, and inline `define`.
 
 ### Changed
+
+- **One emailed sign-in link for an app with both an iOS and a web client.** An app whose Primitive environment names a `webUrl` — the origin its web client is served from — emails that origin's `/oauth/callback` as the sign-in link, from BOTH clients. Tapped on a device with the iOS app installed, iOS opens the app (a universal link); read anywhere else it is the web app's ordinary sign-in page, so the same email works wherever it is opened. The server sees an ordinary allow-listed redirect target; nothing about the request is per-platform.
+
+  `webUrl` is a normalized origin per environment in `.primitive/config.json` (an entry in that file, or `primitive env add <name> --api-url … --web-url <origin>` when you create the environment) — https except `localhost`/`127.0.0.1`, no credentials, path, query or fragment; the CLI refuses anything else, and the resolvers that build an app read it as no web counterpart at all. The Swift library carries it into `client.links.appBaseURL`, so the outgoing link and the origins an incoming universal link is trusted from are one value; `PrimitiveAuthManager` sends the https target in preference to its custom scheme, and `sendsEmailSignInLink` still forces code-only when set to `false`. An app with no web counterpart is unchanged: code-only by default, the `<scheme>://auth/magic-link` opt-in as before. `primitive init` seeds the dev `webUrl` when an app ends up with both clients and the dev callback is on its allow-list (otherwise it prints the two steps rather than turning a working code-only email into a 400), and prints the production checklist; the Vue template ships a query-scoped `apple-app-site-association` example plus the `_headers` rule that serves it as JSON, and the Swift template ships the associated-domains entitlement as a documented commented block. Because the web domain is compiled into the app, changing it later means an app release.
 
 - **Deleting a workflow or prompt keeps its history.** A plain delete now archives the row instead of destroying it: runs, revisions, and test cases keep resolving, the key stays held, and `enable` refuses the archived row with `WORKFLOW_ARCHIVED` / `PROMPT_ARCHIVED` naming the remedy. Destroying the row and freeing its key is explicit — the API delete with `hard=true`, or deleting the TOML file and running a confirmed `primitive config push --prune`. Archived rows are listable with `--status archived`, and an archived workflow no longer blocks deleting a script or config it referenced.
 - **Document permission entries type `name` as optional.** The server omits `name` for a permittee who has none; the JavaScript and Swift clients type it as optional (a breaking type change for TypeScript consumers that read it as required), and the Swift client no longer fails to decode a permission listing containing such an entry.

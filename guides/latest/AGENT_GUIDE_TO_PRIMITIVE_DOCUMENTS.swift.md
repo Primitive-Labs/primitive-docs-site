@@ -1112,7 +1112,7 @@ The one exception: if the caller is neither the owner nor an app owner, the plat
 
 ### Programmatic Sharing — Full Reference
 
-Beyond the Quick Reference and the `PrimitiveShareDocumentDialog` UI, the full programmatic surface. Inspecting a document's current members and pending invites:
+Beyond the Quick Reference, the full programmatic surface. Inspecting a document's current members and pending invites:
 
 ```swift
   // Current members (accepted permission grants)

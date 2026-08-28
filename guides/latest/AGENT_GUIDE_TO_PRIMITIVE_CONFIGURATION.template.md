@@ -128,6 +128,22 @@ where a push cannot tell which server case an unkeyed file belongs to, it says
 so and creates nothing — run `config pull` first, or push once from the machine
 that has the sync state.
 
+### A case file is local until a push registers it
+
+Writing or editing a `.tests/<case>.toml` file only changes the local file.
+`primitive <noun> tests run-all` / `tests list` (the workflows/scripts/prompts/
+integrations test runners) act on the **registered** set on the server, not
+the sync tree — a new case is silently absent from `run-all` results, and an
+edit to a registered case's file is not what runs, until `config push` sends
+it. `primitive config diff` names exactly this gap, per case, with four
+counters:
+
+- **Test Cases (local only)** — file exists, no registered case yet; `run-all` will not run it until a push.
+- **Test Cases (remote only)** — a registered case whose file is gone (deleted, renamed away, or never pulled); it keeps running until `config push --prune` removes it — deleting the file alone does not stop it.
+- **Test Cases (modified)** — both exist but differ; `run-all` still executes the last-pushed version, not what's on disk.
+- **Test Cases (synced)** — file and registered case match; the only state where "authored" and "running" are the same thing.
+- **Test Cases (push would refuse)** — a case file that fails validation, printed only when there is one. This status is *separate* from "local only", not a subset of it: a malformed new case counts here and nowhere else, so "local only: 0" does **not** mean every case file made it to the server. Fix the file and push again.
+
 ## App settings (`app.toml`)
 
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:

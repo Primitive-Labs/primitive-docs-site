@@ -241,9 +241,19 @@ no endpoint renders any other sign-in template, so that removal holds.
 
 ### Make the emailed sign-in link open your app (iOS)
 
-**The iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check whether the app opted in.
+**With nothing configured the iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check what the app configured.
 
-Four pieces make the emailed LINK work, and `primitive init` ships two of them:
+**If the app also has a web client, the link is an https URL, not the custom scheme (#2982).** Set the Primitive environment's `webUrl` to the web app's BARE ORIGIN — https (or `http` on `localhost`/`127.0.0.1`), no credentials, path, query or fragment; anything else is refused by the CLI and read as "no web counterpart" by the resolvers that build the app. Add `"webUrl": "https://app.example.com"` to that environment in `.primitive/config.json` (`primitive env add <name> --api-url … --web-url …` sets it on an environment you are CREATING; `env add` cannot edit an existing one). Then:
+
+- the resolve script carries it into `primitive.json`, `PrimitiveAppState.initialize()` sets it as `client.links.appBaseURL`, and `requestEmailSignIn` sends `https://app.example.com/oauth/callback` as the redirect target — no app-code change, and the same value is what an incoming universal link is trusted from;
+- the https target WINS over the custom scheme, including for a manager constructed with an explicit `callbackScheme:`, so an app cannot accidentally send a scheme target that is no longer allow-listed;
+- `sendsEmailSignInLink` still overrides in both directions — set it `false` for code-only even with `webUrl` set;
+- allow-list that https URL in `[auth].emailRedirectUris` exactly like any other target, serve `apple-app-site-association` from the web domain with the component `{ "/": "/oauth/callback", "?": { "magic_token": "*" } }` (query-scoped so the Google OAuth `?code=` redirect on the same path stays a web page), verify the deployed document with `curl`, and only THEN enable the `applinks:<domain>` entitlement — that entitlement is what makes Apple fetch, and its CDN caches what it gets;
+- receive the link with `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)` as well as `.onOpenURL` — a universal link is delivered as an `NSUserActivity`, which is the only delivery on macOS. The template does both.
+
+Migrating: keep the `<scheme>://auth/magic-link` entry allow-listed alongside the https one while old builds are still installed, then remove it. Cost of the upgrade: the web domain is compiled into the build, so changing it later means an app release.
+
+For an app with NO web client, four pieces make the custom-scheme LINK work, and `primitive init` ships two of them:
 
 | Piece | Who does it | Symptom when it is missing |
 |---|---|---|
@@ -256,7 +266,7 @@ The allow-list step is a MERGE into the existing array — `app.toml` is the who
 
 `PrimitiveAuthManager(callbackScheme:)` resolves its scheme from that same `PrimitiveAuth` URL type when no argument is passed (falling back to `primitiveapp`), and an explicit argument also starts `sendsEmailSignInLink` at `true` — an app that named its own scheme allow-listed it deliberately.
 
-Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. One `https://` link that works everywhere is universal links, tracked in [#2982](https://github.com/Primitive-Labs/js-bao-wss/issues/2982). The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
+Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. The https link above is what reaches everywhere — and it needs a web domain you control, since Primitive does not host the association document for your app ([#1130](https://github.com/Primitive-Labs/js-bao-wss/issues/1130)). The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
 {{/lang}}
 
 ### Reading the token (callback page)
@@ -297,7 +307,7 @@ The code half of the same email is verified with the OTP verify call, unchanged:
 {{#lang ts}}
 The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify` and `passkey*` methods.
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text (#3003).
 {{/lang}}
 {{#lang swift}}
 `AuthCode` also carries the SDK-generated cases `.tokenInvalid`, `.refreshFailed`, `.networkError`, and `.unauthorized`, plus `.passkeyNotEnabled` and `.memberInvitationsDisabled` from the server. Server codes outside the enum (e.g. rate limiting) arrive with `code == nil` — fall back to `error.message`.

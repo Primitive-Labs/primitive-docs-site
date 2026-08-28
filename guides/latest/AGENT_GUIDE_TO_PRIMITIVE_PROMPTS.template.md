@@ -403,7 +403,7 @@ primitive prompts tests run-all <prompt-id> [--config <config-id>] [--test-cases
 primitive prompts tests runs <prompt-id> [--limit 20] [--group <comparison-group>] [--json]
 ```
 
-`run-all` exits with code `1` if any test fails. Useful for CI.
+`run-all` exits with code `1` if any test fails. Useful for CI. It executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
 
 ### Batch (parallel) test execution
 
