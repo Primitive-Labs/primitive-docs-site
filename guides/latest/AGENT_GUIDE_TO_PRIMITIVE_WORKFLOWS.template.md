@@ -2075,6 +2075,8 @@ primitive workflows tests run-all <workflow-id>
 primitive analytics workflows --window-days 7 --limit 10
 ```
 
+`run-all` executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
+
 Workflow analytics live under the `analytics` noun, the single home for per-subject analytics (workflows, prompts, integrations). The `workflows analytics` group was removed. Migrate `workflows analytics top --days N --json` to `primitive analytics workflows --window-days N --json`: same endpoint, same payload, but the default window changed from 7 days to 30 — pass `--window-days 7` explicitly to keep the old default. `workflows analytics overview` was **retired without a replacement**, not moved: the `analytics/workflows/overview` endpoint it called was never registered server-side, so it always returned 404. `analytics workflows` is not that view — it ranks individual workflows by runs (with success rate, median, P95 and tokens per row) rather than reporting app-wide workflow totals. See the analytics guide for what the REST API does expose.
 
 `runs list` includes a `DELAY` column (`queueDelayMs`); `runs status` includes "Execution started" (`executionStartedAt`), "Queue delay" (`queueDelayMs`), and "Create call" (`createCallDurationMs`, the wall-clock time of the run's underlying create call) lines. `executionStartedAt` and `queueDelayMs` are `null` while the run is still queued.

@@ -494,6 +494,8 @@ primitive integrations tests run-all <id> --test-cases 01ABC,01DEF
 primitive integrations tests runs <id> [--limit 20] [--group <comparison-group>]
 ```
 
+`run-all` executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
+
 ### Sync (TOML <-> server)
 
 Integration configs live at `integrations/<key>.toml`, one file per integration. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`), the `--dir` override, snapshots, pruning, and conflict handling.

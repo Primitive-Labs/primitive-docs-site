@@ -979,6 +979,13 @@ asserting against app A's UI. Override the device name with
 same app on purpose) and the device type it is created from with
 `PRIMITIVE_SMOKE_SIM_BASE` (default `iPhone 17 Pro`).
 
+`./run-ios.sh` follows the same rule with a device of its own,
+`Run — <bundle id>` — renamed with `PRIMITIVE_RUN_SIM`, created from
+`PRIMITIVE_RUN_SIM_BASE` (default `iPhone 17 Pro`) — so a smoke run never
+reinstalls the app out from under the session you are driving by hand, and
+neither run lands on another app's simulator (#2999). Pass
+`--sim <name-or-udid>` to target some other device for one run.
+
 The scenario locates login controls by stable `.accessibilityIdentifier`
 (`primitive.login.emailField`, `primitive.login.emailSubmit`,
 `primitive.login.otpField`, `primitive.login.otpVerify`), so it survives

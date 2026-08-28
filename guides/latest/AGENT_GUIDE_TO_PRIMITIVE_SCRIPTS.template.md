@@ -171,7 +171,7 @@ primitive config push --only transform/normalize-order
 primitive scripts tests run-all normalize-order
 ```
 
-`primitive config fields transform` lists the sidecar's keys. Deleting a case is removing its file and running `primitive config push --prune`.
+`primitive config fields transform` lists the sidecar's keys. Deleting a case is removing its file and running `primitive config push --prune`. `run-all` executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
 
 You can also drive a script end-to-end from the workflow that uses it, with a workflow test case (`workflows/<key>.tests/<case>.toml`) that asserts on `steps.<id>.output`:
 

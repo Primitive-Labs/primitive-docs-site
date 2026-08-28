@@ -243,9 +243,19 @@ no endpoint renders any other sign-in template, so that removal holds.
 
 ### Make the emailed sign-in link open your app (iOS)
 
-**The iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check whether the app opted in.
+**With nothing configured the iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check what the app configured.
 
-Four pieces make the emailed LINK work, and `primitive init` ships two of them:
+**If the app also has a web client, the link is an https URL, not the custom scheme (#2982).** Set the Primitive environment's `webUrl` to the web app's BARE ORIGIN — https (or `http` on `localhost`/`127.0.0.1`), no credentials, path, query or fragment; anything else is refused by the CLI and read as "no web counterpart" by the resolvers that build the app. Add `"webUrl": "https://app.example.com"` to that environment in `.primitive/config.json` (`primitive env add <name> --api-url … --web-url …` sets it on an environment you are CREATING; `env add` cannot edit an existing one). Then:
+
+- the resolve script carries it into `primitive.json`, `PrimitiveAppState.initialize()` sets it as `client.links.appBaseURL`, and `requestEmailSignIn` sends `https://app.example.com/oauth/callback` as the redirect target — no app-code change, and the same value is what an incoming universal link is trusted from;
+- the https target WINS over the custom scheme, including for a manager constructed with an explicit `callbackScheme:`, so an app cannot accidentally send a scheme target that is no longer allow-listed;
+- `sendsEmailSignInLink` still overrides in both directions — set it `false` for code-only even with `webUrl` set;
+- allow-list that https URL in `[auth].emailRedirectUris` exactly like any other target, serve `apple-app-site-association` from the web domain with the component `{ "/": "/oauth/callback", "?": { "magic_token": "*" } }` (query-scoped so the Google OAuth `?code=` redirect on the same path stays a web page), verify the deployed document with `curl`, and only THEN enable the `applinks:<domain>` entitlement — that entitlement is what makes Apple fetch, and its CDN caches what it gets;
+- receive the link with `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)` as well as `.onOpenURL` — a universal link is delivered as an `NSUserActivity`, which is the only delivery on macOS. The template does both.
+
+Migrating: keep the `<scheme>://auth/magic-link` entry allow-listed alongside the https one while old builds are still installed, then remove it. Cost of the upgrade: the web domain is compiled into the build, so changing it later means an app release.
+
+For an app with NO web client, four pieces make the custom-scheme LINK work, and `primitive init` ships two of them:
 
 | Piece | Who does it | Symptom when it is missing |
 |---|---|---|
@@ -258,7 +268,7 @@ The allow-list step is a MERGE into the existing array — `app.toml` is the who
 
 `PrimitiveAuthManager(callbackScheme:)` resolves its scheme from that same `PrimitiveAuth` URL type when no argument is passed (falling back to `primitiveapp`), and an explicit argument also starts `sendsEmailSignInLink` at `true` — an app that named its own scheme allow-listed it deliberately.
 
-Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. One `https://` link that works everywhere is universal links, tracked in [#2982](https://github.com/Primitive-Labs/js-bao-wss/issues/2982). The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
+Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. The https link above is what reaches everywhere — and it needs a web domain you control, since Primitive does not host the association document for your app ([#1130](https://github.com/Primitive-Labs/js-bao-wss/issues/1130)). The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
 
 ### Reading the token (callback page)
 

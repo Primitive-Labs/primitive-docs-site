@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Locks
 
-A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative coordination, not an access boundary. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
+A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative — they coordinate willing participants, and holding one grants no rights over data. *Who* may take which key is a separate, opt-in question, answered by [Access Control](#access-control) below. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
 
 ## Client SDK Reference
 
@@ -72,6 +72,34 @@ A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-
 ## Sizing the Lease
 
 **The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
+
+## Access Control
+
+Lock keys share one app-wide namespace, so by default **any signed-in member may acquire or renew any key** — that is the shipped default and it stays until you opt out of it. Restrict it with a single **`lock` rule set**: one CEL rule per operation, matched against the key the caller asked for as `record.key`.
+
+```toml
+# config/rule-sets/lock-policy.toml
+[ruleSet]
+name = "lock-policy"
+resourceType = "lock"
+
+[rules.lock]
+acquire = "record.key.startsWith('user:' + user.userId + ':')"
+renew = "record.key.startsWith('user:' + user.userId + ':')"
+```
+
+```bash
+primitive config push --only rule-set/lock-policy
+```
+
+- **Context**: `user.userId` / `user.role` (the caller) and `record.key` (the exact requested key) — scope by prefix (`record.key.startsWith('jobs:')`), caller, or group (`isMemberOf('ops', 'core')`).
+- App admins/owners always pass; rules govern regular members only.
+- **No `lock` rule set installed → open** — any member may operate on any key. This is the explicit, compatibility-preserving default; installing a rule set is the opt-in.
+- **With a rule set installed, every operation it does not define is denied.** A set naming only `acquire` denies `renew` for members. Only `acquire` and `renew` are gated — `release` is authorized by the handle itself.
+- At most **one** `lock` rule set per app — the policy is app-wide.
+- Denial: `403 { errorCode: "LOCK_ACCESS_DENIED" }`. The response never echoes the rule.
+- **`release` is never rule-gated.** The handle minted at acquire is itself proof of holding the key, so a caller can always free a key it holds — even if a policy change mid-hold has already revoked its `renew`. If it never releases, the lease reclaims the key on its own.
+- **Workflows are unaffected**: the `lock.*` steps and a declarative `[workflow.lock]` run server-side and never pass through this rule — a workflow's own `accessRule` governs who may start it. `locks/status` stays readable by any member; `locks list` remains admin-only.
 
 ## CLI
 

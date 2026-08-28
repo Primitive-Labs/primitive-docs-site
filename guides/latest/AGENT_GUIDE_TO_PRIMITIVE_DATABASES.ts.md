@@ -734,11 +734,53 @@ userId = "$user.userId"
 
 [[operations.params]]
 name = "row"
-type = "Task"
+type = "tasks"
 required = true
 ```
 
 `$spread` expands the object's fields into the write; at most one `$spread` per data object, and it's not available inside an `applyToQuery` action's `data`. Explicit sibling keys and server-managed stamps (auto-populated fields, timestamps) always win over spread values, order-independent — so a server-stamped `userId` can't be spoofed from the caller's object. A `$spread` of a non-object value fails at execute time (`SPREAD_NON_OBJECT`).
+
+**Which form to use.** Per-field params — one `[[operations.params]]` entry per field, the form used throughout the rest of this guide — are right when the caller's vocabulary doesn't match the model's, since the field-by-field mapping has to be written either way. Reach for a model-typed param with `$spread` when the caller already holds a model-shaped object — most commonly a workflow step forwarding rows straight from an upstream `database.query`/`document.query`/`transform` step — so the write becomes a direct pass-through instead of restating every field.
+
+**Calling side, end to end.** A workflow step whose input is already row-shaped hands the whole object to a model-typed param via templating — here, one call per row from a prior query step's results:
+
+```toml
+# config/database-type-configs/daily_snapshot.toml
+[[operations]]
+name = "upsertDailySnapshot"
+type = "mutation"
+modelName = "daily_snapshot"
+access = "fromWorkflow('nightly-snapshot')"
+
+[[operations.definition.operations]]
+op = "save"
+upsertOn = "snapshotKey"
+
+[operations.definition.operations.data]
+"$spread" = "$params.row"
+compacted = false
+
+[[operations.params]]
+name = "row"
+type = "daily_snapshot"
+required = true
+```
+
+```toml
+# the workflow step that calls it
+[[steps]]
+id = "up_snapshots"
+kind = "database.mutate"
+databaseId = "{{ input.snapshotsDbId }}"
+operationName = "upsertDailySnapshot"
+forEach = "steps.snap_rows.output.result.rows"
+as = "snapshot"
+
+[steps.params]
+row = "{{ snapshot }}"
+```
+
+`row = "{{ snapshot }}"` works because the whole templated string is a single `{{ ... }}` expression — single-expression mode returns the raw value (here, the row object) instead of stringifying it, which is what lets a step hand a whole record to a model-typed param in one line (see [Templating](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md#templating) for the general rule). Each `snapshot` came straight out of the prior query step, so it's already shaped like the `daily_snapshot` model; `$spread` forwards it unchanged and `compacted = false` is stamped alongside it as an explicit sibling. As with `createTask` above, `type = "daily_snapshot"` must match a `[models.daily_snapshot.*]` block in the type's schema, exactly as `modelName` does; `upsertOn` additionally requires a `unique = true` field there (see `upsertOn` below).
 
 **Per-parameter access control** restricts what value a caller may pass:
 

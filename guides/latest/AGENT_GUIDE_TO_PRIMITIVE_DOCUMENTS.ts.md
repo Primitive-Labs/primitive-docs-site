@@ -89,7 +89,7 @@ const result = await TodoItem.query({});         // throws DocumentClosedError o
                                                  // returns empty data for query
 ```
 
-**Note on `jsBaoDocumentsStore.isReady`:** The template provides `jsBaoDocumentsStore` with an `isReady` property. This indicates that the **store itself** has finished initializing (the document list and invitation list have loaded) — it does NOT indicate that any particular document has been opened. You still need to track document-specific readiness separately (e.g., after calling `documents.open()`) before querying data in those documents.
+**Store readiness is not document readiness:** if you wrap document tracking in a Pinia store of your own, keep the two flags apart. A store-level `isReady` means the **store** finished initializing (its document list and invitation list have loaded) — it says nothing about whether any particular document has been opened. Track document-specific readiness separately (e.g. after `documents.open()` resolves) before querying data in those documents.
 
 **Where in the Vue tree to open documents:**
 
@@ -173,8 +173,72 @@ const collections = await jsBaoClient.collections.list();
 #### Do not use
 
 - **`client.documents.list()`** — returns the union of owner + reader + read-write rows and logs a console warning on every call. Use `me.ownedDocuments` and `me.sharedDocuments`; they have the same option set (`tag`, `limit`, `cursor`, `returnPage`).
-- **`client.documents.createInvitation(...)`, `documents.acceptInvitation(...)`, `documents.declineInvitation(...)`, `documents.listPendingInvitationsForUser(...)`** — the per-document `DocumentInvitation` flow. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `client.me.pendingDocumentInvitations()` is the current "invitations I can accept" lookup.
+- **`client.documents.createInvitation(...)`, `documents.acceptInvitation(...)`, `documents.declineInvitation(...)`** — the per-document `DocumentInvitation` flow. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `client.me.pendingDocumentInvitations()` is the current "invitations I can accept" lookup.
 - **`client.me.bookmarks.*`** — render "my documents" from `me.ownedDocuments()` + `me.sharedDocuments()` (and `collections.list()` / `groups.listUserMemberships(...)` if you also want group/collection access).
+
+#### `syncMetadata()` reference
+
+`client.syncMetadata(options?: SyncMetadataOptions)` refreshes the local metadata index from the server. Its options are conditional on `scope` in ways the type signature doesn't show:
+
+- `scope: "all"` (default) syncs every document the user can reach, paginating the listing to completion; `scope: "single"` + `documentId` syncs one row.
+- `authoritative` (default `true`) treats the response as a complete snapshot of the scope: local rows the response doesn't mention are dropped from the index and, if they had cached metadata, `documentMetadataChanged` fires with `action: "deleted"`. Pass `authoritative: false` to merge only, with no eviction. Both scopes default to authoritative — `scope: "single"` is **not** forced non-authoritative, and it's exactly this scope that produces the `action: "deleted"` event for a single document a peer revoked or hard-deleted.
+- `payloadType` doesn't disable eviction, it **defers** it: an `"ids"` sync re-fetches the document and only evicts, with a synthetic authoritative upsert, once a 404/403 confirms it's actually gone — it never deletes on the strength of an id list alone. It defaults to `"full"` under `scope: "all"`; under `scope: "single"` it defaults to `"full"` when the fetched or supplied document exists and `"ids"` when it doesn't.
+- `retainIds` (an iterable of document IDs) exempts specific documents from an authoritative eviction, but **only applies to `scope: "all"`** — it's assembled solely in that branch, as is the automatic retention of the currently-open root document. `includeRoot: true` drops only that automatic retention — the root document then comes back in the listing itself, so there is nothing to exempt it from — and the IDs you pass in `retainIds` are added either way. `shouldRetain` (a `(documentId) => boolean` predicate) is the one exemption that reaches `scope: "single"` too — protect a document mid-open so a sync that hasn't caught up to it yet doesn't sweep it out from under you.
+- `background: true` swallows sync errors instead of throwing — use it for a periodic or on-navigation refresh you don't want to fail the caller over.
+
+```typescript
+await client.syncMetadata({ scope: "all", background: true });
+```
+
+`documentMetadataChanged` fires whenever a document's locally cached metadata changes — a title/tag/thumbnail edit, a permission-cache update, an eviction, or a delete — with:
+
+- `action`: `"created"` | `"updated"` | `"evicted"` | `"deleted"`.
+- `changedFields`: which fields changed (`"title"`, `"tags"`, `"lastKnownPermission"`, `"thumbnailBlobId"`, `"docMetadata"`, …).
+- `source`: `"local"` (this device wrote it), `"server"` (a WS push), or `"idb"` (replayed from IndexedDB).
+- `metadata`: the new cache entry, or `null` for `"evicted"` / `"deleted"`.
+
+`"deleted"` is the "the document is gone" signal — a peer revoking your access and a peer hard-deleting the document collapse to the same shape (`metadata: null`), so branch on `action`, not on whether `metadata` is present. `"evicted"` is a separate, local-only concern (e.g. an explicit `client.evictLocalDocument()` call freeing storage) — the document may still be reachable, but there's no cached copy to show until the next sync.
+
+`permission` fires whenever the client learns the signed-in user's access level for a document, or that level changes — independent of the other metadata fields, so subscribe to it separately rather than inferring permission changes from `documentMetadataChanged`:
+
+```typescript
+client.on("permission", ({ documentId, permission }) => {
+  switcherCache.setPermission(documentId, permission);
+});
+```
+
+**No event covers a collection-membership change.** Adding a document to (or removing it from) a collection the user belongs to fires neither `documentMetadataChanged` nor `permission` for that grant — `collections.listDocuments()` is a plain query with no push counterpart. Refresh it on the same timer or navigation trigger you use for `syncMetadata()`.
+
+#### Cache maintenance: keeping a combined listing fresh
+
+Re-querying all four paths on every navigation is simpler and equally correct for a view that isn't long-lived (opened once per session, say) — reach for a cache only once a view stays mounted across many navigations, such as a document switcher.
+
+To keep a cached combination current instead of re-walking every listing: key the cache by `documentId`, and store only what you render (`title`, `tags`, `permission`, `source`, which of the four paths surfaced the row). Then, on the events above:
+
+```typescript
+client.on("documentMetadataChanged", ({ documentId, action, metadata }) => {
+  if (action === "deleted" || action === "evicted") {
+    switcherCache.delete(documentId);
+  } else {
+    switcherCache.patch(documentId, metadata);
+  }
+});
+
+client.on("permission", ({ documentId, permission }) => {
+  switcherCache.setPermission(documentId, permission);
+});
+```
+
+Drop the row on either `"deleted"` or `"evicted"` — in both cases there's no cached copy to show until the next sync. Call `syncMetadata({ scope: "all", background: true })` on a timer or on becoming visible to pick up changes that happened while the events weren't flowing (app closed, tab backgrounded), and re-fetch `collections.listDocuments()` on that same trigger, since no event covers a collection-membership change. That's the full maintenance loop, with no re-walk of the other three listings needed.
+
+#### An app-owned document index (optional)
+
+Having four access paths means "everything I can access" is a query result, not necessarily what the app should show — a user's server-side access and the set an app presents are different concepts, and for some apps they diverge. Two patterns follow from that, both building on the root document's role as "a natural home for user preferences and settings" (see Critical Rule 7 above): it's also a natural home for an app-controlled index of documents, since it's per-user, always available once signed in, and not itself shareable.
+
+- **A curated "documents to show" index.** Store document references (at minimum the `documentId`; optionally a cached `title`/`permission` for a switcher) in a field on the root document, and drive navigation from that list instead of the raw union of the four paths. This gives the app a definite, app-controlled set — e.g. only documents the user has explicitly added, in an order the user picked — decoupled from whatever the server currently reports the user can reach.
+- **An app-side acceptance flow.** The platform has no accept/reject gate for sharing — granting a permission (or resolving an invitation) gives access immediately, with no pending state the recipient controls. An app that wants an explicit "accept before it appears" step layers this on top: track the accepted set (e.g. an array of `documentId`s) in the root document, show a document from `sharedDocuments`/group/collection listings as "pending" until its id is in that set, and add to the set when the user accepts.
+
+Neither is universal. Many apps should simply render what `sharedDocuments`, `groups.listDocuments`, and `collections.listDocuments` return with no app-side index at all — that's the right default when shared documents should just appear, or when access is meant to flow entirely through group or collection membership.
 
 ## Core data operations
 
@@ -404,7 +468,7 @@ Open a local-only document with `waitForLoad: "local"` and `enableNetworkSync: f
 
 ## Common Document Usage Patterns
 
-**Helper Stores:** The template includes `jsBaoDocumentsStore` (the underlying tracked-documents store) and `singleDocumentStore` (a higher-level wrapper for Pattern 1 / Pattern 2) in `/src/stores/`. These stores handle document opening, closing, readiness tracking, and state management. They can be used as-is, customized to fit your needs, or ignored in favor of application-specific approaches.
+**Document state is application state.** Hold document opening, closing, readiness tracking, and "which document am I in" in a small Pinia store of your own, alongside the template's `userStore`. Each pattern below says what that store comes to; [Pattern 3](#pattern-3-multiple-documents) has a minimal one you can strip down for Patterns 1 and 2.
 
 ### Pattern 1: Single Document (Personal Apps)
 
@@ -424,7 +488,7 @@ Each user gets exactly one document that holds all their data. The document is o
 
 Users have multiple documents but work in one at a time, switching between them. Track the current document and call `open()` on the chosen one.
 
-**UI components** in `src/components/documents/`: `PrimitiveDocumentSwitcher` (sidebar dropdown) and `PrimitiveDocumentList` (full management page with rename/share/delete).
+Build the workspace switcher and the management page on the client surface: `me.ownedDocuments()` / `me.sharedDocuments()` to list, `documents.update(documentId, { title })` to rename, `documents.delete()` to delete, and [Building a share UI](#building-a-share-ui) for the share row.
 
 List with `me.ownedDocuments()` and `open()` the selected document; create a new workspace document with `create()` and open it:
 
@@ -453,16 +517,15 @@ All documents that need live updates or cross-document queries must be open. Tag
   const messages = await Message.query({});
 ```
 
-The template does not ship a built-in "multi-document" Pinia store. A minimal store for "all documents tagged `channel`":
+A minimal Pinia store for "all documents tagged `channel`":
 
 ```typescript
 // stores/channelDocsStore.ts
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { useJsBaoClient } from "primitive-app";
+import { jsBaoClientService } from "primitive-app";
 
 export const useChannelDocs = defineStore("channelDocs", () => {
-  const client = useJsBaoClient();
   const documentIds = ref<string[]>([]);
   const openedIds = ref<Set<string>>(new Set());
   const loadError = ref<Error | null>(null);
@@ -477,6 +540,7 @@ export const useChannelDocs = defineStore("channelDocs", () => {
   async function load() {
     loadError.value = null;
     try {
+      const client = await jsBaoClientService.getClientAsync();
       const owned = await client.me.ownedDocuments({ tag: "channel" });
       const shared = (await client.me.sharedDocuments({ tag: "channel" })).items;
       documentIds.value = [...owned, ...shared].map((d) => d.documentId);
@@ -952,26 +1016,80 @@ const result = await Article.query({}, {
 
 ### Aggregations
 
-Group and calculate statistics — see [Aggregation](#aggregation) above for the compiled call. The result is a **nested object keyed by group values** (not an array):
+Group and calculate statistics — see [Aggregation](#aggregation) above for the compiled call. `groupBy` must name at least one field: an empty `groupBy` throws `Invalid aggregation configuration`, so reach for [`Model.count(filter)`](#counting-records) when you want a plain total. The result is therefore always a **nested object keyed by group values** (not an array), one level per `groupBy` entry, and the leaf under the last group value depends on which operations you asked for.
+
+**A lone `count`** — the leaf collapses to the bare number. This holds for **every** `groupBy` type, a plain indexed field included (not just the stringset facets below), so there is no `{ count: n }` wrapper to read through:
 
 ```typescript
+const listId = "01M12A5DJ7DW4Z1BVDVVTZ1CXN";
+const counts = (await TodoItem.aggregate({
+  groupBy: ["listId"],              // a plain indexed string field
+  operations: [{ type: "count" }],
+  filter: { completed: false },
+})) as Record<string, number>;      // narrow before indexing — see below
+// Returns:
+// { "01M12A5DJ7DW4Z1BVDVVTZ1CXN": 4, "01M12A84FEBE3MXTWVC4DHZRXW": 3 }
+
+const open = counts[listId] ?? 0;   // ✅ the count itself
+// counts[listId]?.count            // ❌ always undefined — renders 0
+```
+
+`aggregate` is typed `Record<string, any> | Record<string, any>[]`, so the scaffolded (strict) TypeScript app rejects indexing the result directly: `counts[listId]` on that union is `TS7053: Element implicitly has an 'any' type`. Assert the leaf shape on the call before you read a group out of it — `as Record<string, number>` for a lone `count`, `as Record<string, { count: number; sum_estimatedHours: number }>` for the operation-keyed leaves below.
+
+**Every other operation list** — the leaf is an object keyed by operation. Operation result keys are `count`, `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`:
+
+```typescript
+const stats = await Task.aggregate({
+  groupBy: ["category"],
+  operations: [
+    { type: "count" },
+    { type: "avg", field: "priority" },
+    { type: "sum", field: "estimatedHours" },
+  ],
+});
 // Returns:
 // {
 //   work:     { count: 8, avg_priority: 2.5, sum_estimatedHours: 40 },
-//   personal: { count: 3, avg_priority: 1.0, sum_estimatedHours:  6 },
+//   personal: { count: 3, avg_priority: 1.0, sum_estimatedHours: 6 },
 // }
 ```
 
-Multi-field `groupBy` produces deeper nesting (`result[group1][group2] = { ...ops }`). Operation result keys are `count`, `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`.
+Only `count` collapses. A single `sum`, `avg`, `min`, or `max` keeps its operation key, so read it as `result[group].sum_estimatedHours`, not as a number:
 
-**StringSet facet aggregation** — grouping by a `stringset` field counts per value. When the only operation is `count`, the value collapses to a number:
+```typescript
+const hours = await Task.aggregate({
+  groupBy: ["category"],
+  operations: [{ type: "sum", field: "estimatedHours" }],
+});
+// Returns:
+// {
+//   work:     { sum_estimatedHours: 40 },
+//   personal: { sum_estimatedHours: 6 },
+// }
+```
+
+Multi-field `groupBy` produces deeper nesting (one level per field) and applies the same leaf rule. Group values become object keys, so a numeric field's values are stringified:
+
+```typescript
+const byCategoryAndPriority = await Task.aggregate({
+  groupBy: ["category", "priority"],
+  operations: [{ type: "count" }],
+});
+// Returns:
+// {
+//   work:     { "1": 2, "3": 5 },
+//   personal: { "2": 1 },
+// }
+```
+
+**StringSet facet aggregation** — grouping by a `stringset` field counts per member value, with the same leaf rule:
 
 ```typescript
 const tagCounts = await Task.aggregate({
-  groupBy: ["tags"],  // "tags" is a stringset field
+  groupBy: ["tags"],                // "tags" is a stringset field
   operations: [{ type: "count" }],
 });
-// Returns: { "work": 15, "urgent": 8, "personal": 5, ... }
+// Returns: { "work": 15, "urgent": 8, "personal": 5 }
 ```
 
 Only one stringset facet field is allowed per aggregation. To check membership of a specific value across records, use a `StringSetMembership` groupBy entry: `{ field: "tags", contains: "urgent" }`.
@@ -979,6 +1097,12 @@ Only one stringset facet field is allowed per aggregation. To check membership o
 ### useJsBaoDataLoader Pattern
 
 The data a component renders is a plain `Model.query` (see [Read](#read-find--query--first--count) for the compiled call) that you re-run whenever the underlying records change. `useJsBaoDataLoader` is the **web template's** Vue composable that wires that re-run for you — it is framework glue around the same query, not a different API.
+
+The scaffolded template ships it at `src/composables/useJsBaoDataLoader.ts` — part of your app's source, yours to read and change:
+
+```typescript
+import { useJsBaoDataLoader } from "@/composables/useJsBaoDataLoader";
+```
 
 **It is component-only**: it registers its model subscriptions and document-event listeners inside `onMounted`, which fires only for mounted Vue components. Calling it from a Pinia store's `setup()`, a router guard, or any other non-component context will load data once but **never react to subsequent changes** — the `onMounted` callback never runs there, so no subscriptions are registered. For those contexts, subscribe directly (see [Subscribing Outside a Component](#subscribing-outside-a-component) below).
 
@@ -1027,7 +1151,7 @@ Under the hood it wraps the same compiled client calls documented above — `Mod
 - **Return a single structured object** from `loadData`
 - NEVER add a watch on `loadData` results. Do processing inside `loadData`.
 - NEVER rely on component remounting for route param changes. The loader only sees changes via `queryParams`.
-- Gate skeleton/loading UI (e.g. `PrimitiveLoadingGate`) on `showSkeleton`, not on `documentReady` or raw load state — it handles the initial-load wait and suppresses the warm-reload flash for you.
+- Gate skeleton/loading UI on `showSkeleton`, not on `documentReady` or raw load state — it handles the initial-load wait and suppresses the warm-reload flash for you. The gate the template ships is `import PrimitiveLoadingGate from "@/components/shared/PrimitiveLoadingGate.vue"`.
 - `initialDataLoaded` becomes true after the first successful `loadData`. Make rendering/redirect decisions ONLY after `initialDataLoaded` is true.
 - For side effects after load (like redirects), watch `initialDataLoaded` and act when it becomes true.
 - For sequences of mutations (save/delete/reorder), set `pauseUpdates` while mutating, then call `reload()` afterward to avoid flicker.
@@ -1345,21 +1469,84 @@ await client.documents.requestAccess(id, { message: "..." }); // missing require
 
 Render the user's documents from two calls: `client.me.ownedDocuments()` for documents they own, and `client.me.sharedDocuments()` for documents shared directly with them (non-owner `DocumentPermission` plus pending `DocumentInvitation`s). Group- and collection-shared documents are listed through `groups.listDocuments` / `collections.listDocuments`.
 
-### Using PrimitiveShareDocumentDialog
+### Building a share UI
 
-When allowing users to share documents, use `PrimitiveShareDocumentDialog`:
+Build your share dialog on `client.documents.*`. Three reads fill it and three writes drive it:
+
+| Row / control | Call |
+| --- | --- |
+| People with access | `documents.getPermissions(documentId)` → `DocumentPermissionEntry[]` (`userId`, `email`, optional `name`, `permission`) |
+| Invited, not signed up yet | `documents.listPendingInvitations(documentId)` → `PendingInvitationEntry[]` (`email`, `permission`, `invitationId`, `expiresAt`) |
+| Groups with access | `documents.listGroupPermissions(documentId)` |
+| Invite / change a level | `documents.updatePermissions(documentId, { userId \| email, permission })` |
+| Remove a person, cancel an invite | `documents.removePermission(documentId, { userId })` / `{ email }` |
+| Share with a group | `documents.grantGroupPermission(documentId, { groupType, groupId, permission })` |
 
 ```vue
-<PrimitiveShareDocumentDialog
-  :is-open="showShareDialog"
-  :document-id="currentDocumentId"
-  :document-label="currentList?.title ?? 'Document'"
-  :invite-url-template="`${window.location.origin}/lists`"
-  @close="showShareDialog = false"
-/>
+<script setup lang="ts">
+import { ref, watch } from "vue";
+import { jsBaoClientService } from "primitive-app";
+import type { DocumentPermissionEntry, PendingInvitationEntry } from "js-bao-wss-client";
+
+// `documentUrl` is the caller's, not this component's to invent: an existing
+// member's share email links to it verbatim, so it has to be an absolute URL
+// your app really routes — pass the page you show this document on.
+const props = defineProps<{ documentId: string; documentUrl: string }>();
+
+const members = ref<DocumentPermissionEntry[]>([]);
+const pending = ref<PendingInvitationEntry[]>([]);
+const inviteEmail = ref("");
+
+async function refresh(): Promise<void> {
+  const client = await jsBaoClientService.getClientAsync();
+  members.value = await client.documents.getPermissions(props.documentId);
+  pending.value = await client.documents.listPendingInvitations(props.documentId);
+}
+watch(() => props.documentId, refresh, { immediate: true });
+
+async function invite(): Promise<void> {
+  const client = await jsBaoClientService.getClientAsync();
+  await client.documents.updatePermissions(props.documentId, {
+    email: inviteEmail.value,
+    permission: "read-write",
+    sendEmail: true,
+    // REQUIRED with sendEmail: true — where the recipient lands.
+    documentUrl: props.documentUrl,
+  });
+  inviteEmail.value = "";
+  await refresh(); // an unknown email lands in `pending`, a known one in `members`
+}
+
+// One call covers both "remove a member" (userId) and "cancel an invite" (email).
+async function revoke(target: { userId: string } | { email: string }): Promise<void> {
+  const client = await jsBaoClientService.getClientAsync();
+  await client.documents.removePermission(props.documentId, target);
+  await refresh();
+}
+</script>
+
+<template>
+  <ul>
+    <li v-for="member in members" :key="member.userId">
+      {{ member.name ?? member.email }} — {{ member.permission }}
+      <button v-if="member.permission !== 'owner'" @click="revoke({ userId: member.userId })">
+        Remove
+      </button>
+    </li>
+    <li v-for="invite in pending" :key="invite.invitationId">
+      {{ invite.email }} — invited as {{ invite.permission }}
+      <button @click="revoke({ email: invite.email })">Cancel</button>
+    </li>
+  </ul>
+  <form @submit.prevent="invite"><input v-model="inviteEmail" type="email" /></form>
+</template>
 ```
 
-**Critical:** The `invite-url-template` prop is REQUIRED when users send email notifications. Without it, the API returns HTTP 400. The URL should point to a page where invited users can see and accept their invitations.
+**Critical:** whenever you pass `sendEmail: true`, `documentUrl` is REQUIRED — without it the API returns HTTP 400 — and it should point at a page where the recipient can see and accept the invitation. The app must also have `baseUrl` configured, or the same call returns 400.
+
+`documentUrl` has to be a URL your app actually routes to. A recipient who is already a member gets the `document-share` email, whose link is the `documentUrl` you sent, verbatim — a path you invented lands them on your Not Found page. The scaffolded template routes `/`, `/login`, `/logout`, the OAuth callback and `/invite/accept`, and everything else falls to the catch-all, so add the document's own route (`src/router/routes.ts`) and build the URL from it, or send a page you already have. (A recipient who is not a member yet is a different email: the deferred `document-share-deferred` template carries a tokenized accept URL composed from the app's `baseUrl`, which the template does route.)
+
+Both lists are point-in-time reads, not live queries: re-run `refresh()` after every write, and after the user accepts an invitation elsewhere. The owner row cannot be removed — hand the document over with `documents.transferOwnership(documentId, newOwnerId)` instead. The full surface, including batch grants and access requests, is in [Programmatic Sharing — Full Reference](#programmatic-sharing--full-reference) below.
 
 ### Handling Invitations
 
@@ -1475,7 +1662,7 @@ The one exception: if the caller is neither the owner nor an app owner, the plat
 
 ### Programmatic Sharing — Full Reference
 
-Beyond the Quick Reference and the `PrimitiveShareDocumentDialog` UI, the full programmatic surface. Inspecting a document's current members and pending invites:
+Beyond the Quick Reference, the full programmatic surface. Inspecting a document's current members and pending invites:
 
 ```typescript
   // Current members (accepted permission grants)
@@ -2047,8 +2234,8 @@ primitive documents permissions revoke <document-id> --email user@example.com -y
 | Store loads once but never reacts to changes    | `useJsBaoDataLoader` called outside a component — its `onMounted` subscriptions never register | In a Pinia store / non-component context call `Model.subscribe(reload)` directly in `setup()`. See [Subscribing Outside a Component](#subscribing-outside-a-component) |
 | Spread/clone of a model is empty or missing fields | Fields are prototype getters, not own properties, so `{ ...model }` / `{ id, ...rest }` copy nothing | Read fields explicitly: `{ id: model.id, title: model.title }`. See [Model Instances Are Not Plain Objects](#model-instances-are-not-plain-objects) |
 | Query `field: false` misses items               | Items with `field: undefined` don't match `field: false`                 | Use a default value in schema, OR filter in JavaScript with `item.field ?? false`                    |
-| Document created but not in sidebar/list        | Created via `documents.create()` directly without updating tracked state | Use the demo `jsBaoDocumentsStore.createDocument()` (or your own tracker) so reactive lists update   |
-| HTTP 400 when sharing with email                | Missing `documentUrl` in invitation                                       | Pass `invite-url-template` prop to `PrimitiveShareDocumentDialog`                                    |
+| Document created but not in sidebar/list        | Created via `documents.create()` directly without updating tracked state | Push the new entry into your own document store (or re-run `me.ownedDocuments()`) so reactive lists update |
+| HTTP 400 when sharing with email                | `sendEmail: true` with no `documentUrl` in the request                    | Pass `documentUrl` to `documents.updatePermissions()` — see [Building a share UI](#building-a-share-ui)     |
 | New document not queryable immediately          | Document not opened after creation                                        | After `documents.create()`, call `documents.open(metadata.documentId)` before querying              |
 | `setPermissions is not a function`              | Method doesn't exist                                                      | Use `updatePermissions(documentId, { userId, permission })`                                          |
 | `setGroupPermission is not a function`          | Method doesn't exist                                                      | Use `grantGroupPermission(documentId, { groupType, groupId, permission })`                           |
