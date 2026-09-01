@@ -420,7 +420,7 @@ status = "paid"
 
 A missing `documentId`/`modelName` (or `recordId` on a write), or a `documentId` that doesn't resolve to a document, fails the step non-retryably.
 
-**Caller-mode ACL.** When the run is `runAs: "caller"` (the default — see [Execution identity](#execution-identity-runas-system-workflows)), every op enforces the caller's per-document permission: `query`/`queryOne`/`count` need `reader`, `save`/`patch`/`delete` all need `read-write`. A `null`/insufficient permission throws `DocumentAccessDeniedError` (non-retryable) — a templated/user-supplied `documentId` can't bypass the ACL. `runAs: "system"` runs app-privileged (no per-caller check). Note `document.delete` deletes **records inside** a document; deleting the document itself (`client.documents.delete`) is a different, stricter operation with no workflow step — see [Deleting Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#deleting-documents) for its permission rule.
+**Caller-mode ACL.** When the run is `runAs: "caller"` (the default — see [Execution identity](#execution-identity-runas-system-workflows)), every op enforces the caller's per-document permission: `query`/`queryOne`/`count` need `reader`, `save`/`patch`/`delete` all need `read-write`. A `null`/insufficient permission throws `DocumentAccessDeniedError` (non-retryable) — a templated/user-supplied `documentId` can't bypass the ACL. That check authorizes only the document the step names, not any other id the run carries — see [Authorizing a caller workflow](#authorizing-a-caller-workflow). `runAs: "system"` runs app-privileged (no per-caller check). Note `document.delete` deletes **records inside** a document; deleting the document itself (`client.documents.delete`) is a different, stricter operation with no workflow step — see [Deleting Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#deleting-documents) for its permission rule.
 
 **Targeting by alias.** Supply a `documentAlias { scope, aliasKey }` block instead of `documentId` (exactly one of the two). `scope` is `"user"`. In a caller run, it resolves the caller's own alias (forces `userId = caller`). In a **system** run, it requires an explicit subject `userId` on the block — `documentAlias { scope = "user", aliasKey, userId }` — resolved app-privileged (see [subject-user methods](#subject-user-methods-system-workflows)). A non-resolving alias fails the step like a bad `documentId` (Option A — hard fail).
 
@@ -1319,7 +1319,7 @@ kind = "integration.call"
 [[compensate]]
 id = "restore-token"
 kind = "database.mutate"
-runIf = "steps.deduct-token != null"
+runIf = "steps['deduct-token'] != null"
 # ...
 ```
 
@@ -1388,6 +1388,43 @@ Behavior:
 - Otherwise, evaluate against `user.userId`, `user.role`, plus `hasRole(role)`, `isMemberOf(groupType, groupId)`, `memberGroups(groupType)`.
 
 Set `accessRule` in the `[workflow]` TOML block and push it — an absent or empty rule is sent as "no rule" rather than dropped, so removing the line clears the rule. To change it later, edit `workflow.accessRule` in the file and run `primitive config push --only workflow/<key>`.
+
+### Authorizing a caller workflow
+
+`accessRule` gates who may *start* a run; it says nothing about what the steps inside then do with caller-supplied input. In a `runAs: "caller"` run, per-step gates (the document ACL above, a database op's `access` CEL) don't compose automatically — each authorizes only what it directly checks:
+
+- **An ACL-checked step authorizes only the resource it names.** A `document.patch` step that passes the caller's `read-write` check on `input.householdDocumentId` proves the caller may write *that* document — nothing about any other id the run holds. A later step keyed on a *different* caller-supplied input (`input.itemId`, `input.householdId`) isn't covered by that check just because it ran after it.
+- **Never trust a caller-supplied id for a step's own targeting — internal ids included, not only external ones.** [External identifiers](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#patterns) already rules this out for a third-party id (a Stripe `customer_id`); the same reasoning applies to an id the app minted itself (a `householdId`, an `itemId`) once it arrives as `input` rather than as something derived server-side. Prefer server-side derivation over accepting the id and trusting it downstream: `documentAlias` (always resolves to the caller's own document, never a supplied id — see "Targeting by alias" above), or a database op whose `definition`/`access` filters on `$user.userId` / `params.userId == user.userId` rather than on a caller-supplied key.
+- **`fromWorkflow(key)` authorizes the workflow, not the caller.** It moves an operation's access decision from "any authenticated caller" to "only this workflow's step runner" (see [`fromWorkflow`](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#cel-access-expressions)) — but in a `runAs: "caller"` run the runner still executes as the caller, so the op's own params still need scoping to that caller. Gating an op with `fromWorkflow('this')` and then feeding it a caller-controlled key that selects another user's row is the same gap as no gate, one step removed.
+- **Step order is authorization.** An ACL check protects only what runs after it, and only when later steps actually depend on the id it checked. A side-effecting step placed before the ACL check, or one keyed on an id that shares no derivation with it, runs on the strength of a check that never covered it.
+
+```toml novalidate
+# UNSAFE — step "mark"'s ACL covers householdDocumentId only. Step "target"
+# keys off input.itemId/input.householdId, which have no relationship to the
+# checked document, so any caller who owns *some* document (mark) can supply
+# another user's itemId/householdId and reach the credential in "item".
+[[steps]]
+id = "mark"
+kind = "document.patch"
+documentId = "{{ input.householdDocumentId }}"   # checked: caller needs read-write
+
+[[steps]]
+id = "target"
+kind = "database.query"
+operationName = "getItemTarget"                  # access = fromWorkflow('this') — gates the OP, not this id
+[steps.params]
+targetKey = "{{ input.itemId }}|{{ input.householdId }}"
+
+# SAFE — derive the household from the document the ACL already checked
+# instead of trusting a second caller input, so "mark"'s check actually
+# covers what "target" looks up.
+[[steps]]
+id = "target"
+kind = "database.query"
+operationName = "getItemTarget"
+[steps.params]
+targetKey = "{{ steps.mark.record.householdId }}|{{ input.itemId }}"
+```
 
 ## Execution identity (`runAs`, system workflows)
 

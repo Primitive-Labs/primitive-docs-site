@@ -6,6 +6,13 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ## Unreleased
 
+### Fixed
+
+- **Swift template:** the default app icon is opaque and the Info.plist declares supported orientations, so a first App Store upload passes validation instead of being rejected twice.
+- **Swift template:** the first archive no longer fails the models guard — model codegen runs before xcodegen regenerates the project.
+
+## 2026-08-28
+
 ### New
 
 - **JavaScript client:** passkey sign-in and registration start calls accept an optional `rpId`, so a native or multi-domain app can name the relying party it wants instead of relying on the request origin.

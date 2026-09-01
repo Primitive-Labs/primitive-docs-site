@@ -99,7 +99,7 @@ access = "fromWorkflow('refresh-prices')"                      # only the named 
 - Default-deny, widen deliberately. Missing rules deny (database ops) or allow any member (workflows) — know which surface you're on.
 - One group type per concept (`team`, `org`, `team-admin`); group-level "admin" is modeled as its own group type, not a built-in.
 - Parameterize the resource (`params.teamId`) so one operation serves every team.
-- External identifiers: never trust a client-supplied provider id (a payment `customer_id`) for a server-side action — a caller could substitute another user's id. Keep the user→external-id mapping in a system-write store (write op gated `access = "fromWorkflow('key')"`) with reads scoped to the caller (`definition` filter on `$user.userId`), and resolve the id server-side from the authenticated user.
+- External identifiers: never trust a client-supplied provider id (a payment `customer_id`) for a server-side action — a caller could substitute another user's id. Keep the user→external-id mapping in a system-write store (write op gated `access = "fromWorkflow('key')"`) with reads scoped to the caller (`definition` filter on `$user.userId`), and resolve the id server-side from the authenticated user. The same rule holds for ids the app minted itself (a `householdId`, an `itemId`) once they arrive as caller input rather than as something derived server-side — "external" describes where the id came from into this request, not who defined it. In a caller workflow this composes across steps, not just within one: passing an ACL check on one id (a `documentId` the caller owns) never authorizes a *different* id the run later reads from the same caller input — see [Authorizing a caller workflow](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md#authorizing-a-caller-workflow).
 
 ## Recipe: subscription entitlement
 
@@ -141,7 +141,7 @@ filter = { userId = "$user.userId" }
 limit = 1
 ```
 
-Resolve the provider id server-side from the authenticated user — never accept a client-supplied `customer_id` (see External identifiers, above).
+Resolve the provider id server-side from the authenticated user — never accept a client-supplied `customer_id`, and the same for any internal id a workflow step would otherwise take from caller input (see External identifiers, above).
 
 **4. Checkout and customer-portal are caller-run workflows.** "Start a subscription" and "manage billing" are ordinary `runAs = "caller"` workflows that call the provider's API (the outbound integration — see the [Integrations guide](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md)) to mint a Checkout or Billing-Portal session URL for the signed-in user and return it. They grant no access themselves; membership changes only when the provider's webhook (step 2) reports the subscription started or ended.
 

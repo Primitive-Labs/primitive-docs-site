@@ -149,7 +149,7 @@ counters:
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
 - `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; opts into the deprecated direct LLM/Gemini proxy routes, off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array)
-- `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
+- `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `passkeyUserVerification` (`"preferred"` | `"required"`, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
 
@@ -245,6 +245,29 @@ configuration, and `primitive init` appends the dev-port callback when you
 choose a non-default port. `http`/`https` entries match by ORIGIN (one origin,
 many paths); a custom scheme matches on SCHEME + AUTHORITY, so `myapp://auth`
 covers `myapp://auth/magic-link` but no other scheme or host.
+
+### Passkey user verification
+
+`passkeyUserVerification` is the policy BOTH halves of a passkey ceremony state
+— the options ask the authenticator for it, and the server enforces exactly that
+when verifying. Flat in `[auth]`, beside the `[auth.passkeys]` relying-party map:
+
+```toml
+[auth]
+passkeyEnabled          = true
+passkeyUserVerification = "required"   # default: "preferred"
+```
+
+- `"preferred"` (the default, and what an app that omits the key gets) — the
+  authenticator MAY skip Face ID / a PIN, and the server accepts the credential
+  it returns. iOS legitimately skips it; so do password managers counting a
+  vault unlock, and PIN-less security keys.
+- `"required"` — the authenticator must verify the user before returning
+  anything, and a credential it did not verify is rejected with
+  `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering).
+
+Only `"preferred"`, `"required"` and no key at all are accepted; any other value
+is a 400 naming the field.
 
 ### Retired keys
 
