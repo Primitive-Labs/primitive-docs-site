@@ -29,7 +29,7 @@ Deleting a config object = delete its file + `primitive config push --prune`. Ev
 
 Not configuration, so still direct commands: secrets (`primitive secrets set`), resource creation that mints an id (`apps create`, `databases create`, `collections create`, `groups create`), data operations, and every read/test command.
 
-Availability is runtime state, not configuration. `<noun> disable`/`enable` — for `workflows`, `cron-triggers`, `webhooks`, `integrations` and `prompts` alike — are its only writers, along with the matching web-admin action and the delete flow, which writes the third value `archived` (a retired object, kept so its history still resolves; `enable` refuses it). The delete flow has a CLI spelling on those same five nouns: `primitive <noun> archive <id>` (confirms first, `--yes`/`-y` skips it, `--json` prints the server envelope). It is a SOFT delete — the row keeps its key, and for webhooks and cron triggers its slot against the per-app cap — so it is not how you free a key; deleting the file and running a confirmed `primitive config push --prune` is. There is no un-archive: recover by hard-deleting the holder, then re-adding the file and pushing. `status` is server-owned and is deliberately not a TOML key: `config pull` does not emit it, a file that still carries the line fails `config push` with guidance naming the verb, and `config diff` reports "inactive; configuration unchanged" rather than drift. Anything created or pushed is active; there is no `draft` state on any object. Read the current value back with `<noun> get` or `<noun> list`. Per-VERSION status is a different key and stays in TOML: `[[configs]] status = "archived"` retires one named config, and says nothing about whether the object is serving.
+Availability is runtime state, not configuration. `<noun> disable`/`enable` — for `workflows`, `cron-triggers`, `webhooks`, `integrations` and `prompts` alike — are its only writers, along with the matching web-admin action and the delete flow, which writes the third value `archived` (a retired object, kept so its history still resolves; `enable` refuses it). The delete flow has a CLI spelling on those same five nouns: `primitive <noun> archive <id>` (confirms first, `--yes`/`-y` skips it, `--json` prints the server envelope). It is a SOFT delete — the row keeps its key, and for webhooks and cron triggers its slot against the per-app cap — so it is not how you free a key; deleting the file and running a confirmed `primitive config push --prune` is. There is no un-archive: recover by hard-deleting the holder, then re-adding the file and pushing. `status` is server-owned and is deliberately not a TOML key: `config pull` does not emit it, a file that still carries the line fails `config push` with guidance naming the verb, and `config diff` reports "inactive; configuration unchanged" rather than drift. Anything created or pushed is active; there is no `draft` state on any object. Read the current value back with `<noun> get` or `<noun> list`. Per-VERSION status is a different key and stays in TOML: `[[configs]] status = "archived"` retires one named config, and says nothing about whether the object is serving. For a prompt's `[[configs]]`, pull writes that line only for a config that IS retired — an omitted one means active, so an ordinary pulled prompt file carries no `status` at all. A workflow's named-config sidecar (`workflows/<key>.configs/<name>.toml`) still states its own `[config] status` either way.
 
 ## The sync loop
 
@@ -148,103 +148,16 @@ counters:
 
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
-- `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; opts into the deprecated direct LLM/Gemini proxy routes, off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array)
+- `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; opts into the deprecated direct LLM/Gemini proxy routes, off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array), `largeDocumentWindowDays` (1–14, default 7)
 - `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `passkeyUserVerification` (`"preferred"` | `"required"`, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
 
-`app.toml` is the **whole truth**, the same source-of-truth rule every other configuration file follows (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)): push sends a value for every setting listed above, not just the keys present, so a deleted line **clears** the setting or **resets it to its declared default** — `magicLinkEnabled` / `otpEnabled` / `waitlistNotifyAdmins` to `true`, `[cors] mode` to `"universal"`, `[invitations] limit` to `5`, the remaining booleans to `false`, everything else cleared. `[app].name` and `[app].mode` are **required** (no default to reset to, and `mode` decides who can sign up), so their absence is a validation error from `config push` and `config diff` alike. `config pull` still omits a setting the server does not hold, so a pull → push round trip is a no-op. An explicit `false` is forwarded and `appleAudiences = []` clears the audiences. An unrecognized or retired key is rejected by name before anything is applied — never ignored.
+`app.toml` is the **whole truth**, the same source-of-truth rule every other configuration file follows (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)): push sends a value for every setting listed above, not just the keys present, so a deleted line **clears** the setting or **resets it to its declared default** — `emailSignInEnabled` / `waitlistNotifyAdmins` to `true`, `[cors] mode` to `"universal"`, `[invitations] limit` to `5`, the remaining booleans to `false`, everything else cleared. `[app].name` and `[app].mode` are **required** (no default to reset to, and `mode` decides who can sign up), so their absence is a validation error from `config push` and `config diff` alike. `config pull` still omits a setting the server does not hold, so a pull → push round trip is a no-op. An explicit `false` is forwarded and `appleAudiences = []` clears the audiences. An unrecognized or retired key is rejected by name before anything is applied — never ignored.
 
-### Google sign-in — one client per platform
+### Google sign-in and email sign-in redirect URIs
 
-Google registers an OAuth client **per platform**, so `app.toml` states one
-entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`.
-Each entry carries its own `clientId` and its own `redirectUris`, and — for the
-types Google issues one for — its own `clientSecret`. Store the secret's value
-as an app secret first:
-
-```bash
-primitive secrets set GOOGLE_CLIENT_SECRET --value <client-secret>
-```
-
-```toml
-[auth.google.clients.web]
-clientId     = "1234-web.apps.googleusercontent.com"
-clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
-redirectUris = ["https://app.example.com/oauth/callback"]
-
-[auth.google.clients.ios]
-clientId     = "1234-ios.apps.googleusercontent.com"
-redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
-```
-
-| client type | `clientSecret` |
-|---|---|
-| `web`, `desktop` | **required** |
-| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
-
-A `clientSecret` holds a whole `{{secrets.KEY}}` reference, never the secret
-itself, so the whole map round-trips through `app.toml` like any other setting.
-A literal value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and
-a reference naming a key that doesn't exist with
-`MISSING_GOOGLE_CLIENT_SECRET_REF`.
-
-**A redirect URI belongs to the client that redirects, and selects it at the
-callback** — so a URI may appear in only one entry, and an iOS custom scheme is
-not a valid redirect for the web client. Removing a client is how you stop using
-it: for `web` and `desktop` you cannot blank the secret and keep the entry,
-because the map would then be invalid. Deleting the whole `[auth.google]` table
-removes every client.
-
-`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be
-resolved to a client secret — a *reference* naming a secret that doesn't exist,
-or a malformed reference (below): the **web** sign-in flow fails closed with it
-before the request reaches Google. Native (PKCE) sign-in is deliberately exempt
-from that guard — a PKCE exchange can prove possession of the auth code with the
-code verifier alone, so Primitive lets it through rather than rejecting it
-outright.
-
-The server sends every stored `clientSecret` back verbatim: a whole
-`{{secrets.KEY}}` reference is a pointer, not a credential, so there is nothing
-to withhold and `apps get`, `config pull` and the API all show it. Classify what
-you see:
-
-- a whole `{{secrets.KEY}}` reference — healthy;
-- a plain value, from before this rule shipped — deprecated. Google sign-in on
-  that app keeps working (the stored value IS the secret), but the entry cannot
-  be saved as it stands, because every write path rejects a literal. Store the
-  value as an app secret, point `clientSecret` at it, and push;
-- reference syntax that no `{{secrets.KEY}}` reference accounts for
-  (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying
-  an invisible character such as a zero-width space) — **already failing**. It is
-  neither a pointer nor the secret Google issued, so sign-in fails with
-  `GOOGLE_OAUTH_MISCONFIGURED`. Store the real client secret and re-point the
-  entry.
-
-An unmigrated value blocks nothing else: an app-settings write that does not
-touch the Google map succeeds whatever is stored.
-
-### Email sign-in and its redirect URIs
-
-`emailSignInEnabled` is the ONE email sign-in switch: one request sends one
-email carrying a 6-digit code and, when a link can be issued, a sign-in link.
-`emailRedirectUris` is the allow-list that link is validated against — flat in
-the same table:
-
-```toml
-[auth]
-emailSignInEnabled = true
-emailRedirectUris  = ["https://app.example.com/auth/callback"]
-```
-
-Link issuance is **fail-closed**: with no redirect target, or an empty list, the
-email renders code-only from the same template; a target that misses a non-empty
-list is rejected 400 `Invalid redirect URI`. New apps are seeded with
-`http://localhost:5173/oauth/callback` so a fresh app works with no
-configuration, and `primitive init` appends the dev-port callback when you
-choose a non-default port. `http`/`https` entries match by ORIGIN (one origin,
-many paths); a custom scheme matches on SCHEME + AUTHORITY, so `myapp://auth`
-covers `myapp://auth/magic-link` but no other scheme or host.
+`[auth.google.clients.<type>]` (one entry per platform) and `[auth].emailRedirectUris` follow the same TOML rules as every other setting above — see [Google Client Configuration](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#google-client-configuration) and [Email Sign-In](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#email-sign-in-one-email-both-credentials) in the authentication guide for the per-type `clientSecret` rules and error codes, the redirect-URI selection and matching semantics, and the `emailSignInEnabled` switch.
 
 ### Passkey user verification
 
@@ -268,6 +181,24 @@ passkeyUserVerification = "required"   # default: "preferred"
 
 Only `"preferred"`, `"required"` and no key at all are accepted; any other value
 is a 400 naming the field.
+
+### Which relying party a ceremony runs against
+
+`[auth.passkeys]` (`passkeyRpConfig`) is the set of relying parties an app HAS;
+each ceremony still has to select one of them. A browser is matched by its
+`Origin` header. A native request carries none, so it names the relying party
+itself — `AuthConfig(passkeyRpId:)` at client construction, or a per-call
+`rpId:` — and an app that names one that is not a key of `passkeyRpConfig` is
+rejected with `PASSKEY_RP_NOT_CONFIGURED` rather than served another.
+
+A Swift app built on `PrimitiveAppState` needs no code for this: `initialize()`
+names the host of the selected environment's `webUrl`, which is the relying
+party a browser at that origin would be matched to — so keep that host among
+the `[auth.passkeys]` keys. Override `passkeyRpId(for:)` on the app state to
+name a different one (return `nil` to leave the choice to the server), or pass
+`rpId:` to `PrimitiveAuthManager.signInWithPasskey` / `enrollPasskey` for a
+single ceremony. An IP-literal `webUrl` host derives nothing, since an IP
+address is never a valid relying-party id.
 
 ### Retired keys
 

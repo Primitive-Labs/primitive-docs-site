@@ -497,11 +497,9 @@ access: "user.email == 'admin@example.com'"   // user.email is not in context
 access: "has(database.metadata.teamId) && isMemberOf('team', database.metadata.teamId)"
 ```
 
-## Rule Sets for Groups and Collections
+## Rule Sets for Groups
 
-Group and collection management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `config/rule-sets/*.toml` and bound to a group or collection type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups and collections: which operations exist, the CEL context each adds, and the built-in defaults.
-
-### Group rule sets
+Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `config/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set pipeline under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
 
 **Resource type:** `group`. **Categories and operations:**
 - `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
@@ -561,92 +559,6 @@ Group and collection management operations (create/edit/delete, member add/remov
     targetUserId: "user-456", // optional
   });
 ```
-
-### Collection rule sets
-
-Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collections)) use the same rule-set pipeline as groups — a `CollectionTypeConfig` row binds a `collectionType` to a rule set. The CEL namespace is `collection.*` (separate from `group.*`), and an extra helper `hasCollectionAccess(collectionId)` is available only inside collection rule sets. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
-
-**Resource type:** `collection`. **Categories and operations:**
-
-- `category: "collection"` — `create`, `edit`, `delete`, `get` (the read op, parallel to `group.get`; use `get` in TOML configs).
-- `category: "document"` — `add`, `remove`, `delete`, `list` (controls which documents the collection can hold, plus authorization for deleting a member document outright — see [Deleting Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#deleting-documents)).
-- `category: "member"` — `add`, `remove`, `list`.
-
-**Default rule set** — applies to any collection type with no `CollectionTypeConfig` row:
-
-| Op | Default | Meaning |
-|----|---------|---------|
-| `collection.create` | `"true"` | Any signed-in member |
-| `collection.edit` / `delete` | `user.userId == collection.createdBy` | Creator only |
-| `collection.get` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member (direct or via `CollectionGroupPermission`) |
-| `document.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
-| `document.delete` | `"false"` | Denied. Unlike every other write op above, NOT creator-only — an app must explicitly configure this op to let a non-owner/non-app-owner delete a member document at all |
-| `document.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
-| `member.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
-| `member.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
-
-A non-creator reader/writer removing their own membership via `member.remove` is denied (403) unless the rule set grants it.
-
-`document.delete` is distinct from `document.remove`: `remove` only detaches a document from this collection, while `delete` authorizes destroying the whole document (`client.documents.delete`) when the caller isn't the document's owner or the app owner — the delete endpoint checks every collection containing the document and allows the delete if any one collection's `document.delete` rule passes. Because that check runs per collection, granting `document.add` on a collection can extend who is able to delete documents placed in it — configure `document.add` and `document.delete` together with that reach in mind.
-
-**CEL context**, beyond the identity context:
-
-| Variable | Always present? | Description |
-|----------|-----------------|-------------|
-| `collection.collectionType` | yes | Collection's type (matches the `CollectionTypeConfig` this rule set is bound to) |
-| `collection.collectionId` | yes (after create) | Collection's ID |
-| `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Expresses "caller belongs to the group this collection represents." Prefer storing that external id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it as `md.self.<category>.<key>` — see [Migrating `contextId` to a metadata category](#migrating-contextid-to-a-metadata-category). |
-| `collection.name` | yes | Display name |
-| `collection.createdBy` | yes (after create) | userId of the collection's creator |
-| `target.userId` | only `category: "member"`, ops `add` / `remove` | The user being added or removed. Absent for `member.list`. |
-
-Plus the collection-only helper:
-
-- `hasCollectionAccess(collectionId)` — true when the caller has direct collection membership (the platform-managed `_col-reader` / `_col-writer` system groups) OR membership in a non-system user-group that holds a `CollectionGroupPermission` of `reader` or `read-write` on the collection. Resolves to `false` outside collection rule sets, and to `false` on `collection.create` (no `collectionId` in scope yet).
-
-### Migrating `contextId` to a metadata category
-
-Prefer storing a collection's external-entity id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it in the rule set as `md.self.<category>.<key>`, rather than in the built-in `collection.contextId` field. **The move is not 1:1** — a rule can read `md.self.<category>.<key>` only for a category the collection type's manifest declares, and only after a value has been stored, so migrating means declaring a manifest and stamping the value, not just renaming a field.
-
-**1. Define a category** for the link, with separate read/write rules:
-
-```toml
-# config/metadata-category-configs/collection.classLink.toml
-[metadataCategoryConfig]
-resourceType = "collection"
-category = "classLink"
-readRule = "true"
-writeRule = "user.userId == resource.attrs.createdBy"
-
-[metadataCategoryConfig.schema.fields.classId]
-type = "string"
-required = true
-```
-
-**2. Declare the category on the collection type's manifest** — the prerequisite for the rule set to read it:
-
-```toml
-# config/collection-type-configs/class-reports.toml
-[collectionTypeConfig]
-collectionType = "class-reports"
-ruleSetName    = "class-reports-rules"
-
-[metadata.self]
-categories = ["classLink"]
-```
-
-**3. Replace `collection.contextId` with `md.self.classLink.classId`** in the rule set, and stamp `classId` when the collection is created (via `initialMetadata` on `collections.create()`) so the value exists when these ops evaluate:
-
-```toml
-[rules.collection]
-get    = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
-
-[rules.document]
-add    = "isMemberOf('class', md.self.classLink.classId)"
-list   = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
-```
-
-The `collection.create` rule is the exception: the collection and its metadata don't exist yet when it evaluates, so `md.self.classLink.classId` reads `null` there. Gate `create` on caller identity or membership another way (for example a group the caller must already belong to), and let the post-create ops above carry the `md.self` check.
 
 ## Common Patterns
 

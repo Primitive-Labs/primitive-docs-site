@@ -361,7 +361,7 @@ The platform lowercases the allowlist; `["Content-Type"]` and `["content-type"]`
 
 ```bash
 primitive login                  # Browser-based auth
-primitive use <app-id>           # Persist current app
+primitive whoami                 # The app this project's environment names
 # or pass --app <app-id> to any subcommand
 ```
 

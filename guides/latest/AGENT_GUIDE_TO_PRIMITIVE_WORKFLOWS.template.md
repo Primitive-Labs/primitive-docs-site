@@ -133,6 +133,27 @@ discount = 0
 
 `default` is opt-in. Omit it and a no-match throws `Switch step '<id>' had no matching case and no default`. An explicit `default = { output = null }` skips on no-match (the step output is `null`).
 
+In the branch the switch TAKES, a reference to a step that `runIf` skipped resolves empty instead of failing the run: `{{ steps.<skipped-step>.output.<key> }}` — and the same value through `{{ outputs.<saveAs>.<key> }}` — renders as typed `null` on its own, or as empty text inside a longer string. Write the fallback a `default` exists for directly, with no `| default:` guard:
+
+```toml
+[[steps]]
+id = "ask_payload"
+kind = "switch"
+saveAs = "askPayload"
+
+[[steps.cases]]
+when = "steps.categorize_prepare.?ok.orValue(false)"
+[steps.cases.output]
+value = "{{ steps.categorize_prepare.output.result.payload }}"
+
+[steps.default]
+[steps.default.output]
+# `categorize_prepare` was skipped, so this renders as null.
+value = "{{ steps.categorize_prepare.output.result.payload }}"
+```
+
+The tolerance is bounded to a step the engine recorded as skipped, inside a switch branch output. A key a step that RAN never produced still fails the step with `unresolved template expression(s)`, and so does the same reference in an ordinary step's params. Write the fallback there, and anywhere empty is not what you want, in the shape the consumer's type needs: `|| 0` for a number — not `| default: 0`, whose argument is parsed as a string, so it emits `"0"` — or `| default: 'none'` for text.
+
 ### `delay`
 
 ```toml
@@ -758,6 +779,26 @@ saveAs = "output"
 # Output: { resourceId, resourceType } on a hit; { resourceId: null } on a miss
 ```
 
+### `lock.acquire` / `lock.release` / `lock.renew` / `lock.status`
+
+Coordinate runs through a shared, app-scoped lock key. `lock.acquire` blocks the run (durably — the run suspends between attempts) until it wins the key or `timeoutMs` elapses, then fails the run rather than letting it overlap; set `blocking = false` for a single non-blocking attempt. It returns `{ acquired, handle }`. `lock.release` takes the `handle`; `lock.renew` extends the lease; `lock.status` inspects the key. A lease has no automatic renewal, so size `ttlMs` to cover the whole critical section or renew as the run progresses. Full semantics, including the run-scoped `[workflow.lock]` declaration that holds a key for the entire run, are in the Locks guide.
+
+```toml
+[[steps]]
+id = "acquire"
+kind = "lock.acquire"
+key = "portfolio-import:{{ input.userId }}"
+ttlMs = 60000
+timeoutMs = 30000
+
+# ... steps that must not overlap for this user ...
+
+[[steps]]
+id = "release"
+kind = "lock.release"
+handle = "{{ steps.acquire.handle }}"
+```
+
 ### `collect`
 
 Auto-paginate through any step that returns `{ items|data: [...], cursor|nextCursor }`.
@@ -819,7 +860,7 @@ htmlBody = "<p>Download: {{ outputs.upload.signedUrl }}</p>"
 textBody = "Download: {{ outputs.upload.signedUrl }}"
 ```
 
-`to` is a single address (string), not an array. Built-in templates: `magic-link`, `otp`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Register a custom type by authoring `email-templates/<type>.toml` and running `primitive config push`. Hourly rate limit: 100 workflow emails per app per hour.
+`to` is a single address (string), not an array. The built-in template types, the variables each exposes, and how to override or revert them are listed in the Configuration guide's Email Templates section. Register a custom type by authoring `email-templates/<type>.toml` and running `primitive config push`. Hourly rate limit: 100 workflow emails per app per hour.
 
 ### `notification.send`
 
@@ -1124,7 +1165,7 @@ Available filters (see `src/workflows/runner/templates.ts` for full list):
 
 Templates have **no arithmetic** (`{{ a + b }}` won't work). Move math into a step or filter chain.
 
-**An unresolved reference fails the step.** A `{{ }}` expression whose path is not in the run context fails the step non-retryably, in both interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`) and single-expression mode (`"{{ steps.x.y }}"` alone). The error names every unresolved expression in the step and the keys that were available; the step is recorded as `failed` with `templateWarnings` naming each path, so it reaches run history and error analytics like any other step failure. Nothing is substituted into the output. A path that *resolves* is never a failure whatever its value: a resolved `null` is typed `null` in single-expression mode and `"null"` in interpolation; a resolved empty string is `""` in both. To mark a reference optional, say so **at the expression** — `{{ steps.x.output.result | default: '' }}` or `{{ input.title || 'Untitled' }}`. `default` (and `now`) rescues a miss from anywhere in the filter chain, not only first position, and a bare `| default` renders `''`. That makes `| default:` required, not optional, for a field built from an optionally-skipped step. There is no workflow-level or step-level setting that changes any of this: `strict` and `strictParams` are accepted and ignored, since the failure they used to opt into is now universal. When a template references a root outside the six valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`, `vars`), the error lists them — catching typos like `{{ inputs.userId }}`. The statically-decidable half of that is caught earlier: `primitive config push` (and the definition-save API) rejects an expression that can never resolve — an unknown root, or a `{{ steps.<id>… }}` / `{{ outputs.<saveAs>… }}` naming something the file does not declare — naming the step, the expression and the valid roots. Contextual roots are scoped: `selected`, `user`, `md` and the built-ins are valid on any step, while `iteration`, `loop` and the loop's binding names (the explicit `as` — one name, or one per array in the `{ zip, as }` form — or `item` when `as` is omitted) are valid only inside a `forEach` step's other fields, never in the `forEach` source, which resolves before any item is bound. An expression carrying `| default` (or `| now`), a fallback chain ending in `''` or `0`, or anything undecidable such as a dynamic bracket key (`{{ steps[input.branch].output }}`) is left alone and stays a run-time concern.
+**An unresolved reference fails the step.** A `{{ }}` expression whose path is not in the run context fails the step non-retryably, in both interpolation mode (`"prefix-{{ steps.x.y }}-suffix"`) and single-expression mode (`"{{ steps.x.y }}"` alone). The error names every unresolved expression in the step and the keys that were available; the step is recorded as `failed` with `templateWarnings` naming each path, so it reaches run history and error analytics like any other step failure. Nothing is substituted into the output. A path that *resolves* is never a failure whatever its value: a resolved `null` is typed `null` in single-expression mode and `"null"` in interpolation; a resolved empty string is `""` in both. To mark a reference optional, say so **at the expression** — `{{ steps.x.output.result | default: '' }}` or `{{ input.title || 'Untitled' }}`. `default` (and `now`) rescues a miss from anywhere in the filter chain, not only first position, and a bare `| default` renders `''`. That makes `| default:` required, not optional, for a field built from an optionally-skipped step — everywhere but the branch a `switch` step TAKES, where a reference into a step the engine recorded as skipped resolves empty on its own, so a `default` branch can name that step with no fallback (see `switch` above; a key a step that RAN never produced still fails there too). There is no workflow-level or step-level setting that changes any of this: `strict` and `strictParams` are accepted and ignored, since the failure they used to opt into is now universal. When a template references a root outside the six valid roots (`input`, `steps`, `outputs`, `meta`, `secrets`, `vars`), the error lists them — catching typos like `{{ inputs.userId }}`. The statically-decidable half of that is caught earlier: `primitive config push` (and the definition-save API) rejects an expression that can never resolve — an unknown root, or a `{{ steps.<id>… }}` / `{{ outputs.<saveAs>… }}` naming something the file does not declare — naming the step, the expression and the valid roots. Contextual roots are scoped: `selected`, `user`, `md` and the built-ins are valid on any step, while `iteration`, `loop` and the loop's binding names (the explicit `as` — one name, or one per array in the `{ zip, as }` form — or `item` when `as` is omitted) are valid only inside a `forEach` step's other fields, never in the `forEach` source, which resolves before any item is bound. An expression carrying `| default` (or `| now`), a fallback chain ending in `''` or `0`, or anything undecidable such as a dynamic bracket key (`{{ steps[input.branch].output }}`) is left alone and stays a run-time concern.
 
 **Bare path fields resolve strictly too.** A `forEach` source, a `selector` path and a `runs` count are bare paths rather than templates, and they have no fallback syntax. The path must resolve: a source that resolves to an empty list (or a paginated object with empty `items`) iterates zero times as always, but one that does not resolve, or that resolves to a non-list, fails the step naming the path or the resolved type — unless the step's own `runIf` is evaluable at step level and false, in which case the step is skipped and the source is never resolved. For a genuinely optional list, make the producing step emit an empty one.
 
@@ -1681,7 +1722,7 @@ Every key carries a tag naming which of those it is: `sha256:<hex>` for a digest
 
 One `custom` behavior changes with this: the key is now `sha256:<hex>` of `<t>.<body>`, so the signed timestamp is part of it. A sender that retries the same logical event by **re-signing it with a fresh `t`** — the only retry `toleranceSeconds` lets through, and the normal one for a Stripe-style scheme — now produces a different key and fires the workflow a second time, where it used to be suppressed by the shared `X-Webhook-Event-Id`. That is deliberate (a header the signature does not cover cannot decide anything), but if your `custom` sender retries that way, make the workflow idempotent or move the event id into the signed body.
 
-`github` is the one built-in scheme whose dedup entries **never expire** (a declarative `custom` configuration with no `freshness` is the other case, for the same reason). GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows run`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
+`github` is the one built-in scheme whose dedup entries **never expire** (a declarative `custom` configuration with no `freshness` is the other case, for the same reason). GitHub signs no timestamp, so a captured delivery stays acceptable forever and no finite `deduplicationWindowMs` bounds it — the receiver ignores the window on that scheme. The consequence to plan for: GitHub's manual **Redeliver** button re-sends a byte-identical body (and reuses the same delivery GUID), so from the second delivery onward it is answered `duplicate` and does not fire the workflow. Re-run the workflow directly (`primitive workflows preview <workflow-id> --input '<json>' --wait`). Rotating the signing secret does **not** clear it: the key is a hash of the body with no key material in it, so GitHub re-signs the identical body and it is still a duplicate. Recreating the webhook is the only thing that starts a fresh dedup history.
 
 On `none` nothing changes: it has no signature to derive anything from, so it still keys off `X-Webhook-Event-Id` and still deduplicates only when `deduplicationEnabled` is `true`. The one exception is shared with every scheme: a delivery whose target workflow does not exist yet records no key at all, so it is not deduplicated — the same reasoning as `workflow_inactive` below, since suppressing it would drop the redelivery you send after creating the workflow. One rejection reason exists for the case that should never happen: a verified delivery on a signed scheme that somehow carries no dedup key is rejected `401` with `rejectionReason: dedup_key_unavailable` rather than dispatched with suppression silently off.
 
@@ -1895,7 +1936,7 @@ run.meta.manual     // true if started via cronTriggers.test()
 
 {{ example: scheduling/cron-lifecycle }}
 
-`.test()`, `.pause()`, `.resume()`, `.delete()`, `.update()`, `.get()` all take the `triggerId` (ULID returned from `.create()`), NOT the `triggerKey`. Use `.list()` to look up `triggerId` by key. The same operations are available on the CLI:
+`.test()`, `.disable()`, `.enable()`, `.delete()`, `.update()`, `.get()` all take the `triggerId` (ULID returned from `.create()`), NOT the `triggerKey`. Use `.list()` to look up `triggerId` by key. The same operations are available on the CLI:
 
 ```bash
 primitive cron-triggers list
@@ -1905,7 +1946,7 @@ primitive cron-triggers disable <trigger-id>
 primitive cron-triggers enable <trigger-id>
 ```
 
-Deleting a trigger from the CLI is deleting `cron-triggers/<key>.toml` and running `primitive config push --prune`. Editing one is editing that file. `pause`/`resume` are operational rather than configuration: they write a runtime field that is deliberately not a TOML key, so a later push cannot resume a trigger you paused, and `config diff` reports it as "operationally disabled; configuration unchanged" rather than as drift.
+Deleting a trigger from the CLI is deleting `cron-triggers/<key>.toml` and running `primitive config push --prune`. Editing one is editing that file. `disable`/`enable` are operational rather than configuration: they write a runtime field that is deliberately not a TOML key, so a later push cannot resume a trigger you paused, and `config diff` reports it as "operationally disabled; configuration unchanged" rather than as drift.
 
 ### Querying cron-triggered runs
 
@@ -2110,11 +2151,14 @@ primitive workflows tests run-all <workflow-id>
 
 # Analytics — under the analytics noun, not this one
 primitive analytics workflows --window-days 7 --limit 10
+primitive analytics workflow-usage --window-days 7 --json
 ```
 
 `run-all` executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
 
 Workflow analytics live under the `analytics` noun, the single home for per-subject analytics (workflows, prompts, integrations). The `workflows analytics` group was removed. Migrate `workflows analytics top --days N --json` to `primitive analytics workflows --window-days N --json`: same endpoint, same payload, but the default window changed from 7 days to 30 — pass `--window-days 7` explicitly to keep the old default. `workflows analytics overview` was **retired without a replacement**, not moved: the `analytics/workflows/overview` endpoint it called was never registered server-side, so it always returned 404. `analytics workflows` is not that view — it ranks individual workflows by runs (with success rate, median, P95 and tokens per row) rather than reporting app-wide workflow totals. See the analytics guide for what the REST API does expose.
+
+`analytics workflow-usage` answers the app-wide question instead of ranking workflows: one row per step kind configured in some workflow's active configuration, with the workflows configuring it and the runs in the window of those workflows, plus the sync-callable, idle and run-scan-truncated workflows and any read that failed. `--window-days` takes 1 to 45 (default 30, the run-retention bound), and a failed read is never counted as zero or idle — the report prints anyway and the command exits non-zero, with `complete: false` in the `--json` document. `--all-apps` is super-admin only and merges the apps the CLI can enumerate, draining the paginated apps list until it converges and merging the union; `complete` covers the reports it read, not the enumeration.
 
 `runs list` includes a `DELAY` column (`queueDelayMs`); `runs status` includes "Execution started" (`executionStartedAt`), "Queue delay" (`queueDelayMs`), and "Create call" (`createCallDurationMs`, the wall-clock time of the run's underlying create call) lines. `executionStartedAt` and `queueDelayMs` are `null` while the run is still queued.
 
@@ -2341,7 +2385,7 @@ Generated factory members:
 - Type mapping mirrors the server's schema validator: scalar `type` → Swift scalar, `enum` → a nested `String`-raw `enum`, `object` + `properties`/`required` → a `struct` (open objects gain an `extra: [String: JSONValue]` catch-all; `additionalProperties: false` omits it), `array` + `items` → `[T]`. A qualifying discriminated-union `oneOf` (see below) → an `enum` with associated values. Anything else the validator ignores (`$ref`, `allOf`, `format`, tuples, an `anyOf` with a non-object member) → `JSONValue`. A schema-less workflow gets `Input`/`Output` of `JSONValue`.
 - After a CLI upgrade, `primitive workflows codegen --lang swift --check` exits non-zero when generated files are out of date — regenerate rather than hand-editing (same CI pattern as `primitive databases codegen --check`).
 
-An app scaffolded from the iOS starter template ships this wiring already: `./run.sh` and `./run-ios.sh` regenerate workflow invokers alongside model types through `scripts/codegen.sh`, and `bash scripts/codegen.sh --check` runs the same staleness gate offline (it reads only the local workflow TOMLs — no network or sign-in), so it fits a pre-commit hook or CI.
+An app scaffolded from the iOS starter template ships this wiring already: every build path regenerates workflow invokers alongside model types and database types through `scripts/codegen.sh` — `./build.sh`, `./run.sh`, `./run-ios.sh`, `./archive.sh`, the fastlane lanes and every Xcode entry point (Run, Profile, Archive, a bare `xcodebuild`). The generated code is committed, so a workflow schema change plus a build is a diff you commit with the change. There is no staleness gate to wire up: no pre-commit hook, no CI step, and nothing that runs only at a release boundary.
 
 ### Discriminated-union (`oneOf`) schema outputs
 
@@ -2596,7 +2640,7 @@ data = { status = "ready_to_review" }
 
 This drifts the moment the workflow ends without your mutate firing — async failure, terminated run, an upstream step that throws between the data write and the status patch. The row sticks on `"processing"` forever and your UI spins indefinitely.
 
-The workflow engine already tracks status (`running` / `apply_pending` / `apply_claimed` / `complete` / `failed` / `terminated`). Use the workflow's own machinery instead of mirroring it:
+The workflow engine already tracks status (`queued` / `running` / `apply_pending` / `apply_claimed` / `completed` / `failed` / `terminated`). Use the workflow's own machinery instead of mirroring it:
 
 - **`meta` (≤1KB)** passed to `workflows.start()` for small client-display fields that need to ride alongside the run (filenames, blob IDs, source labels). Surfaces in `listRuns`, `getStatus`, and `workflowStarted` / `workflowStatus` events.
 - **Run `output`** (via a final `transform` step with `saveAs = "output"`) for parsed results. Read via `getStatus({ workflowKey, runKey })`.

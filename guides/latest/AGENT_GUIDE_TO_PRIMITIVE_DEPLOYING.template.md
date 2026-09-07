@@ -131,7 +131,9 @@ The Team ID is the single setting required for device, TestFlight, and App Store
    bash scripts/regenerate-project.sh
    ```
 
-   That script is the one entry point for regeneration: it emits `Models/Generated/*.swift` from `models.toml` (gitignored build products, so a fresh clone has none — and `xcodegen` can only list files that already exist), runs `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+   That script is the one entry point for regeneration: it runs `scripts/codegen.sh` (models, workflow factories and database types — `xcodegen` can only list files that already exist, so a newly emitted one has to be on disk first), then `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+
+   The generated sources are committed, so a regeneration that changes them is a diff to review and commit — including one produced by a release build. `./archive.sh` has no codegen policy of its own: it regenerates and builds like every other path.
 
 After that, device installs and archives both work.
 
@@ -188,7 +190,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you. Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
+Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` still uses Xcode automatic signing, so it still needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 
@@ -219,4 +221,6 @@ bundle exec fastlane ios release
 ### CI
 
 Both `./run-ios.sh` and `bundle exec fastlane ios beta` run in GitHub Actions on a macOS runner. Base64-encode `api_key.p8` into a secret and decode it before the lane runs.
+
+The API key alone suffices only on a machine that keeps its keychain. On a fresh runner the lane creates a **new** Apple Distribution certificate each run, and Apple caps them per team, so repeatable CI needs the team's existing signing certificate and private key installed on the runner (export the identity to a `.p12`, keep it as a secret, import it into a temporary keychain before the lane) rather than one minted per run.
 {{/lang}}

@@ -73,7 +73,7 @@ Server-side app settings must align with the origin the client app is served fro
 
 | Server field | Contract | Set via |
 |---|---|---|
-| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
+| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
 | `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
@@ -93,6 +93,32 @@ Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allo
 ---
 
 ## OAuth (Google)
+
+### Google Client Configuration
+
+Google registers an OAuth client **per platform**, so `app.toml` states one entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`. Each entry carries its own `clientId` and its own `redirectUris`, and — for the types Google issues one for — its own `clientSecret`:
+
+```toml
+[auth.google.clients.web]
+clientId     = "1234-web.apps.googleusercontent.com"
+clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+redirectUris = ["https://app.example.com/oauth/callback"]
+
+[auth.google.clients.ios]
+clientId     = "1234-ios.apps.googleusercontent.com"
+redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
+```
+
+| client type | `clientSecret` |
+|---|---|
+| `web`, `desktop` | **required** — a whole `{{secrets.KEY}}` reference, never the secret itself |
+| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
+
+A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
+
+The server sends every stored `clientSecret` back verbatim — a whole `{{secrets.KEY}}` reference is a pointer, not a credential, so `apps get`, `config pull` and the API all show it. An app configured before this rule shipped may still hold the secret itself in the entry; Google sign-in on it keeps working (the stored value IS the secret), but the entry cannot be saved back until you store the value as an app secret and re-point `clientSecret` at it. Other app-settings writes are unaffected.
+
+`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a reference naming a secret that doesn't exist, or reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone — but a confidential client whose secret doesn't resolve still fails at Google, as a generic `INVALID_TOKEN`.
 
 ### Start the flow
 
@@ -243,12 +269,12 @@ no endpoint renders any other sign-in template, so that removal holds.
 
 **With nothing configured the iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check what the app configured.
 
-**If the app also has a web client, the link is an https URL, not the custom scheme (#2982).** Set the Primitive environment's `webUrl` to the web app's BARE ORIGIN — https (or `http` on `localhost`/`127.0.0.1`), no credentials, path, query or fragment; anything else is refused by the CLI and read as "no web counterpart" by the resolvers that build the app. Add `"webUrl": "https://app.example.com"` to that environment in `.primitive/config.json` (`primitive env add <name> --api-url … --web-url …` sets it on an environment you are CREATING; `env add` cannot edit an existing one). Then:
+**If the app also has a web client, the link is an https URL, not the custom scheme (#2982).** Set the Primitive environment's `webUrl` to the web app's BARE ORIGIN — https (or `http` on `localhost`/`127.0.0.1`), no credentials, path, query or fragment; anything else is refused by the CLI and read as "no web counterpart" by the resolvers that build the app. Add `"webUrl": "https://app.example.com"` to that environment in `.primitive/config.json` (`primitive env add <name> --api-url … --app-id … --web-url …` sets it on an environment you are CREATING; `env add` cannot edit an existing one). Then:
 
 - the resolve script carries it into `primitive.json`, `PrimitiveAppState.initialize()` sets it as `client.links.appBaseURL`, and `requestEmailSignIn` sends `https://app.example.com/oauth/callback` as the redirect target — no app-code change, and the same value is what an incoming universal link is trusted from;
 - the https target WINS over the custom scheme, including for a manager constructed with an explicit `callbackScheme:`, so an app cannot accidentally send a scheme target that is no longer allow-listed;
 - `sendsEmailSignInLink` still overrides in both directions — set it `false` for code-only even with `webUrl` set;
-- allow-list that https URL in `[auth].emailRedirectUris` exactly like any other target, serve `apple-app-site-association` from the web domain with the component `{ "/": "/oauth/callback", "?": { "magic_token": "*" } }` (query-scoped so the Google OAuth `?code=` redirect on the same path stays a web page), verify the deployed document with `curl`, and only THEN enable the `applinks:<domain>` entitlement — that entitlement is what makes Apple fetch, and its CDN caches what it gets;
+- allow-list that https URL in `[auth].emailRedirectUris` exactly like any other target, then declare the iOS app id on the SAME environment: `"iosAppId": "ABCDE12345.com.example.app"` beside `webUrl` (`primitive env add … --app-id … --ios-app-id` on an environment you are creating). It is Apple's `<Application Identifier Prefix>.<bundle id>` — the prefix is 10 characters and usually the Team ID, but verify it against the signed app's `application-identifier` entitlement, since a legacy app's differs (#3081). The Vue template's `pnpm cf-deploy` generates `apple-app-site-association` from it before each build, with the component `{ "/": "/oauth/callback", "?": { "magic_token": "*" } }` (query-scoped so the Google OAuth `?code=` redirect on the same path stays a web page), so each environment serves its own bundle id and an environment with no `iosAppId` serves no association document at all. Never hand-edit the served document: it is gitignored and regenerated per deploy, and a file the deploy did not write stops the deploy unless an `apple-app-site-association.hand-authored` sentinel claims it — and taking that route means untracking the generated path in `.gitignore` and committing the document AND the sentinel, since a sentinel that reaches a fresh clone alone deploys no association document at all. Verify the deployed document with `curl`, and only THEN enable the `applinks:<domain>` entitlement — that entitlement is what makes Apple fetch, and its CDN caches what it gets;
 - receive the link with `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)` as well as `.onOpenURL` — a universal link is delivered as an `NSUserActivity`, which is the only delivery on macOS. The template does both.
 
 Migrating: keep the `<scheme>://auth/magic-link` entry allow-listed alongside the https one while old builds are still installed, then remove it. Cost of the upgrade: the web domain is compiled into the build, so changing it later means an app release.
@@ -663,7 +689,7 @@ watch(
 ```
 {{/lang}}
 {{#lang swift}}
-The template ([primitive-swift-template](https://github.com/Primitive-Labs/primitive-swift-template)) provides `PrimitiveAppState` + `PrimitiveAuthManager` (`@Published isAuthenticated`/`userId`/`loginState`) and `AuthGateView` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state.
+The template ([primitive-swift-template](https://github.com/Primitive-Labs/primitive-swift-template)) provides `PrimitiveAppState` + `PrimitiveAuthManager` (`@Published isAuthenticated`/`userId`/`loginState`, and `authFailure` — the last failed sign-in with its typed `AuthCode` and message, so branch on `authFailure?.code` rather than on message text) and `AuthGateView` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state.
 
 ### Layout gate (recommended default)
 

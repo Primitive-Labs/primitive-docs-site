@@ -271,21 +271,7 @@ let database = try await client.databases.create(params: CreateDatabaseParams(
 ))
 ```
 
-### Gating a collection's creation on its staged metadata
-
-On the workflow path, an authored `initialMetadata` (or `database.create`'s `metadata`) whose template resolves to `null` fails the step non-retryably instead of creating the resource without it — so a create gated on staged metadata never silently degrades into a misleading 403. An omitted key stays a no-op.
-
-A collection type's `collection.create` rule is evaluated against the `initialMetadata` staged in the same create call — **before** the collection is persisted. The staged values bind to `md.self.<category>.<key>`, so a create rule can gate creation on the exact linkage the create is about to stamp:
-
-```toml
-# the collection type's create rule
-create = "isMemberOf('class-teachers', md.self.classLink.classId)"
-```
-
-- The `md.self.attrs.*` projected columns (`collectionType`, `contextId`, `name`, `createdBy`) are also bound in the create rule; `collectionId` is `null` (unassigned).
-- **Fail-closed:** once a create rule reads `md.self.<category>`, a create omitting that category is denied (the value binds `null`). Create-then-stamp-in-a-second-write stops working for that type — the linkage must be staged in the create call (atomic create-with-linkage).
-- **No traversal from the staged subject.** A create rule may read the staged value directly (`md.self.<category>.<key>`) but may not follow a declared path off it (`md.<pathName>.*`) — such a rule is rejected when the rule set is saved, since the subject does not exist yet to traverse from. (Traversal from a *persisted* subject in a non-create rule is unaffected.)
-- Scope: collections. `database.create` has no caller create rule to gate; `group.create` takes no `initialMetadata`.
+On the workflow path, an authored `initialMetadata` (or `database.create`'s `metadata`) whose template resolves to `null` fails the step non-retryably instead of creating the resource without it — so a create gated on staged metadata never silently degrades into a misleading 403. An omitted key stays a no-op. On a collection specifically, staging `initialMetadata` at create time can also gate the `collection.create` rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide. `database.create` has no caller create rule to gate; `group.create` takes no `initialMetadata`.
 
 ## Metadata lifecycle
 

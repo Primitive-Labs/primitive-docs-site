@@ -117,7 +117,7 @@ maxOutputBytes = 65536
 
 | Limit | Bounds |
 |---|---|
-| `maxOperations` | Total Rhai operations (the real CPU cap — wall time is unreliable in the sandbox) |
+| `maxOperations` | Total Rhai operations (the real CPU cap — wall time is unreliable in the sandbox), default **and maximum** 250,000; a step asking for more is clamped there and fails with `SCRIPT_OPERATION_LIMIT` if it runs past it |
 | `wallMsHint` | Advisory wall-time hint |
 | `maxOutputBytes` | Serialized output size |
 | `maxArrayLength` | Length of any output array |
@@ -145,6 +145,7 @@ Deterministic failures (the script will fail the same way every time) come back 
 | `SCRIPT_MEMORY_LIMIT` | Exceeded the memory ceiling | No |
 | `SCRIPT_VALIDATION_ERROR` | Response failed the host-side validation guard | No |
 | `SCRIPT_TIMEOUT` | The runtime call ran long enough to look hung | Yes |
+| `SCRIPT_INPUT_NOT_DELIVERED` | The runtime received an empty input while the step sent a populated one — the script did not run against its input, so its output is not reported as a result | No |
 | `SCRIPT_RUNTIME_UNAVAILABLE` | The script runtime was unreachable | Yes |
 
 ## Telemetry

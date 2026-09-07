@@ -261,7 +261,7 @@ let payload = try await blobs.read(blobId: blobId, as: MyCodable.self)
 
 | Operation                              | Required document permission     |
 |----------------------------------------|----------------------------------|
-| Upload, Delete                         | `read-write`, `admin`, or `owner` |
+| Upload, Delete                         | `read-write` or `owner`           |
 | List, Get metadata, Download, Read     | `reader` or higher                |
 
 ---

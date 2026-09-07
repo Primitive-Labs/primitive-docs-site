@@ -115,7 +115,7 @@ subscriptionKey = "my-open-tickets"
 displayName = "My open tickets"
 modelName = "ticket"
 accessRule = "user.userId != ''"
-filter = "record.assigneeId == user.userId && record.status == 'open'"
+filter = "record.data.assigneeId == user.userId && record.data.status == 'open'"
 select = ["id", "title", "priority", "updatedAt"]  # optional projection
 ```
 

@@ -253,7 +253,7 @@ if (blobs.hasServiceWorkerControl()) {
 
 | Operation                              | Required document permission     |
 |----------------------------------------|----------------------------------|
-| Upload, Delete                         | `read-write`, `admin`, or `owner` |
+| Upload, Delete                         | `read-write` or `owner`           |
 | List, Get metadata, Download, Read     | `reader` or higher                |
 
 ---

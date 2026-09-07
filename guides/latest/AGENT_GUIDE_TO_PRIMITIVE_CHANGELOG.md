@@ -6,8 +6,30 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ## Unreleased
 
+### New
+
+- **Server functions.** TypeScript you author in your config tree and push to the platform: a `functions/<key>.toml` file states the access gate and the entry point, `primitive config push` builds and ships the bundle, and `POST /app/{appId}/api/functions/{key}` runs it synchronously as the signed-in caller (or as the system, per `runAs`). A function may declare its own inbound webhook and cron schedules in the same file, calls the platform through the `primitive-functions` client, and is operated with `primitive functions` (`list`, `get`, `enable`, `disable`, `archive`). Versions are immutable; a run pins the code it started on. See the Server Functions guide.
+- **Workflow usage report.** `GET /admin/api/apps/{appId}/workflows/usage` reports which step kinds an app's workflows configure and how often each ran, with partial-failure and truncation reporting; the CLI reads it as `primitive analytics workflow-usage`. The workflow key `usage` is reserved so a workflow can never collide with the route.
+- **Swift template:** the iOS App Store build lanes sign entirely from the App Store Connect API key in `fastlane/.env` — they fetch or create the distribution certificate and provisioning profile themselves — so a CI runner needs no pre-installed signing identity.
+- **Large documents.** A document created with `documentFormat: 2` (CLI: `primitive documents create --large`) holds up to 2 GB of records without loading the whole document into memory on the server or in the Node.js client, and export and import carry the entire document. The app setting `largeDocumentWindowDays` (1–14, default 7) bounds how long a client may keep writing offline before it becomes read-only until it syncs.
+- **Passkey user-verification policy.** The app setting `passkeyUserVerification` (`preferred` or `required`) names one policy that both passkey ceremonies enforce; an assertion that fails it reports the typed `PASSKEY_USER_VERIFICATION_FAILED` code in the JavaScript and Swift clients.
+- **Swift app layer:** `PrimitiveAuthManager.authFailure` carries the last failed sign-in with its typed `AuthCode` and message, so an app can branch on the code instead of matching message text.
+- **CLI and Vue template:** environments accept an `iosAppId` beside `webUrl` (`primitive env add --ios-app-id`), and `pnpm cf-deploy` generates `public/.well-known/apple-app-site-association` for the environment it is deploying. An app with several environments no longer has to hand-edit one static file between deploys, and an environment with no iOS client serves no association document instead of one naming another environment's app.
+
+### Changed
+
+- **One key namespace per app.** Workflows, server functions, scripts and webhooks now share one key namespace, enforced at `config push`: a webhook can no longer reuse a workflow's key, and a push that would collide names the holder instead of creating a duplicate. Existing workflow/script collisions are grandfathered; cron triggers are unaffected.
+- **JavaScript client (js-bao 0.6.0):** each call to `initJsBao` now creates its own ORM instance with its own engine, models, subscriptions and document bindings, and `resetJsBao` destroys every live instance. A model class passed to a second live instance stays bound to its first one and logs a warning; give each client its own model classes (the `schemaToml` path already does) when they must be isolated. Previously a second call silently shared the first instance's engine.
+
 ### Fixed
 
+- **CLI:** `documents export` and `export-all` now write a document's tags, and `documents import` restores them unchanged; import also refuses to create a new document from a root document and drops the internal root marker, and `import --dry-run` previews the exact run it would make.
+- **Swift client:** a single-document `syncMetadata` is now authoritative for that document's row, so a revoked or deleted document is evicted from the local cache instead of lingering until a full sync.
+- **Swift app layer:** `PrimitiveAuthManager` forwards the passkey relying party (`rpId`) on `signInWithPasskey` and `enrollPasskey`, and `initialize()` derives the default from the environment's `webUrl`, so an app with several relying parties can name the right one per call.
+- **JavaScript client:** an awaited `documents.open()` now resolves only once the document is ready to query, even when another open of the same document is already in flight; adding a model mapping and querying right after the open no longer fails intermittently with "document is not connected".
+- Passkey sign-in from a native iOS app no longer fails with "User verification required" when the app asked only for preferred verification.
+- **Swift client:** a rejected Apple sign-in callback reports the server's error code and message instead of a generic "Invalid credentials", and no longer triggers a token refresh.
+- **Swift app layer:** the login view shows the waitlist state for a waitlisted sign-in, and "Invalid code" appears only when the server rejected the code.
 - **Swift template:** the default app icon is opaque and the Info.plist declares supported orientations, so a first App Store upload passes validation instead of being rejected twice.
 - **Swift template:** the first archive no longer fails the models guard — model codegen runs before xcodegen regenerates the project.
 

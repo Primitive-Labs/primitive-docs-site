@@ -33,7 +33,7 @@ A prompt stored before this model may still carry `draft`, which reads `inactive
 
 **Retiring a prompt.** A plain admin `DELETE` (and the console's **Archive**) sets `status = "archived"` and destroys nothing: the prompt's configs and stored prompt bodies stay, so every execution and analytics row that names it keeps resolving. An archived prompt is refused everywhere — the member endpoint, the workflow `prompt.execute` step, `primitive prompts execute`, test runs, and as another test case's **evaluator** — and `enable` will not bring it back. It goes on holding its `promptKey`. `DELETE ?hard=true` (the console's **Delete permanently**, and what `primitive config push --prune` sends) destroys the prompt, its configs and their R2 bodies, and frees the key. To bring a key back after archiving: hard-delete the holder, then re-add the file and push — a bare re-push cannot clear a server-owned `archived`.
 
-The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` retires that named version, and the resolve path refuses it.
+The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` retires that named version, and the resolve path refuses it. `config pull` writes the line only for a config that IS retired, so an ordinary pulled prompt file carries no `status` at all — an omitted line means active, and deleting an `archived` line puts that config back in service on the next push.
 
 > If you see `HTTP 404` calling a prompt via the SDK: the prompt key is wrong (no prompt with that key in the app). An inactive prompt is a `400`, not a `404`. If the prompt has no `activeConfigId` and you didn't pass `configId`, you'll also get a 400 ("No configuration found for this prompt").
 
@@ -320,7 +320,7 @@ The evaluator output is parsed for `{ passed, reasoning, checks: [{name, passed,
 
 ## CLI Reference
 
-Set the active app once: `primitive use <app-id>`. All commands accept `--app <app-id>` or a positional `[app-id]` to override.
+The app is the one the project's selected environment names in `.primitive/config.json` (`primitive whoami` reports it). All commands accept `--app <app-id>` or a positional `[app-id]` to override.
 
 Use `--json` for machine-readable output.
 
@@ -702,7 +702,7 @@ await client.prompts.execute("p", { variables: { name: "Alice" } });
 ## Tips for Coding Agents
 
 1. Use `--json` whenever piping output to other tools.
-2. `primitive use <app-id>` once per session beats `--app` everywhere.
+2. Run inside the project so the environment names the app, rather than passing `--app` everywhere.
 3. Prefer TOML + `config push` over CLI flags for anything with multiple configs or test cases.
 4. Always `preview` before `execute` when debugging templates — much faster.
 5. Missing variables silently render as empty. Use `||` fallbacks or `| expect: "..."` to fail loudly. (Note: `inputSchema` is metadata only — it is NOT validated against `variables` at execute time.)
