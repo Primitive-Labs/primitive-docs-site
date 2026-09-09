@@ -731,7 +731,7 @@ type = "string"
 | `type` | yes | One of `"string"`, `"number"`, `"boolean"`, `"integer"`, `"object"`, `"array"`, or the name of a model declared in the type's `schema` |
 | `required` | no | Default `false`. If `true`, request fails 400 when missing |
 | `access` | no | CEL expression evaluated against the caller's value (bound as `value`); false → 403 |
-| `coerce` | no | Default `true`. If `false`, type-mismatched inputs are rejected instead of being coerced. Only valid on a scalar param — setting it on a model-typed param is rejected at registration |
+| `coerce` | no | Default `true`. If `false`, type-mismatched inputs are rejected instead of being coerced. On a model-typed param it governs the coercion of the object's field values |
 | `enum` | no | Allowed values. Valid on a `"string"` param, or on an `"array"` param with `items = "string"` (checked per element) |
 | `items` | no | Element type for `type = "array"`: `"string"`, `"number"`, `"boolean"`, or `"integer"`. Required when `type = "array"`, rejected on any other type |
 
@@ -739,7 +739,7 @@ By default, scalar mismatches are coerced where safe (`"42"` → `42` for type `
 
 **Array params.** A `type = "array"` param (typically feeding `$in`/`$nin` in a filter — `filter = { symbol = { "$in" = "$params.symbols" } }`) rejects non-array values with 400 (`Parameter "<name>" must be an array`) and validates each element against `items`, honoring `coerce` and reporting mismatches with the element index (`element 2 must be of type string`); `enum` membership is checked per element.
 
-**Model-typed params.** A param's `type` can name a model declared in the type's `schema`, and the param arrives as an object validated field-by-field against that model — an unknown field is rejected (`UNKNOWN_FIELD`), a wrong field type is rejected (`FIELD_TYPE_MISMATCH`), and on a `save` op every required field must be present (`MISSING_REQUIRED_FIELD`; a `patch` validates only the fields present). The model must exist in the type's `schema` or registration is rejected (`PARAM_TYPE_SCHEMA_REQUIRED` / `PARAM_TYPE_UNKNOWN_MODEL`). A save/patch op writes the whole object with `"data": "$params.row"`, or merges its fields with the `$spread` directive:
+**Model-typed params.** A param's `type` can name a model declared in the type's `schema`, and the param arrives as an object validated field-by-field against that model — an unknown field is rejected (`UNKNOWN_FIELD`), a wrong field type is rejected (`FIELD_TYPE_MISMATCH`) after the same safe-only scalar coercion a declared scalar param gets (a numeric string into a `number` field, `"true"`/`"false"` into a `boolean` field, a number into a `string` field — so a `{{ }}`-rendered value needs no `| number` filter; `coerce = false` on the param opts the whole object out), and on a `save` op every required field must be present (`MISSING_REQUIRED_FIELD`; a `patch` validates only the fields present). The model must exist in the type's `schema` or registration is rejected (`PARAM_TYPE_SCHEMA_REQUIRED` / `PARAM_TYPE_UNKNOWN_MODEL`). A save/patch op writes the whole object with `"data": "$params.row"`, or merges its fields with the `$spread` directive:
 
 ```toml
 [[operations]]
@@ -1374,6 +1374,12 @@ The handle queries with the full filter operator grammar, sort + cursor paginati
 | `$inGroup` | Matches any current member of a group — expanded server-side into `$in` | `{ assigneeId: { $inGroup: { type: "team", id: "$params.teamId" } } }` |
 
 `$startsWith`, `$endsWith`, and `$containsText` are mutually exclusive on the same field — only one substring operator per field per query.
+
+**Absent fields.** `$ne`, `$nin` and `{ field: null }` **match records where the field is absent** — a record that never wrote the field is not equal to any value, as in MongoDB — so `{ deleted: { $ne: true } }` is the "false or not set" filter a soft-delete list needs, with no backfill onto existing records. Equality with a value, the comparison operators (`$gt` / `$gte` / `$lt` / `$lte`) and `$in` **match only records that carry the field**. A field declared with `default = false` is applied on read; it does not materialise in storage, so it does not change what a filter matches.
+
+Test presence with `$exists`. Its treatment of an *explicitly stored* null is path-dependent: the server counts a **stored JSON null** as present (`$exists: true` matches it), while the browser and Swift replicas keep each field in a typed column where a stored null is indistinguishable from an absent field (`$exists: false` matches it). Absent fields behave the same on every path; only explicit nulls differ. `$in` with a `null` entry matches nothing for that entry — use `{ field: null }` or `$exists: false` instead.
+
+**Breaking change (#3166).** `$ne` and `$nin` used to exclude records lacking the field. Any filter that uses a negative operator to *exclude* records by a possibly-absent field now matches those records too — including access filters injected by `beforeQuery` hooks and write conditions on `save`. To keep the old result set, exclude the missing case with a `null` entry in `$nin`: `{ deleted: { $nin: [null, true] } }` matches only records carrying a non-null `deleted` other than `true`, identically on every path. `$exists: true` alongside the negative operator is **not** equivalent — `{ deleted: { $ne: true, $exists: true } }` still matches a record whose `deleted` is an explicitly stored JSON null on the server, which the old filter excluded.
 
 Multiple filters on different fields are implicitly combined with AND. Use an explicit `$and` only when you need two conditions on the *same* field (e.g. a range), and combine `$or` with other top-level fields freely.
 

@@ -26,6 +26,20 @@ server-side handler time. The header is listed in `Access-Control-Expose-Headers
 so any HTTP tooling — or the response object of a raw fetch — can read it when
 attributing a slow request to server work vs. transport.
 
+## Response Caching
+
+Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
+handler sets a directive of its own, so no HTTP cache keeps a copy of an
+authenticated response. One endpoint opts out deliberately:
+`GET /avatars/:userId` serves world-readable bytes with
+`public, max-age=31536000, immutable`.
+
+Blob downloads still send an `ETag` and still answer a conditional
+`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
+the body, not an app from revalidating. What it removes is a cache's ability to
+reuse a stored blob body after that 304.
+
+
 The tools are a single browser overlay (the **DevTools** overlay) provided by the
 `primitiveDevTools` Vite plugin, opened from a floating button in the running app.
 It is active only when:

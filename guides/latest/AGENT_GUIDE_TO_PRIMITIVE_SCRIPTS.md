@@ -4,6 +4,8 @@ A **script** is a sandboxed [Rhai](https://rhai.rs/) program that transforms JSO
 
 The sandbox is **side-effect-free** — no network, no storage — and deterministic with one deliberate exception: the `ulid()` builtin (see below) reads the clock and randomness to mint ids. A script that never calls `ulid()` always produces the same output for the same input, so it is safe to retry and reproducible to test; a script that calls it is intentionally non-reproducible in exactly those id values.
 
+> A script's transform can also be written as an ordinary [server function](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md) — TypeScript that takes the same JSON and returns JSON, with no grants.
+
 ## The Script model
 
 A script converges on the same shape as managed prompts:

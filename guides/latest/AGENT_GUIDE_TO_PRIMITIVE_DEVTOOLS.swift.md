@@ -26,6 +26,30 @@ server-side handler time. The header is listed in `Access-Control-Expose-Headers
 so any HTTP tooling — or the response object of a raw fetch — can read it when
 attributing a slow request to server work vs. transport.
 
+## Response Caching
+
+Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
+handler sets a directive of its own, so no HTTP cache keeps a copy of an
+authenticated response. One endpoint opts out deliberately:
+`GET /avatars/:userId` serves world-readable bytes with
+`public, max-age=31536000, immutable`.
+
+Blob downloads still send an `ETag` and still answer a conditional
+`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
+the body, not an app from revalidating. What it removes is a cache's ability to
+reuse a stored blob body after that 304.
+
+The client enforces the same rule locally, so it holds against a server too old
+to send the header: every `URLSession` it builds sets `urlCache = nil` and
+`requestCachePolicy = .reloadIgnoringLocalCacheData`, and every request it
+builds carries that policy. `URLCache` keys entries by URL alone — it ignores
+`Authorization` — and `URLCache.shared` is disk-backed on iOS, so an
+authenticated response stored there would be readable by a request carrying a
+different token or none. Nothing the client fetches enters it, on any path
+(REST calls, blob bytes, the OAuth code exchange, token refresh). Cookie
+handling is unchanged: the sessions are built from
+`URLSessionConfiguration.default` and keep using `HTTPCookieStorage.shared`.
+
 
 The tools are the **Debug Inspector**: a dev-only panel served by the running app
 and opened in a web browser. The inspector compiles to zero code in release builds

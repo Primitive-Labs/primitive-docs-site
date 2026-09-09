@@ -15,10 +15,10 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-09-06",
+    "stampedAt": "2026-09-09",
     "channel": "alpha",
     "packages": {
-      "js-bao-wss-client": "2.1.1",
+      "js-bao-wss-client": "3.0.0",
       "js-bao": "0.6.0",
       "primitive-admin": "1.0.62",
       "primitive-app": "3.1.0"
@@ -667,7 +667,118 @@
       ],
       "relatedGuides": [
         "workflows",
+        "configuration",
+        "server-functions"
+      ]
+    },
+    {
+      "topic": "server-functions",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.ts.md",
+      "description": "Server functions — TypeScript pushed as config: grants, ctx SDK, durable runs, triggers, ceilings",
+      "keywords": [
+        "server functions",
+        "functions",
+        "primitive-functions",
+        "defineFunction",
+        "defineQuery",
+        "defineMutation",
+        "capabilities",
+        "grants",
+        "unscopedReads",
+        "durable",
+        "step.do",
+        "step.sleep",
+        "triggers",
+        "webhook",
+        "cron",
+        "ctx.api",
+        "ctx.db",
+        "integrations.call",
+        "prompts.run",
+        "secret",
+        "configVar",
+        "users.send",
+        "email.send",
+        "pMap",
+        "ulid",
+        "stepPolicy",
+        "functions/*.toml",
+        "functions.invoke",
+        "functions.start"
+      ],
+      "useCases": [
+        "Writing custom server-side TypeScript that runs under the caller's authority",
+        "Reading and writing database records from a function under declared grants",
+        "Calling an external API through a granted integration without exposing its credential",
+        "Running a saved prompt from a function",
+        "Sending realtime messages or email from a function",
+        "Running long-lived work with a durable function (step.do, step.sleep)",
+        "Firing a function from a webhook or a cron schedule",
+        "Invoking a function from the client and handling its envelope",
+        "Operating functions: enable, disable, archive, runs, codegen"
+      ],
+      "concepts": [
+        "server function",
+        "functions/<key>.toml",
+        "entry",
+        "access gate",
+        "runAs",
+        "capabilities",
+        "database grant",
+        "unscopedReads",
+        "$caller",
+        "ctx.api",
+        "ctx.db",
+        "typed handle",
+        "runOperation",
+        "defineQuery",
+        "defineMutation",
+        "query cache",
+        "ctx.integrations.call",
+        "ctx.prompts.run",
+        "ctx.secret",
+        "ctx.configVar",
+        "ctx.users.send",
+        "direct.message",
+        "email:send",
+        "analytics:writeForUser",
+        "pMap",
+        "ulid",
+        "stepPolicy",
+        "durable",
+        "step.do",
+        "step.sleep",
+        "runKey",
+        "step discipline",
+        "webhook trigger",
+        "cron trigger",
+        "ctx.trigger",
+        "ceilings",
+        "FUNCTION_THREW",
+        "OUTPUT_TOO_LARGE"
+      ],
+      "prerequisites": [
         "configuration"
+      ],
+      "relatedGuides": [
+        "configuration",
+        "workflows",
+        "databases",
+        "integrations",
+        "prompts",
+        "app-secrets",
+        "analytics",
+        "access-control"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.swift.md"
+        }
       ]
     },
     {

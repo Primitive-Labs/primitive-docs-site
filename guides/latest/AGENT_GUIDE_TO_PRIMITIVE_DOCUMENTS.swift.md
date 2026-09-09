@@ -95,7 +95,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
   }
 ```
 
-**b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows + pending `DocumentInvitation`s; group/collection shares do NOT appear here):
+**b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows; group/collection shares do NOT appear here):
 
 ```swift
   let page = try await client.me.sharedDocuments(limit: 50, tag: "channel")
@@ -226,6 +226,20 @@ The generated model statics route through the process-wide default client — ca
     ],
   ])
 ```
+
+### Absent fields
+
+`$ne`, `$nin` and a `null` equality **match records where the field is absent** — a record that never wrote the field is not equal to any value, as in MongoDB — so a `$ne: true` filter on `deleted` is the "false or not set" filter a soft-delete list needs, with no backfill onto existing records. Equality with a value, the comparison operators (`$gt` / `$gte` / `$lt` / `$lte`) and `$in` **match only records that carry the field**. A schema `default` is applied on read and does not materialise the field in storage, so it does not change what a filter matches.
+
+Test presence with `$exists`. Its treatment of an *explicitly stored* null is path-dependent: the server counts a **stored JSON null** as present (`$exists: true` matches it), while the browser and Swift replicas keep each field in a typed column where a stored null is indistinguishable from an absent field (`$exists: false` matches it). Absent fields behave the same on every path; only explicit nulls differ. `$in` with a `null` entry matches nothing for that entry — use a `null` equality or `$exists: false` instead.
+
+**Breaking change (#3166).** `$ne` and `$nin` used to exclude records lacking the field. Any filter that uses a negative operator to *exclude* records by a possibly-absent field now matches those records too — including access filters injected by `beforeQuery` hooks and write conditions. To keep the old result set, exclude the missing case with a `null` entry in `$nin` — it matches only records carrying a non-null value other than the excluded one, identically on every path:
+
+```swift
+["deleted": ["$nin": [nil, true]]]
+```
+
+`$exists: true` alongside the negative operator is **not** equivalent: on the server an explicitly stored JSON null counts as present, so a `$ne: true, $exists: true` filter still matches a record whose `deleted` is null — a record the old filter excluded.
 
 ### Sort + cursor pagination
 
@@ -405,7 +419,10 @@ List with `me.ownedDocuments()` and `open()` the selected document; create a new
   )
   // The generated id lives inside the returned metadata.
   let documentId = result.metadata?["documentId"]?.stringValue
-  // The new document is already open — query or save into it right away.
+  if let documentId {
+    // Open before querying or writing — a write to an unopened document throws.
+    _ = try await client.documents.open(documentId)
+  }
 ```
 
 ### Pattern 3: Multiple Documents
@@ -471,7 +488,7 @@ final class MyAppState: PrimitiveAppState {
 
 For per-document setup beyond models, override the `onDocumentOpened(doc:documentId:)` hook — the base class opens the doc once and hands you the live `YDocument`, so don't call `openDocument(...)` again just to get one.
 
-For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. The new document is already open and writable, so write through it directly rather than reopening. If you do reopen with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake. The wait is bounded by `availabilityWait` (a `TimeInterval` in seconds, default `30`) — if the budget runs out first, `openDocument` throws `JsBaoError(.networkTimeout)` rather than returning a possibly-empty document.
+For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. `createDocument` is metadata-only: the new document is **not** open, so open it before you query or write it — a write to an unopened document throws `JsBaoError(.notFound)` ("Document `<id>` is not open"), matching the JavaScript client. A default-options open of a just-created document resolves locally (a pending create, like a `localOnly` document, counts as a local copy), so it does not wait on the network. If you open with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake. The wait is bounded by `availabilityWait` (a `TimeInterval` in seconds, default `30`) — if the budget runs out first, `openDocument` throws `JsBaoError(.networkTimeout)` rather than returning a possibly-empty document.
 
 **Multi-doc apps (one ambient library doc + N per-item docs).** `selectDocumentAwaiting(_:)` is the *single*-selected-doc lifecycle — it closes the previously selected doc first, so using it for a per-item detail view closes your library/index doc. For one ambient doc plus transient detail docs, use `appState.openAuxiliaryDoc(_:)` from the detail view's `.task` and `appState.closeAuxiliaryDoc(_:)` from `.onDisappear`. These register the doc for sync, but they don't touch `selectedDocId` or fire `onDocumentOpened`. Once open, read the doc's records through the facade scoped to that document — the same scoped query as [Open Documents Before Querying](#1-open-documents-before-querying). The view is framework glue around `openAuxiliaryDoc` + that scoped query:
 
@@ -1443,8 +1460,8 @@ Pick the call that answers the question you're actually asking:
 | Question | Call |
 |----------|------|
 | Documents the user owns | `client.me.ownedDocuments(cursor:limit:tag:)` → `[DocumentInfo]` (or `ownedDocumentsPage(cursor:limit:tag:)` → `DocumentListPage` for the `{ items, cursor }` envelope) |
-| Documents directly shared with the user (`DocumentPermission` + pending `DocumentInvitation`) | `client.me.sharedDocuments(cursor:limit:tag:)` → `SharedDocumentListResult` (`{ items, cursor }`) |
-| Pending document invitations the user can accept | `client.me.pendingDocumentInvitations()` → `[PendingDocumentInvitation]` |
+| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments(cursor:limit:tag:)` → `SharedDocumentListResult` (`{ items, cursor }`) |
+| A document's outstanding deferred grants | `client.documents.listPendingInvitations(documentId:)` |
 | Documents inside a collection | `client.collections.listDocuments(collectionId:options:)` → `PaginatedResult<CollectionDocumentInfo>` |
 | Documents shared with a group | `client.groups.listDocuments(groupType:groupId:)` → `[GroupDocumentInfo]` |
 | Collections the user is a direct member of | `client.collections.list(options:)` → `PaginatedResult<CollectionInfo>` |
@@ -1461,7 +1478,7 @@ The permission / collection reads — `documents.getPermissions(_:)`, `collectio
 - Calling a method that doesn't exist: `setPermissions`, `setGroupPermission`. The correct names are `updatePermissions(documentId:params:)` and `grantGroupPermission(documentId:params:)`; resolve a user by email with `client.users.lookup(email:)`.
 - Passing `permission: null` to remove a grant — there is no null form. Use `removePermission`.
 - Lowering a user's direct permission while they still have a higher one via group — the group wins (effective = MAX).
-- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct `DocumentPermission` rows and pending `DocumentInvitation`s. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
+- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct `DocumentPermission` rows. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
 - Showing a "request access" button without checking the caught error's `canRequestAccess` detail.
 - Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share and group add linked to that invitation.
 - Polling `client.invitations.list` / `listDeferredGrants` to populate "Members + Pending" rows — those are app-level / admin surfaces; per-resource `listPendingInvitations` is the product UI source.

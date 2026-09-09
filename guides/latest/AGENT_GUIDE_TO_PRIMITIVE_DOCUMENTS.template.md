@@ -122,7 +122,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
 
 {{ example: documents/list-owned }}
 
-**b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows + pending `DocumentInvitation`s; group/collection shares do NOT appear here):
+**b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows; group/collection shares do NOT appear here):
 
 {{ example: documents/list-shared }}
 
@@ -158,8 +158,8 @@ const collections = await jsBaoClient.collections.list();
 
 #### Do not use
 
-- **`client.documents.list()`** — returns the union of owner + reader + read-write rows and logs a console warning on every call. Use `me.ownedDocuments` and `me.sharedDocuments`; they have the same option set (`tag`, `limit`, `cursor`, `returnPage`).
-- **`client.documents.createInvitation(...)`, `documents.acceptInvitation(...)`, `documents.declineInvitation(...)`** — the per-document `DocumentInvitation` flow. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `client.me.pendingDocumentInvitations()` is the current "invitations I can accept" lookup.
+- **`client.documents.list()`** — removed. It returned the union of owner + reader + read-write rows. Use `me.ownedDocuments` and `me.sharedDocuments`; `ownedDocuments` takes the same option set (`tag`, `limit`, `cursor`, `returnPage`).
+- **`client.documents.createInvitation(...)`, `documents.acceptInvitation(...)`, `documents.declineInvitation(...)`, `client.me.pendingDocumentInvitations()`** — removed with the per-document invitation model. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `documents.listPendingInvitations(documentId)` lists a document's outstanding deferred grants.
 - **`client.me.bookmarks.*`** — render "my documents" from `me.ownedDocuments()` + `me.sharedDocuments()` (and `collections.list()` / `groups.listUserMemberships(...)` if you also want group/collection access).
 
 #### `syncMetadata()` reference
@@ -262,6 +262,27 @@ The generated model statics route through the process-wide default client — ca
 ### Logical query operators
 
 {{ example: documents/query-logical }}
+
+### Absent fields
+
+`$ne`, `$nin` and a `null` equality **match records where the field is absent** — a record that never wrote the field is not equal to any value, as in MongoDB — so a `$ne: true` filter on `deleted` is the "false or not set" filter a soft-delete list needs, with no backfill onto existing records. Equality with a value, the comparison operators (`$gt` / `$gte` / `$lt` / `$lte`) and `$in` **match only records that carry the field**. A schema `default` is applied on read and does not materialise the field in storage, so it does not change what a filter matches.
+
+Test presence with `$exists`. Its treatment of an *explicitly stored* null is path-dependent: the server counts a **stored JSON null** as present (`$exists: true` matches it), while the browser and Swift replicas keep each field in a typed column where a stored null is indistinguishable from an absent field (`$exists: false` matches it). Absent fields behave the same on every path; only explicit nulls differ. `$in` with a `null` entry matches nothing for that entry — use a `null` equality or `$exists: false` instead.
+
+**Breaking change (#3166).** `$ne` and `$nin` used to exclude records lacking the field. Any filter that uses a negative operator to *exclude* records by a possibly-absent field now matches those records too — including access filters injected by `beforeQuery` hooks and write conditions. To keep the old result set, exclude the missing case with a `null` entry in `$nin` — it matches only records carrying a non-null value other than the excluded one, identically on every path:
+
+{{#lang ts}}
+```typescript
+{ deleted: { $nin: [null, true] } }
+```
+{{/lang}}
+{{#lang swift}}
+```swift
+["deleted": ["$nin": [nil, true]]]
+```
+{{/lang}}
+
+`$exists: true` alongside the negative operator is **not** equivalent: on the server an explicitly stored JSON null counts as present, so a `$ne: true, $exists: true` filter still matches a record whose `deleted` is null — a record the old filter excluded.
 
 ### Sort + cursor pagination
 
@@ -425,7 +446,7 @@ The neutral lifecycle is: resolve-or-create the doc (`client.documents.getOrCrea
 
 For per-document setup beyond models, override the `onDocumentOpened(doc:documentId:)` hook — the base class opens the doc once and hands you the live `YDocument`, so don't call `openDocument(...)` again just to get one.
 
-For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. The new document is already open and writable, so write through it directly rather than reopening. If you do reopen with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake. The wait is bounded by `availabilityWait` (a `TimeInterval` in seconds, default `30`) — if the budget runs out first, `openDocument` throws `JsBaoError(.networkTimeout)` rather than returning a possibly-empty document.
+For a **fresh doc you'll write immediately**, use `client.createDocument(options:)` — it returns a `CreateDocumentResult` with `metadata: JSONValue?`; extract `metadata?["documentId"]?.stringValue` to get the new document's id. `createDocument` is metadata-only: the new document is **not** open, so open it before you query or write it — a write to an unopened document throws `JsBaoError(.notFound)` ("Document `<id>` is not open"), matching the JavaScript client. A default-options open of a just-created document resolves locally (a pending create, like a `localOnly` document, counts as a local copy), so it does not wait on the network. If you open with `waitForLoad: .network`, Swift retries sync availability until the background create commit lands; healthy cases resolve after the handshake. The wait is bounded by `availabilityWait` (a `TimeInterval` in seconds, default `30`) — if the budget runs out first, `openDocument` throws `JsBaoError(.networkTimeout)` rather than returning a possibly-empty document.
 
 **Multi-doc apps (one ambient library doc + N per-item docs).** `selectDocumentAwaiting(_:)` is the *single*-selected-doc lifecycle — it closes the previously selected doc first, so using it for a per-item detail view closes your library/index doc. For one ambient doc plus transient detail docs, use `appState.openAuxiliaryDoc(_:)` from the detail view's `.task` and `appState.closeAuxiliaryDoc(_:)` from `.onDisappear`. These register the doc for sync, but they don't touch `selectedDocId` or fire `onDocumentOpened`. Once open, read the doc's records through the facade scoped to that document — the same scoped query as [Open Documents Before Querying](#1-open-documents-before-querying). The view is framework glue around `openAuxiliaryDoc` + that scoped query:
 
@@ -812,6 +833,8 @@ items.map(...);  // TypeError: items.map is not a function
 | `$contains`     | StringSet contains value       | `{ tags: { $contains: "tutorial" } }`                |
 | `$all`          | StringSet contains all values  | `{ tags: { $all: ["work", "urgent"] } }`             |
 | `$size`         | StringSet size comparison      | `{ tags: { $size: { $gte: 2 } } }`                   |
+
+Which of these match a record that never wrote the field — and which do not — is in [Absent fields](#absent-fields) above; `$ne`/`$nin` changed there in #3166.
 
 **Logical operators** — see [Logical query operators](#logical-query-operators) above for the compiled `$or` example. Plain field maps AND together:
 
@@ -1398,7 +1421,7 @@ await client.documents.setGroupPermission(...);  // use grantGroupPermission
 await client.documents.requestAccess(id, { message: "..." }); // missing required `permission`
 ```
 
-Render the user's documents from two calls: `client.me.ownedDocuments()` for documents they own, and `client.me.sharedDocuments()` for documents shared directly with them (non-owner `DocumentPermission` plus pending `DocumentInvitation`s). Group- and collection-shared documents are listed through `groups.listDocuments` / `collections.listDocuments`.
+Render the user's documents from two calls: `client.me.ownedDocuments()` for documents they own, and `client.me.sharedDocuments()` for documents shared directly with them (non-owner `DocumentPermission` rows). Group- and collection-shared documents are listed through `groups.listDocuments` / `collections.listDocuments`.
 {{/lang}}
 
 {{#lang ts}}
@@ -2088,8 +2111,8 @@ Pick the call that answers the question you're actually asking:
 | Question | Call |
 |----------|------|
 | Documents the user owns | `client.me.ownedDocuments({ tag?, limit?, cursor?, returnPage? })` |
-| Documents directly shared with the user (`DocumentPermission` + pending `DocumentInvitation`) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, cursor }` |
-| Pending document invitations the user can accept | `client.me.pendingDocumentInvitations()` |
+| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, cursor }` |
+| A document's outstanding deferred grants | `client.documents.listPendingInvitations(documentId)` |
 | Documents inside a collection | `client.collections.listDocuments(collectionId, { limit?, cursor? })` |
 | Documents shared with a group | `client.groups.listDocuments(groupType, groupId)` |
 | Collections the user is a direct member of | `client.collections.list({ limit?, cursor? })` |
@@ -2101,8 +2124,8 @@ Pick the call that answers the question you're actually asking:
 | Question | Call |
 |----------|------|
 | Documents the user owns | `client.me.ownedDocuments(cursor:limit:tag:)` → `[DocumentInfo]` (or `ownedDocumentsPage(cursor:limit:tag:)` → `DocumentListPage` for the `{ items, cursor }` envelope) |
-| Documents directly shared with the user (`DocumentPermission` + pending `DocumentInvitation`) | `client.me.sharedDocuments(cursor:limit:tag:)` → `SharedDocumentListResult` (`{ items, cursor }`) |
-| Pending document invitations the user can accept | `client.me.pendingDocumentInvitations()` → `[PendingDocumentInvitation]` |
+| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments(cursor:limit:tag:)` → `SharedDocumentListResult` (`{ items, cursor }`) |
+| A document's outstanding deferred grants | `client.documents.listPendingInvitations(documentId:)` |
 | Documents inside a collection | `client.collections.listDocuments(collectionId:options:)` → `PaginatedResult<CollectionDocumentInfo>` |
 | Documents shared with a group | `client.groups.listDocuments(groupType:groupId:)` → `[GroupDocumentInfo]` |
 | Collections the user is a direct member of | `client.collections.list(options:)` → `PaginatedResult<CollectionInfo>` |
@@ -2125,7 +2148,7 @@ The permission / collection reads — `documents.getPermissions(_:)`, `collectio
 {{/lang}}
 - Passing `permission: null` to remove a grant — there is no null form. Use `removePermission`.
 - Lowering a user's direct permission while they still have a higher one via group — the group wins (effective = MAX).
-- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct `DocumentPermission` rows and pending `DocumentInvitation`s. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
+- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct `DocumentPermission` rows. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
 - Showing a "request access" button without checking the caught error's `canRequestAccess` detail.
 - Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share and group add linked to that invitation.
 - Polling `client.invitations.list` / `listDeferredGrants` to populate "Members + Pending" rows — those are app-level / admin surfaces; per-resource `listPendingInvitations` is the product UI source.

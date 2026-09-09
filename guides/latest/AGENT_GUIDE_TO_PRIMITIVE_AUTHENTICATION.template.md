@@ -733,7 +733,7 @@ Implications:
 
 1. **Don't re-grant after signup.** If a doc was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
 2. **Domain-mode apps re-validate at resolution.** Deferred grants for emails outside allowed domains are silently dropped.
-3. **`invitation`/`accepted` WS events fire after resolution** — subscribe to refresh the inviter's UI.
+3. **No WebSocket event announces the resolution.** The `invitation` event was removed in #2951; refresh the inviter's UI on their next read.
 
 See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants).
 
