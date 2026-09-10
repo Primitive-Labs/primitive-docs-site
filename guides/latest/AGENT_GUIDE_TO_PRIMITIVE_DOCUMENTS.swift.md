@@ -102,7 +102,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
 
   for share in page.items {
     // Each row nests the base document fields (title, createdAt, …) under
-    // `.document`, alongside the share extras (grantedBy, source, invitationId).
+    // `.document`, alongside the share extras (grantedBy, source).
     print(share.document.title, share.document.permission, share.grantedBy)
   }
 
@@ -128,7 +128,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
   let items = page.items
 ```
 
-Swift can't inherit a struct, so each row from `sharedDocuments` is a `SharedDocument` that holds the base fields under `.document` (a `DocumentInfo`, including `permission` — never `.owner`) alongside the share-only extras `grantedBy`, `source` (`"permission"` | `"invitation"`), and `invitationId` (invitation rows only). Group and collection rows have their own shapes — `groups.listDocuments` returns `GroupDocumentInfo`, and `collections.listDocuments` returns flat `CollectionDocumentInfo` (`documentId`, `title`, `permission`, `addedBy`, `addedAt`, …).
+Swift can't inherit a struct, so each row from `sharedDocuments` is a `SharedDocument` that holds the base fields under `.document` (a `DocumentInfo`, including `permission` — never `.owner`) alongside the share-only extras `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant). Group and collection rows have their own shapes — `groups.listDocuments` returns `GroupDocumentInfo`, and `collections.listDocuments` returns flat `CollectionDocumentInfo` (`documentId`, `title`, `permission`, `addedBy`, `addedAt`, …).
 
 
 ## Core data operations

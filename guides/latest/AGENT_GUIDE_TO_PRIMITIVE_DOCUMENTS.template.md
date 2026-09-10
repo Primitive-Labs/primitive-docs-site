@@ -135,10 +135,10 @@ There is **no single "my documents" list**. A user reaches documents through **f
 {{ example: documents/list-collection-documents }}
 
 {{#lang ts}}
-Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `source` (`"permission"` | `"invitation"`), `grantedBy`, `invitationId` (invitation rows only).
+Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant).
 {{/lang}}
 {{#lang swift}}
-Swift can't inherit a struct, so each row from `sharedDocuments` is a `SharedDocument` that holds the base fields under `.document` (a `DocumentInfo`, including `permission` — never `.owner`) alongside the share-only extras `grantedBy`, `source` (`"permission"` | `"invitation"`), and `invitationId` (invitation rows only). Group and collection rows have their own shapes — `groups.listDocuments` returns `GroupDocumentInfo`, and `collections.listDocuments` returns flat `CollectionDocumentInfo` (`documentId`, `title`, `permission`, `addedBy`, `addedAt`, …).
+Swift can't inherit a struct, so each row from `sharedDocuments` is a `SharedDocument` that holds the base fields under `.document` (a `DocumentInfo`, including `permission` — never `.owner`) alongside the share-only extras `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant). Group and collection rows have their own shapes — `groups.listDocuments` returns `GroupDocumentInfo`, and `collections.listDocuments` returns flat `CollectionDocumentInfo` (`documentId`, `title`, `permission`, `addedBy`, `addedAt`, …).
 {{/lang}}
 
 {{#lang ts}}

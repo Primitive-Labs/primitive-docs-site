@@ -59,7 +59,7 @@ export default defineFunction(async (input: { name: string }, ctx, step) => {
 
 | Argument | What it is |
 |---|---|
-| `input` | The request's `rootInput`, validated and coerced against `inputSchema` when one is declared. On a trigger fire: the verified delivery body (webhook) or the entry's `rootInput` (cron). |
+| `input` | The request's `rootInput`, validated and coerced against `inputSchema` when one is declared. On a trigger fire: the verified delivery body (webhook), the entry's `rootInput` (cron), or the committed changes (database-change — see Triggers). |
 | `ctx` | The invocation context: `user`, `trigger`, `api`, `db`, `integrations`, `prompts`, `secret`, `configVar`, `users`, `connections`, `channels` — each documented below. |
 | `step` | Present in **both** modes. In a durable run it is the live engine step (see Durable functions). In a synchronous invocation it is a passthrough: `step.do` runs its body, `sleep`/`sleepUntil` resolve at once, and `waitForEvent` throws `STEP_NOT_AVAILABLE` — so a durable-authored body can be exercised synchronously. |
 
@@ -75,6 +75,7 @@ export default defineFunction(async (input: { name: string }, ctx, step) => {
 | Webhook fire | `{ kind: "webhook", webhookKey, webhookId, externalEventId }` | `null` |
 | Cron fire | `{ kind: "cron", name, triggerId, scheduledFor }` — plus `manual: true` on a diagnostic fire | `null` |
 | Database-change fire | `{ kind: "database", databaseId, databaseType }` — the changes ride in `input` | `null` |
+| `workflow.call` from a parent workflow | `{ kind: "workflow", workflowKey, runId, stepId }` — the parent's key, run and step (see Migrating a workflow tree to functions) | The member who started the parent run, or `null` |
 
 `ctx.user` is typed `FunctionUser | null`: a function that a trigger can fire reads it as `ctx.user?.userId`. Whichever door the invocation came through, the code runs with the same authority — the app's (see Execution identity). The caller is a **name** the code may use for attribution and scoping; it is not a second principal.
 
@@ -118,13 +119,13 @@ Any signed-in member may call it, subject to the function's `access` gate. Every
 | `failed` | The handler threw (`FUNCTION_THREW`), returned a value JSON cannot carry (`OUTPUT_NOT_SERIALIZABLE`), exported no callable default (`FUNCTION_NO_HANDLER`), returned output `outputSchema` refuses (`OUTPUT_SCHEMA_VIOLATION`), or returned over 1 MiB (`OUTPUT_TOO_LARGE`). `errorCode` says which; `error` carries the message. |
 | `timeout` | The handler did not finish inside the budget. |
 
-Every outcome the sandbox produced also carries `limits` — the resolved ceilings that invocation ran under, your `[function.limits]` clamped element-wise to the platform's own values:
+An envelope from a handler that ran to an answer — `completed`, or `failed` from a throw or an `outputSchema` violation — also carries `limits`, the resolved ceilings that invocation ran under: your `[function.limits]` clamped element-wise to the platform's own values:
 
 ```json
 { "status": "completed", "output": { "message": "hello Ada" }, "limits": { "cpuMs": 50, "subRequests": 64, "ratePerMinute": 1200 } }
 ```
 
-Read it when you need to tell what the platform resolved from what you declared: asking for more than a ceiling gets the platform's value silently, and this is where that is visible. An HTTP error below carries no `limits` — no invocation ran to describe.
+Read it when you need to tell what the platform resolved from what you declared: asking for more than a ceiling gets the platform's value silently, and this is where that is visible. A `timeout`, an `OUTPUT_TOO_LARGE` failure and the HTTP errors below carry no `limits`.
 
 **HTTP errors** mean the platform refused before your code ran:
 
@@ -212,6 +213,7 @@ A refused call rejects with an error carrying `status` and `errorCode`:
 | `FUNCTION_SECRET_NOT_FOUND` / `FUNCTION_VAR_NOT_FOUND` | This environment holds no value of that name. |
 | `FUNCTION_CHANNEL_NAME_INVALID` | A channel name outside the grammar (`400`). |
 | `FUNCTION_CHANNEL_GRANTEE_REQUIRED` | `ctx.channels.authorize` from a trigger fire without an explicit `userId` — there is no caller to default to. |
+| `FUNCTION_CHANNEL_GRANTEE_NOT_FOUND` | The `userId` a grant names is not a member of this app (`404`) — the same answer as a user that never existed. |
 | `FUNCTION_SEND_TARGET_NOT_FOUND` | The user is not a member of this app, or the connection is not one of this app's. |
 | `FUNCTION_SEND_PAYLOAD_TOO_LARGE` | A send payload over 64 KiB; nothing was delivered. |
 | `FUNCTION_SEND_PAYLOAD_INVALID` | A send payload JSON cannot serialize. |
@@ -228,7 +230,7 @@ Every platform call carries the invocation's credential, which expires at the in
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
 | High-blast | `databases:create`, `databases:delete`, `databases:transferOwnership`, `databases:addManager`, `databases:revokePermission`, `databases:grantGroupPermission`, `databases:revokeGroupPermission`, `users:remove`, `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
 
-**Retired.** `database:<type>/<model>:read|write`, `prompt:<key>`, `var:<NAME>`, `channel:<name>`, `users:send`, `connections:send`, `email:send` and `analytics:writeForUser` were grants under the earlier model in which a function borrowed its caller's authority and held a few rights of its own. Function code acts as the system now, so each of those calls is admitted with no declaration; a file still carrying one is refused at push with a sentence naming the string and this change (#3279) — delete the line and push again. `runAs` and `unscopedReads` are retired keys on the same terms.
+**Nothing else is declared.** Database models, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system. A file carrying `database:<type>/<model>:read|write`, `prompt:<key>`, `var:<NAME>`, `channel:<name>`, `users:send`, `connections:send`, `email:send` or `analytics:writeForUser` is refused at push with a sentence naming the string and what stays — delete the line and push again. A `runAs` or `unscopedReads` key is refused on the same terms.
 
 The platform reads capabilities from the TOML file you review in a pull request, so what a reviewer sees and what the platform enforces are one statement.
 
@@ -238,7 +240,7 @@ Push scans the built bundle and records a **manifest** on the version: the model
 
 ### Where operations are going
 
-Client-callable database **operations** — the CEL-gated verbs a member runs through `POST …/databases/{id}/operations/{key}` — were built to give a *member* a bounded, reviewed way to write. A function does not need one: it is already reviewed code acting as the app, so it writes through `ctx.db` directly and expresses the bound in code. That is why `databases.executeOperation`, `executeBatch` and `importBulk` are not published to functions (a prepared operation is still reachable through `databases.runOperation`, which never consults the operation's access rule), and why the direction is retirement: the client-callable operation endpoints go in project phase 5 and the concept in phase 6, and an operation that filtered on a user-supplied `$params.userId` becomes a `defineQuery` with a `$caller` parameter under the function's `access` gate. Nothing member-facing changes here; the migration guide arrives with the bridge work.
+Client-callable database **operations** — the CEL-gated verbs a member runs through `POST …/databases/{id}/operations/{key}` — were built to give a *member* a bounded, reviewed way to write. A function does not need one: it is already reviewed code acting as the app, so it writes through `ctx.db` directly and expresses the bound in code. That is why `databases.executeOperation`, `executeBatch` and `importBulk` are not published to functions (a prepared operation is still reachable through `databases.runOperation`, which never consults the operation's access rule), and why the direction is retirement: the client-callable operation endpoints go in project phase 5 and the concept in phase 6, and an operation that filtered on a user-supplied `$params.userId` becomes a `defineQuery` with a `$caller` parameter under the function's `access` gate. Nothing member-facing changes here; Migrating a workflow tree to functions (below) is the full account, including how a parent workflow keeps working while its leaves move.
 
 ## Database records
 
@@ -439,6 +441,48 @@ On the client, subscribe to the `directMessage` event:
 {{ example: functions/direct-message }}
 {{/lang}}
 
+## Channels
+
+A direct send addresses a user or a connection the function already knows; a **channel** addresses whoever is listening to a named topic — an order's status, a game table, a document's presence lane — without the function knowing who that is. Two calls make one, and neither needs a capability:
+
+```ts
+import { defineFunction } from "primitive-functions";
+
+export default defineFunction(async (input: { orderId: string }, ctx) => {
+  // The grant names the CALLER (an HTTP invocation's default grantee), so it
+  // is not a credential anybody else can present.
+  const { grant, expiresAt } = await ctx.channels.authorize(`orders:${input.orderId}`);
+  return { grant, expiresAt };
+});
+```
+
+```ts
+// Any function — a database-change fire included — publishes to the topic.
+const result = await ctx.channels.publish(`orders:${orderId}`, { status: "shipped" });
+// result: { connections, truncated }
+```
+
+| Call | Contract |
+|---|---|
+| `ctx.channels.authorize(channel, { userId?, ttlSeconds? })` → `{ channel, grant, expiresAt }` | Mints a signed, short-lived grant naming this app, this channel and one user. `userId` defaults to the HTTP caller; a trigger fire has no caller and must pass it (`FUNCTION_CHANNEL_GRANTEE_REQUIRED` otherwise). `ttlSeconds` defaults to 300 and is clamped to the 900 ceiling — asking for more gets the ceiling, not an error. `expiresAt` is epoch milliseconds. There is no app-wide grant. |
+| `ctx.channels.publish(channel, payload)` → `{ connections, truncated }` | Delivers a `channel.message` frame, payload verbatim, to every connection holding a live membership. Fan-out stops at 500 connections per channel (`truncated: true`). Zero connections is a success — nobody was listening. |
+
+- **Channel names** are one or more `[A-Za-z0-9_-]` segments joined by `:`, at most 200 characters — `orders`, `orders:42`, `orders:42:chat`. Outside the grammar: `400 FUNCTION_CHANNEL_NAME_INVALID`, decided before anything else.
+- **Expiry is the only revocation, and it ends membership.** A grant is a token, not a row: past `expiresAt` the server stops delivering even though the socket stays open. Renewal is another authorize and another subscribe — same channel, same socket, new expiry — and replaces the membership rather than adding one.
+- **Refusals are uniform.** An expired, tampered, cross-app, cross-user or wrong-channel grant all get the same error frame with the same message; the frame echoes the channel, so a client with several subscribes in flight knows which one failed, but never why. A grant is refused at subscribe time if the socket's user is not the one it names.
+- **Reconnect re-issues every held subscribe** with its stored grant; a grant that expired meanwhile is refused, and only that channel's registration is dropped.
+
+{{#lang ts}}
+On the client, present the grant on the socket it already has:
+
+{{ example: functions/subscribe-channel }}
+
+- `subscribeToChannel(channel, grant)` resolves with `{ channel, expiresAt, unsubscribe }` on the server's ack for that channel, and rejects on the uniform refusal. Calling it again with a fresh grant renews the membership; two calls for the same channel run one after the other, so a renewal is answered on its own merits.
+- `unsubscribeFromChannel(channel)` — or `subscription.unsubscribe()` — is idempotent and safe on a closed socket; a subscribe still in flight for that channel is cancelled and its promise rejects.
+- `channelMessage` fires for every held membership: `{ channel, payload, functionKey, sentAt }`, a live frame with no durable record — a client that was offline never receives it later.
+- `channelSubscribeFailed` (`{ channel, message }`) announces a refusal nothing was waiting on — the reconnect case, where a grant that expired while the socket was down is refused: invoke the authorizing function again and re-subscribe. A refusal that answers a `subscribeToChannel` call rejects that promise instead, so a failure is never announced twice.
+{{/lang}}
+
 ## Sending email
 
 No capability — a cron-fired function sending a digest is the point of it:
@@ -579,7 +623,7 @@ A hard delete destroys the stored bundles a sleeping run reloads when it wakes, 
 
 ## Triggers
 
-A function's config block can declare one inbound **webhook** and up to ten **cron** schedules. The platform creates and operates whatever they need. A triggered function is synchronous: push refuses a trigger block beside `durable = true`, so a fire runs inside one bounded invocation and cannot start a durable run.
+A function's config block can declare one inbound **webhook**, up to ten **cron** schedules and up to five **database-change** watches. The platform creates and operates whatever they need. A triggered function is synchronous: push refuses a trigger block beside `durable = true`, so a fire runs inside one bounded invocation and cannot start a durable run.
 
 ```toml
 # functions/stripe-events.toml
@@ -615,18 +659,49 @@ export default async function (input, ctx) {
 
 **Cron.** With `overlapPolicy = "skip"`, a fire that arrives while the previous run is still going is counted as a skip.
 
-**Every webhook or cron fire writes a run row** — the only record it leaves, since nobody is waiting for an answer. A fire has no caller: `ctx.user` is `null`, and the code acts as the app exactly as it does on an HTTP invoke (see Execution identity).
+**Database-change.** A `[[function.triggers.database]]` block watches a database **type**; every write request that commits something to any database of that type runs the function once, with the committed changes:
+
+```toml
+[[function.triggers.database]]
+type = "orders"                        # a database type the app already has; up to five per function
+```
+
+```ts
+export default async function (input, ctx) {
+  if (ctx.trigger.kind === "database") {
+    // ctx.trigger.databaseId / ctx.trigger.databaseType say which database
+    for (const change of input.changes) {
+      // change.op, change.modelName, change.id, change.data, change.previousData
+      await ctx.channels.publish(`orders:${change.id}`, { op: change.op });
+    }
+  }
+  return { seen: input.totalChanges };
+}
+```
+
+`input` is `{ databaseId, databaseType, changes, totalChanges, truncated }`. What differs from the other two doors:
+
+- **Once per write request, not once per row.** A batch of fifty saves is one fire carrying fifty changes. `changes` is capped at 50 in write order; `totalChanges` and `truncated` describe the rest.
+- **Only what committed.** A database batch is partial-success inside an HTTP `200`; only the operations that landed reach `changes`.
+- **The rows are in the payload.** Every change carries `op`, `modelName`, `id`, `data` and the pre-image of the write in `previousData` (`null` when there was no row before) — read for you whether or not anyone is subscribed to the database.
+- **No run row.** A fire leaves an invocation metric and, on failure, an application error event — nothing in `primitive functions runs`. Publish, write or call out if you need a record of what it did.
+- **Best-effort, off the response path.** The write's caller never waits for the function and never sees its outcome; a fire that fails, times out or is refused by the rate ceiling leaves the write's response as it was. No retry, no queue.
+- **Sync mode only, with no caller.** `durable = true` and a database trigger are refused together at push; `ctx.user` is `null` inside the fire.
+
+A type may be watched by up to 25 functions. A push naming a type the app does not have is refused by name, and a write to a database with no `databaseType` fires nothing.
+
+**Every webhook or cron fire writes a run row** — the only record it leaves, since nobody is waiting for an answer (a database-change fire deliberately writes none; see above). A fire has no caller: `ctx.user` is `null`, and the code acts as the app exactly as it does on an HTTP invoke (see Execution identity).
 
 ```bash
 primitive functions runs <function-id>      # newest first: status, what fired it, timings, failure code
-primitive functions get <function-id>       # receiver URL, schedules, last fired
+primitive functions get <function-id>       # receiver URL, schedules, watched types, last fired
 ```
 
 **The file is the whole truth.** Removing the webhook block stops deliveries (the receiver answers `410`); putting it back resumes them on the same URL with the log intact. Removing a cron entry cancels it; re-adding schedules it again.
 
 ## Ceilings
 
-`[function.limits]` may **lower** any ceiling and never raise one; a config asking for more gets the platform value. One caveat, measured on 2026-09-09 (`projects/server-functions/cpu-ceiling-check-2026-09-09.md`): `cpuMs` is enforced — past its budget the invocation is stopped and answers `failed` — but the runtime adds an allowance of about **two seconds** before it stops anything, so `cpuMs = 50` and `cpuMs = 200` buy the same thing and neither stops code in milliseconds. To bound a function tightly, use `timeoutMs` on the request: that is wall clock and is held exactly. The table describes one synchronous invocation; a durable run is bounded per slice (see Budgets in a durable run).
+`[function.limits]` may **lower** any ceiling and never raise one; a config asking for more gets the platform value. One caveat: `cpuMs` is enforced — past its budget the invocation is stopped and answers `failed` — but the runtime adds an allowance of about **two seconds** before it stops anything, so `cpuMs = 50` and `cpuMs = 200` buy the same thing and neither stops code in milliseconds. To bound a function tightly, use `timeoutMs` on the request: that is wall clock and is held exactly. The table describes one synchronous invocation; a durable run is bounded per slice (see Budgets in a durable run).
 
 | Limit | Platform value | Key |
 |---|---|---|

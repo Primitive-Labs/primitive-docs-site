@@ -129,7 +129,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
 
   for (const doc of items) {
     // Each row carries the base document fields (title, createdAt, …) plus the
-    // share extras (permission, source, grantedBy, invitationId).
+    // share extras (permission, grantedBy, source).
     console.log(doc.title, doc.permission, doc.grantedBy);
   }
 
@@ -154,7 +154,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
   });
 ```
 
-Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `source` (`"permission"` | `"invitation"`), `grantedBy`, `invitationId` (invitation rows only).
+Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant).
 
 `ownedDocuments` and `sharedDocuments` return the unified `{ items, cursor }` envelope (raw-JSON `cursor`, NOT base64url). `ownedDocuments()` returns a flat `DocumentInfo[]` by default, or the envelope with `returnPage: true`.
 
