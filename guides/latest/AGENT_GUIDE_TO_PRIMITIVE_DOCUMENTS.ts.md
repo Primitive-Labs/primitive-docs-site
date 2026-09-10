@@ -172,8 +172,8 @@ const collections = await jsBaoClient.collections.list();
 
 #### Do not use
 
-- **`client.documents.list()`** — removed. It returned the union of owner + reader + read-write rows. Use `me.ownedDocuments` and `me.sharedDocuments`; `ownedDocuments` takes the same option set (`tag`, `limit`, `cursor`, `returnPage`).
-- **`client.documents.createInvitation(...)`, `documents.acceptInvitation(...)`, `documents.declineInvitation(...)`, `client.me.pendingDocumentInvitations()`** — removed with the per-document invitation model. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `documents.listPendingInvitations(documentId)` lists a document's outstanding deferred grants.
+- **The former `documents.list` method** — removed. It returned the union of owner + reader + read-write rows. Use `me.ownedDocuments` and `me.sharedDocuments`; `ownedDocuments` takes the same option set (`tag`, `limit`, `cursor`, `returnPage`).
+- **The former `documents.createInvitation`, `documents.acceptInvitation`, `documents.declineInvitation` and `me.pendingDocumentInvitations` methods** — removed with the per-document invitation model. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `documents.listPendingInvitations(documentId)` lists a document's outstanding deferred grants.
 - **`client.me.bookmarks.*`** — render "my documents" from `me.ownedDocuments()` + `me.sharedDocuments()` (and `collections.list()` / `groups.listUserMemberships(...)` if you also want group/collection access).
 
 #### `syncMetadata()` reference
@@ -913,7 +913,7 @@ items.map(...);  // TypeError: items.map is not a function
 | `$all`          | StringSet contains all values  | `{ tags: { $all: ["work", "urgent"] } }`             |
 | `$size`         | StringSet size comparison      | `{ tags: { $size: { $gte: 2 } } }`                   |
 
-Which of these match a record that never wrote the field — and which do not — is in [Absent fields](#absent-fields) above; `$ne`/`$nin` changed there in #3166.
+Which of these match a record that never wrote the field — and which do not — is in [Absent fields](#absent-fields) above — `$ne` and `$nin` are the ones that changed.
 
 **Logical operators** — see [Logical query operators](#logical-query-operators) above for the compiled `$or` example. Plain field maps AND together:
 

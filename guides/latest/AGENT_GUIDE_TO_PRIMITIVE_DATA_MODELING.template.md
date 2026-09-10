@@ -15,7 +15,7 @@ How to choose between **documents** and **databases**, and how to combine them. 
 | Offline | Yes — reads/writes work offline, sync resumes on reconnect (`offline: true` on the client) | No — every call requires the network |
 | Access control | Whole-document grant: `reader`, `read-write`, `owner` | Per-operation CEL on registered operations |
 | Per-record access for end users | Not possible — anyone with the doc gets everything | Yes — operation CEL + filters scope what each caller sees |
-| Practical size | ~10 MB per document (soft) | ~5 GB per database (one isolated instance each) |
+| Practical size | ~10 MB per ordinary document (soft); up to 2 GB with `documentFormat: 2` | ~5 GB per database (one isolated instance each) |
 | Server-enforced fields | No (client writes Yjs updates directly) | Yes — `autoPopulatedFields` and per-model triggers |
 | Aggregates / multi-step reads | Client-side over local data | `aggregate`, `pipeline`, `count` operations |
 
@@ -28,7 +28,7 @@ Apply these in order. Stop at the first one that fits.
 1. **Different users need to see different records inside the same dataset?** → **Database**. Documents grant access to the whole document; you cannot project rows out per user.
 2. **Multiple users editing the same data live (Google-Docs style)?** → **Document**. Yjs is the only system here that merges concurrent edits without conflict.
 3. **Must work offline?** → **Document** (open the client with `offline: true`). Databases need the network for every call.
-4. **Dataset will exceed ~10 MB for a single sharing unit, or users only need a slice?** → **Database**. Documents replicate fully to every client.
+4. **Dataset will exceed ~10 MB for a single sharing unit, or users only need a slice?** → **Database**. Documents replicate fully to every client. Size alone is the exception: when every member of the sharing unit needs all of the data, a **large document** (`documentFormat: 2`) holds up to 2 GB — records live in a persisted local store instead of in memory — on a client that provides one (Node).
 5. **Server must own a field (timestamps, audit fields, computed status, role assignments)?** → **Database**. Use triggers; documents have no equivalent.
 6. **Need aggregates, group-by, or one round-trip that touches several models?** → **Database** (`aggregate`, `pipeline`).
 7. **None of the above and the data is per-user or per-shared-workspace?** → **Document**. Cheaper, lower latency, simpler.

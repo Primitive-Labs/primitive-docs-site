@@ -645,6 +645,8 @@ It calls a server-side endpoint that inspects existing ops + introspects the liv
 
 Registered operations are named, parameterized database operations defined at the database-type level. They are the primary data access layer — all user interaction with database data goes through operations.
 
+**Registered operations are retiring.** The endpoints clients call retire in project phase 5 and the concept — operation CEL and pipelines included — in phase 6. The successor is a **server function**: a client-callable operation becomes a function whose `access` gate is the operation's, and an operation that filtered on a `$params.userId` fed from the user becomes a `defineQuery` with the `$caller` marker, so the platform injects the invoking user instead of the app threading an id through a parameter. Everything below still works and is still how a database is configured today; before recommending a new client-callable operation, read [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md) — its Migrating a workflow tree to functions section is the succession, and the migration is documented at `getting-started/server-functions`.
+
 ### Access control model
 
 - **All end-user data access** goes through registered operations, controlled by each operation's `access` CEL expression

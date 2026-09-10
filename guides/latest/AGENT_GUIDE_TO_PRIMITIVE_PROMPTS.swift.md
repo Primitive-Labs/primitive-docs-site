@@ -399,16 +399,23 @@ removing its file and running `primitive config push --prune`.
 Read them back from the CLI:
 
 ```bash
-primitive prompts tests list <prompt-id>
-primitive prompts tests get  <prompt-id> <test-case-id>
+primitive prompts tests list <prompt>
+primitive prompts tests get  <prompt> <test-case-id>
 ```
+
+Every `<prompt>` argument of the `prompts tests` commands is the prompt's
+**key** (the name `prompts list` prints beside the id, and the one
+`prompts/<key>.tests/` is addressed by) or its id. An identifier that names no
+prompt in the app exits non-zero with `No prompt '<arg>' in app <app-id>`, so
+"No test cases found." only ever means the prompt exists and has no registered
+cases.
 
 ### Running tests
 
 ```bash
-primitive prompts tests run <prompt-id> <test-case-id> [--config <config-id>] [--json]
-primitive prompts tests run-all <prompt-id> [--config <config-id>] [--test-cases "id1,id2,id3"] [--json]
-primitive prompts tests runs <prompt-id> [--limit 20] [--group <comparison-group>] [--json]
+primitive prompts tests run <prompt> <test-case-id> [--config <config-id>] [--json]
+primitive prompts tests run-all <prompt> [--config <config-id>] [--test-cases "id1,id2,id3"] [--json]
+primitive prompts tests runs <prompt> [--limit 20] [--group <comparison-group>] [--json]
 ```
 
 `run-all` exits with code `1` if any test fails. Useful for CI. It executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
@@ -418,9 +425,9 @@ primitive prompts tests runs <prompt-id> [--limit 20] [--group <comparison-group
 Runs tests in parallel via the workflow engine — much faster for large suites.
 
 ```bash
-primitive prompts tests batch start  <prompt-id> [--config <config-id>] [--test-cases "id1,id2"] [--json]
-primitive prompts tests batch status <prompt-id> <batch-id> [--wait] [--json]
-primitive prompts tests batch cancel <prompt-id> <batch-id> [-y]
+primitive prompts tests batch start  <prompt> [--config <config-id>] [--test-cases "id1,id2"] [--json]
+primitive prompts tests batch status <prompt> <batch-id> [--wait] [--json]
+primitive prompts tests batch cancel <prompt> <batch-id> [-y]
 ```
 
 `status --wait` polls every 2s until completion. Exits `1` if any test failed.
@@ -432,8 +439,8 @@ by `primitive config push`; removing a file and running `config push --prune`
 deletes it server-side. The CLI reads server state:
 
 ```bash
-primitive prompts tests attachments list     <prompt-id> <test-case-id>
-primitive prompts tests attachments download <prompt-id> <test-case-id> doc.pdf [output-path]
+primitive prompts tests attachments list     <prompt> <test-case-id>
+primitive prompts tests attachments download <prompt> <test-case-id> doc.pdf [output-path]
 ```
 
 Upload size limit: **10 MB**. Attachments are sent to the model as file parts (`gemini`) or vision parts (`openrouter`) and are NOT visible in template context.

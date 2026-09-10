@@ -19,7 +19,7 @@
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.0.0",
-      "js-bao": "0.6.0",
+      "js-bao": "0.6.1",
       "primitive-admin": "1.0.62",
       "primitive-app": "3.1.0"
     }
