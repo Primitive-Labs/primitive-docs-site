@@ -12,7 +12,7 @@ A deploy names **two independent things**, and neither is inferred from the othe
 | Flag | Selects | Which means |
 |---|---|---|
 | `--deploy-env <name>` | the **deploy environment** | the Vite mode (`.env.<name>`) and the `[env.<name>]` block in `wrangler.toml` |
-| `--primitive-env <name>` | the **Primitive environment** | the backend/app pair in `.primitive/config.json` |
+| `--primitive-env <name>` | the **Primitive environment** | the backend/app pair in `primitive/config.json` |
 
 Omitting either is an error. Always write "deploy environment" or "Primitive environment" — a bare "environment" is ambiguous here, because Wrangler and Vite each call their own half by a different name.
 
@@ -45,7 +45,7 @@ The Vite mode selects `.env.<deploy-env>`. It carries no identity:
 VITE_OAUTH_REDIRECT_URI=https://my-app-prod.your-subdomain.workers.dev/oauth/callback
 ```
 
-The app ID and backend URL live in `.primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
+The app ID and backend URL live in `primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
 
 **A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them. For an app scaffolded by an older CLI, that deletion is the entire migration.
 

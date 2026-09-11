@@ -164,7 +164,7 @@ const client = new JsBaoClient({ apiUrl, wsUrl, appId, token });
 
 ## Configuring with the CLI
 
-All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive config` command, which keeps configuration version-controlled alongside your code. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and the `--dir` override.
+All database configuration — types, operations, triggers, rule sets, group types — is managed through TOML config files and the `primitive config` command, which keeps configuration version-controlled alongside your code. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and how the directory is resolved.
 
 Database configs live under these paths in the config directory:
 
@@ -444,7 +444,7 @@ Generate TypeScript record interfaces and op param/result types from the databas
 primitive databases codegen -o ./src/generated/db
 ```
 
-Codegen reads the database-type TOML from the auto-resolved config directory (`.primitive/sync/<env>/<appId>/`); pass `--dir <path>` only when overriding it. With no `-o`, generated files land in `<config-dir>/database-type-configs/generated/`.
+Codegen reads the database-type TOML from the selected environment's config directory (`primitive/<env>/`), and from nowhere else. With no `-o`, generated files land in `<config-dir>/database-type-configs/generated/`.
 
 **Codegen enum / union / required typing.** When a field or an operation param restricts a string to a fixed set of values, codegen emits a TypeScript string-literal union (e.g. `status: "open" | "in-progress" | "closed"`) instead of `string`, and enum params are validated server-side as well. Fields that operation params mark `required` are emitted as non-optional on the generated record interface. This keeps generated types aligned with the server's validation instead of widening everything to `string`.
 
@@ -1464,11 +1464,7 @@ The handle queries with the full filter operator grammar, sort + cursor paginati
 
 `$startsWith`, `$endsWith`, and `$containsText` are mutually exclusive on the same field — only one substring operator per field per query.
 
-**Absent fields.** `$ne`, `$nin` and `{ field: null }` **match records where the field is absent** — a record that never wrote the field is not equal to any value, as in MongoDB — so `{ deleted: { $ne: true } }` is the "false or not set" filter a soft-delete list needs, with no backfill onto existing records. Equality with a value, the comparison operators (`$gt` / `$gte` / `$lt` / `$lte`) and `$in` **match only records that carry the field**. A field declared with `default = false` is applied on read; it does not materialise in storage, so it does not change what a filter matches.
-
-Test presence with `$exists`. Its treatment of an *explicitly stored* null is path-dependent: the server counts a **stored JSON null** as present (`$exists: true` matches it), while the browser and Swift replicas keep each field in a typed column where a stored null is indistinguishable from an absent field (`$exists: false` matches it). Absent fields behave the same on every path; only explicit nulls differ. `$in` with a `null` entry matches nothing for that entry — use `{ field: null }` or `$exists: false` instead.
-
-**Breaking change (#3166).** `$ne` and `$nin` used to exclude records lacking the field. Any filter that uses a negative operator to *exclude* records by a possibly-absent field now matches those records too — including access filters injected by `beforeQuery` hooks and write conditions on `save`. To keep the old result set, exclude the missing case with a `null` entry in `$nin`: `{ deleted: { $nin: [null, true] } }` matches only records carrying a non-null `deleted` other than `true`, identically on every path. `$exists: true` alongside the negative operator is **not** equivalent — `{ deleted: { $ne: true, $exists: true } }` still matches a record whose `deleted` is an explicitly stored JSON null on the server, which the old filter excluded.
+**Absent fields (#3166).** `$ne`, `$nin` and `{ field: null }` match records that never wrote the field; equality, the range operators and `$in` match only records that carry it. To keep excluding the missing case, put `null` in the `$nin` list: `{ deleted: { $nin: [null, true] } }`. Full semantics, including `$exists` and how a stored null differs by path: [Documents guide, §Absent fields](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#absent-fields).
 
 Multiple filters on different fields are implicitly combined with AND. Use an explicit `$and` only when you need two conditions on the *same* field (e.g. a range), and combine `$or` with other top-level fields freely.
 

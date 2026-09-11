@@ -2,12 +2,14 @@
 
 A **server function** is TypeScript authored in the app's config tree and pushed with `primitive config push`. It runs on the platform — never on the device, whatever language the app's clients are written in — **as the app itself**: reviewed code acting with the app's authority, behind an `access` gate that decides who may call it. It answers over HTTP. It is config-as-code beside [prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md) and [integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md): `functions/<key>.toml` states the gate, the entry point and the few capabilities that still need declaring; the code sits next to it; one push builds and ships both as one immutable version.
 
-Two modes, one flag:
+Two modes, one key:
 
-| Mode | `durable` | What an invocation answers | Run row |
+| Mode | `mode` | What an invocation answers | Run row |
 |---|---|---|---|
-| **Synchronous** (default) | `false` | The result envelope, inside the request | None — nothing to poll or clean up |
-| **Durable** | `true` | A run id, immediately; the run can sleep for hours or days | One per run, polled by run id |
+| **Request** (default) | `"request"` | The result envelope, inside the request | None — nothing to poll or clean up |
+| **Task** (the durable one) | `"task"` | A run id, immediately; the run can sleep for hours or days | One per run, polled by run id |
+
+`durable = true` / `durable = false` is the accepted alias for `mode = "task"` / `mode = "request"` through the transition; a file carrying both must have them agree. `config pull` writes a file back in whichever spelling it was authored, so migrating the line to `mode` is an ordinary edit that makes a new version on the next push.
 
 ## The config file
 
@@ -24,7 +26,7 @@ key = "greet"                       # required; URL-path-safe; one namespace per
 description = "Says hello"
 entry = "functions/greet/index.ts"  # required; relative to the config tree root
 access = "true"                     # required CEL gate — see The access gate
-durable = false                     # true → a durable run instead of a synchronous answer
+mode = "request"                    # "task" → a run id instead of an inline answer; the default is "request"
 capabilities = []                   # integration:, secret:, and the high-blast strings — see Capabilities
 
 [function.inputSchema]              # JSON Schema, native TOML tables. Input is validated
@@ -52,16 +54,23 @@ cpuMs = 2000                        # never raise one. timeoutMs is a request fi
 import { defineFunction } from "primitive-functions";
 import { salute } from "./greeting.js";
 
-export default defineFunction(async (input: { name: string }, ctx, step) => {
+// Keyed: `input` and the return are typed from functions/greet.toml's schemas
+// (the declaration `config push` generates — see Codegen). A key this tree
+// does not declare is a compile error; one that names another file's function
+// is refused at push.
+export default defineFunction("greet", async (input, ctx, step) => {
   return { message: salute(input.name) };
 });
+
+// Unkeyed, with types you write yourself — still valid:
+// export default defineFunction(async (input: { name: string }, ctx, step) => …);
 ```
 
 | Argument | What it is |
 |---|---|
 | `input` | The request's `rootInput`, validated and coerced against `inputSchema` when one is declared. On a trigger fire: the verified delivery body (webhook), the entry's `rootInput` (cron), or the committed changes (database-change — see Triggers). |
 | `ctx` | The invocation context: `user`, `trigger`, `api`, `db`, `integrations`, `prompts`, `secret`, `configVar`, `users`, `connections`, `channels` — each documented below. |
-| `step` | Present in **both** modes. In a durable run it is the live engine step (see Durable functions). In a synchronous invocation it is a passthrough: `step.do` runs its body, `sleep`/`sleepUntil` resolve at once, and `waitForEvent` throws `STEP_NOT_AVAILABLE` — so a durable-authored body can be exercised synchronously. |
+| `step` | Present in **both** modes. In a task run it is the live engine step (see Task functions). In a request invocation it is a passthrough: `step.do` runs its body, `sleep`/`sleepUntil` resolve at once, and `waitForEvent` throws `STEP_NOT_AVAILABLE` — so a task-authored body can be exercised as a request. |
 
 - The return value is JSON-serialized as the envelope's `output` and validated against `outputSchema`. A throw settles the invocation with `status: "failed"`, `errorCode: "FUNCTION_THREW"` and the thrown message.
 - `defineFunction` is typing sugar over the same contract: `export default async function (input, ctx, step) {}` is equivalent.
@@ -77,7 +86,7 @@ export default defineFunction(async (input: { name: string }, ctx, step) => {
 | Database-change fire | `{ kind: "database", databaseId, databaseType }` — the changes ride in `input` | `null` |
 | `workflow.call` from a parent workflow | `{ kind: "workflow", workflowKey, runId, stepId }` — the parent's key, run and step (see Migrating a workflow tree to functions) | The member who started the parent run, or `null` |
 
-`ctx.user` is typed `FunctionUser | null`: a function that a trigger can fire reads it as `ctx.user?.userId`. Whichever door the invocation came through, the code runs with the same authority — the app's (see Execution identity). The caller is a **name** the code may use for attribution and scoping; it is not a second principal.
+`ctx.trigger` is typed as that union (`FunctionTrigger`), narrowed on `kind`, with every arm's fields typed — the declaration is held identical to what the fire paths build. `ctx.user` is typed `FunctionUser | null`: a function that a trigger can fire reads it as `ctx.user?.userId`. Whichever door the invocation came through, the code runs with the same authority — the app's (see Execution identity). The caller is a **name** the code may use for attribution and scoping; it is not a second principal.
 
 ## Pushing
 
@@ -102,12 +111,12 @@ Any signed-in member may call it, subject to the function's `access` gate. Every
 | Field | Meaning |
 |---|---|
 | `rootInput` | The value the handler receives as `input`. |
-| `contextDocId` | A document the invocation is about. On a durable start it defaults to the caller's root document and is required when there is none. |
+| `contextDocId` | A document the invocation is about. On a task start it defaults to the caller's root document and is required when there is none. |
 | `meta` | Caller metadata, at most 1 KB encoded. |
-| `timeoutMs` | Wall-clock budget. Default 5 000 ms; clamps silently to the 30 000 ms ceiling. Ignored on a durable start. |
-| `runKey` | Durable only — idempotency key (see Durable functions). On the synchronous path it is validated and otherwise ignored, since there is no run row to deduplicate against. |
+| `timeoutMs` | Wall-clock budget. Default 5 000 ms; clamps silently to the 30 000 ms ceiling. Ignored on a task start. |
+| `runKey` | Task only — idempotency key (see Task functions). On the request path it is validated and otherwise ignored, since there is no run row to deduplicate against. |
 
-**The synchronous envelope** — always HTTP `200`, because the call reached the function and the function has an answer:
+**The request envelope** — always HTTP `200`, because the call reached the function and the function has an answer:
 
 ```json
 { "status": "completed", "output": { "message": "hello Ada" } }
@@ -134,16 +143,16 @@ Read it when you need to tell what the platform resolved from what you declared:
 | `400` | `INVALID_META` | `meta` over 1 KB encoded. |
 | `400` | `INVALID_RUN_KEY` | A `runKey` carrying a reserved character sequence. |
 | `400` | — | `rootInput` failed `inputSchema`; `error` is `Input schema validation failed` and `details` lists the violations. |
-| `400` | `CONTEXT_DOC_REQUIRED` | A durable start with no `contextDocId` from a caller who has no root document. |
+| `400` | `CONTEXT_DOC_REQUIRED` | A task start with no `contextDocId` from a caller who has no root document. |
 | `403` | `FUNCTION_ACCESS_DENIED` | The `access` gate denied the caller. |
 | `403` | `FUNCTION_DISABLED` | The function is disabled — seen only by callers the gate admits. |
 | `404` | `FUNCTION_NOT_FOUND` | Unknown key, an archived function, or a hard delete in progress. |
 | `409` | `FUNCTION_NOT_PUSHED` | A function with no pushed code. |
-| `409` | `FUNCTION_DELETE_IN_PROGRESS` | A durable start that raced a hard delete. |
+| `409` | `FUNCTION_DELETE_IN_PROGRESS` | A task start that raced a hard delete. |
 | `429` | `FUNCTION_RATE_LIMITED` | Past the per-function rate ceiling; `Retry-After` is set. |
 | `503` | `FUNCTION_RATE_UNAVAILABLE` | The rate limiter could not be consulted; retryable. The platform refuses rather than run unmetered. |
 
-From the client, `client.functions.invoke` returns the envelope typed by its `TOutput` parameter; `input` travels as `rootInput`:
+From the client, `client.functions.invoke` returns the envelope typed by its output generic; `input` travels as `rootInput`:
 
 ```typescript
   const result = await client.functions.invoke<{ message: string }>("greet", {
@@ -159,7 +168,10 @@ From the client, `client.functions.invoke` returns the envelope typed by its `TO
   }
 ```
 
-`functions.invoke` on a durable function — and `functions.start` on a synchronous one — throws `FUNCTION_MODE_MISMATCH` before you are handed a shape the method's types do not describe. The server decides the mode from the pushed config.
+`functions.invoke` on a task function — and `functions.start` on a request function — throws `FUNCTION_MODE_MISMATCH` ("is a task function" / "is a request function") before you are handed a shape the method's types do not describe. The server decides the mode from the pushed config.
+
+The output type rides on `invoke`'s `TOutput` parameter (`FunctionInvokeResult<TOutput>`).
+
 
 ### The access gate
 
@@ -294,7 +306,7 @@ export default defineFunction(async (input: { databaseId: string }, ctx) => {
     atomic: true,
   });
 
-  return { open: open.data.length, total };
+  return { open: open.items.length, total };
 });
 ```
 
@@ -304,15 +316,48 @@ export default defineFunction(async (input: { databaseId: string }, ctx) => {
 | `ctx.db(id, type)` | `databaseId`, `databaseType`, `batch` (spans models — each item names its own) |
 | `ctx.api.databases.records.*` | The untyped form of the same five operations, plus the rest of the records surface (`get`, `delete`, `find`, `listSchemas`, …), as the app |
 
-Filters and query options are ordinary objects; `query` answers `{ data, hasMore?, nextCursor? }` — see [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for the cursor parameter. `include` works as it does over REST.
+Filters and query options are ordinary objects — see [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for the cursor parameter. `include` works as it does over REST.
+
+**One paged envelope.** Every paged read the SDK exposes answers `{ items, hasMore, nextCursor? }` — the database handle, the document handle, `ctx.users.list`, and the raw `ctx.api.databases.records.query`, which adds a `prevCursor` and is the only surface that has one. Shared paging code is therefore written once:
+
+```ts
+const drain = async (page) => {
+  const rows = [];
+  while (true) {
+    rows.push(...page.items);
+    if (!page.hasMore) return rows;
+    page = await next(page.nextCursor);
+  }
+};
+```
+
+*Migration.* The database handle used to answer `{ data, … }`. A function reading `.data` off `ctx.db(...).model(...).query()` or off `ctx.api.databases.records.query()` moves to `.items`; the generated declarations make the old key a compile error rather than an `undefined` that pages to nothing. The REST route's own response is unchanged and still carries `data`, so nothing outside a function moves.
 
 **Documents page and narrow the same way.** `ctx.api.documents.records.query({ documentId, model, filter, limit, cursor })` and `documents.records.count({ documentId, model, filter })` take the same `filter` object a database model does — the client JSON-encodes it into the query string; a malformed one answers `400` — and answer the `{ items, hasMore, nextCursor }` page the route and the CLI do, so a function that walks a large model pages it rather than reading it whole.
 
-**Codegen.** `config push` writes the type declarations behind `ctx.db` into the tree's `functions/` directory beside your sources — the database-type declaration, the `primitive-functions` declaration and a `functions/tsconfig.json` that loads them. None is part of what gets pushed. `config diff` reports when a schema change has left them stale; the next push refreshes them. The tsconfig is yours to edit — push keeps only the `primitive-functions` path mapping and the generated declarations in the program, and restores those if they go missing.
+**Codegen.** `config push` writes the generated files into the tree's `functions/` directory beside your sources, and none is part of what gets pushed:
+
+| File | What it carries |
+|---|---|
+| `functions/primitive-db-types.d.ts` | The database types behind `ctx.db`, model by model |
+| `functions/primitive-functions.d.ts` | The `primitive-functions` module's own types |
+| `functions/primitive-function-types.d.ts` | `<Key>Input` / `<Key>Output` for every function, from its `inputSchema` and `outputSchema`, and the `FunctionSchemas` augmentation that types the keyed `defineFunction("<key>", handler)` |
+| `functions/generated/<key>.generated.ts` | A typed **client** invoker per function (imports `js-bao-wss-client`): a request function's has exactly `invoke`, a task function's exactly `start`, `getStatus`, `waitFor`, `terminate` — the mode is fixed at generation time, so the wrong verb is a compile error. `input` is required iff the schema rejects `{}`; the task `waitFor` output is `<Key>Output`. `-o <dir>` moves them |
+| `functions/tsconfig.json` | Scaffolded once, then yours; push keeps the `primitive-functions` path mapping, the declarations in the program and the `generated/**` exclusion, and restores those if they go missing |
+
+```ts
+import { greet } from "../primitive/dev/functions/generated/greet.generated";
+const answered = await greet(client).invoke({ input: { name: "Ada" } }); // output typed GreetOutput
+```
+
+`config diff` reports when a schema change has left any of them stale; the next push refreshes them.
 
 ```bash
 primitive functions codegen --check   # CI: non-zero when the generated files are stale; no --check regenerates
+primitive functions codegen -o src/generated/functions   # the invokers, somewhere your client code imports from
 ```
+
+**Push typechecks what it ships.** The same `config push` that writes those declarations compiles your sources against them — the tree's own `functions/tsconfig.json`, so it is the program your editor loads — and refuses the function with the compiler's own diagnostics when they do not hold. esbuild erases types, so a bundle that builds proves nothing: a handler that dereferences `ctx.user` without checking it — written before that field became nullable — builds cleanly and throws on the request path. The refusal is per function (the rest of the tree still lands), `--dry-run` reports the same diagnostics without shipping, and reproducing one by hand is `tsc -p functions/tsconfig.json --noEmit`. `primitive config push --no-typecheck` skips it. A CI job that runs `primitive config push --dry-run` therefore fails on broken function code with no extra wiring.
 
 ### Registered queries
 
@@ -331,8 +376,15 @@ const myOrders = defineQuery("myOrders", {
   cache: { ttlMs: 30_000 },
   run: async (db, params) => {
     const answer = await db.model("Order").query({ limit: params.limit });
-    return (answer.data ?? []).filter((row) => row.owner === params.owner);
+    return answer.items.filter((row) => row.owner === params.owner);
   },
+});
+
+// A list parameter — the shape behind every $in filter; params.ids is string[] in run.
+const ordersByIds = defineQuery("ordersByIds", {
+  models: ["Order"],
+  params: { ids: { type: "array", items: { type: "string" } } },
+  run: (db, params) => db.model("Order").query({ filter: { id: { $in: params.ids } } }),
 });
 
 const addOrder = defineMutation("addOrder", {
@@ -349,18 +401,36 @@ export default async function (input: { databaseId: string }, ctx) {
 }
 ```
 
+`run`'s `params` is **typed from the declaration** (a `const` type parameter): a scalar as its scalar, `$caller` as a string, an array as `T[]`, an `optional` parameter as an optional key; an undeclared name inside `run` is a compile error, and an explicit `TParams` generic still overrides.
+
 | `params.<name>` key | Meaning |
 |---|---|
-| `type` | `"string"`, `"number"`, `"boolean"`, `"any"` (default) or `"$caller"` — validated and coerced |
-| `caller: true` | The `$caller` binding: the platform injects the invoking user; a call that supplies it is refused by name |
+| `type` | `"string"`, `"number"`, `"boolean"`, `"any"` (default), `"$caller"`, or `"array"` — validated and coerced |
+| `items` | For `type: "array"`: `{ type: "string" \| "number" \| "boolean" \| "any" }`, each element coerced and validated like a scalar; absent accepts any array |
+| `caller: true` | The `$caller` binding: the platform injects the invoking user; a call that supplies it is refused by name. Not combinable with `array` |
 | `optional` | May be omitted |
-| `default` | Applied when omitted |
+| `default` | Applied when omitted — **coerced to the declared type at registration** (`"25"` → `25`, `["1"]` → `[1]` for numeric items); a default that cannot be coerced is refused at registration, which `config push` reports |
 
 - **Register at module scope.** A registration inside the handler works for direct calls but is invisible to `config push`, so it is absent from the manifest.
 - Names are unique; registering one twice throws. An undeclared parameter is refused, not dropped.
 - A `$caller` query throws in an invocation with no initiating user — a webhook, cron or database-change fire; use a query with an explicit parameter there.
 - `$caller` is a convenience for the code, not a platform guarantee: the query body is what filters by it. An unfiltered `query()` inside a `$caller` query still reads every row.
 - **Caching is off unless the run is verified.** `cache.ttlMs` is honored only when every model the body touched was declared in `models` and nothing was written. TTL is capped at one minute (`MAX_QUERY_CACHE_TTL_MS`). A cache entry belongs to one query, one `databaseId` and resolved type, and one parameter set after injection — two databases of the same type never share an answer, and two callers never see each other's rows. A write through the handle drops the entries that read the written model. The cache lives inside one warm sandbox instance: it bounds staleness, it does not replicate. A mutation is never cached.
+
+### The typed document handle
+
+`ctx.doc(documentId).model("<Model>")` is `ctx.db`'s shape for a document's record models: a thin binding over `ctx.api.documents.records.*` that states the document and the model once and answers the routes' own shapes.
+
+```ts
+const orders = ctx.doc(input.documentId).model("Order");
+const page = await orders.query({ filter: { status: "open" }, limit: 50, cursor: undefined }); // { items, hasMore, nextCursor? }
+const { count } = await orders.count({ filter: { status: "closed" } });               // { count }
+const { record } = await orders.save({ id: "o-1", data: { label: "x" } });          // { record }
+await orders.patch("o-1", { data: { label: "y" } });                                  // { record }
+const { deleted } = await orders.delete("o-1");                                       // { deleted }
+```
+
+The rows are typed from the project's `models/models.toml` (fallback: the web client's `src/models/models.toml`), rendered by `config push` into `functions/primitive-document-types.d.ts`: an undeclared model is a compile error, a declared field has its type, and a project with no schema file gets the open form. It confers nothing — the same authority as every other call — and another app's document id is the uniform not-found.
 
 ## Calling an integration
 
@@ -445,7 +515,7 @@ return { delivered: result.connections, truncated: result.truncated };
 - **Payloads are capped at 64 KiB** serialized (`FUNCTION_SEND_PAYLOAD_TOO_LARGE`; nothing delivered).
 - `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`).
 
-On the client, subscribe to the `directMessage` event:
+On the client, listen for the `directMessage` event:
 
 ```typescript
   client.on("directMessage", (event) => {
@@ -453,6 +523,7 @@ On the client, subscribe to the `directMessage` event:
     console.log(event.functionKey, event.payload, event.sentAt);
   });
 ```
+
 
 ## Channels
 
@@ -516,10 +587,13 @@ On the client, present the grant on the socket it already has:
   subscription.unsubscribe();
 ```
 
-- `subscribeToChannel(channel, grant)` resolves with `{ channel, expiresAt, unsubscribe }` on the server's ack for that channel, and rejects on the uniform refusal. Calling it again with a fresh grant renews the membership; two calls for the same channel run one after the other, so a renewal is answered on its own merits.
-- `unsubscribeFromChannel(channel)` — or `subscription.unsubscribe()` — is idempotent and safe on a closed socket; a subscribe still in flight for that channel is cancelled and its promise rejects.
-- `channelMessage` fires for every held membership: `{ channel, payload, functionKey, sentAt }`, a live frame with no durable record — a client that was offline never receives it later.
-- `channelSubscribeFailed` (`{ channel, message }`) announces a refusal nothing was waiting on — the reconnect case, where a grant that expired while the socket was down is refused: invoke the authorizing function again and re-subscribe. A refusal that answers a `subscribeToChannel` call rejects that promise instead, so a failure is never announced twice.
+- `subscribeToChannel(channel, grant)` resolves with `channel`, `expiresAt` and an `unsubscribe` closure on the server's ack for that channel, and fails on the uniform refusal. Calling it again with a fresh grant renews the membership; two calls for the same channel run one after the other, so a renewal is answered on its own merits.
+- `unsubscribeFromChannel(channel)` — or the subscription's `unsubscribe` — is idempotent and safe on a closed socket; a subscribe still in flight for that channel is cancelled and its call fails.
+- `channelMessage` fires for every held membership, carrying `channel`, `payload`, `functionKey` and `sentAt` — a live frame with no durable record, so a client that was offline never receives it later.
+- `channelSubscribeFailed` (`channel`, `message`) announces a refusal nothing was waiting on — the reconnect case, where a grant that expired while the socket was down is refused: invoke the authorizing function again and re-subscribe. A refusal that answers a `subscribeToChannel` call surfaces from that call instead, so a failure is never announced twice.
+
+The join fails by rejecting the `subscribeToChannel` promise; `channelMessage` / `channelSubscribeFailed` are `client.on(...)` events.
+
 
 ## Sending email
 
@@ -555,7 +629,7 @@ import { pMap, ulid, stepPolicy } from "primitive-functions";
 // spends the sandbox's whole subrequest budget in one line.
 const results = await pMap(rows, (row) => handle(row), { concurrency: 4 });
 
-// Mint ids INSIDE step.do in a durable run (see Step discipline).
+// Mint ids INSIDE step.do in a task run (see Step discipline).
 const id = await step.do("mint-id", async () => ulid());
 
 // The platform's timeout/retry policy for the non-idempotent families:
@@ -568,7 +642,7 @@ await step.do("send-receipt", stepPolicy.email, () =>
 
 `stepPolicy.<family>` is `{ retries: { limit, delay, backoff }, timeout }` — a default you apply, never one the engine forces on your own `step.do` calls. `PMAP_DEFAULT_CONCURRENCY` (8) is the bound `pMap` applies when none is given.
 
-## Durable functions
+## Task functions
 
 ```toml
 # functions/order-sync.toml
@@ -576,7 +650,7 @@ await step.do("send-receipt", stepPolicy.email, () =>
 key = "order-sync"
 entry = "functions/order-sync/index.ts"
 access = "true"
-durable = true
+mode = "task"
 ```
 
 ```ts
@@ -610,15 +684,15 @@ The same route, `POST /app/{appId}/api/functions/{key}`, answers `201` with a ru
 { "runId": "01J…", "runKey": "01J…", "instanceId": "app-doc-01J…", "status": "running" }
 ```
 
-- `runKey` makes the start idempotent per `(caller, contextDocId, runKey)`: a repeat answers the run that already exists with `existing: true`, never a second run. It defaults to the run id.
-- `timeoutMs` is accepted and ignored: the durable engine owns how long a run may take, and a per-request budget cannot hold across a `step.sleep`.
+- `runKey` makes the start idempotent per `(caller, contextDocId, runKey)`: a repeat answers the run that already exists with `existing: true`, never a second run — and that holds for a run that FAILED, so retrying takes a new key with the same input, not the key the failure holds. It defaults to the run id.
+- `timeoutMs` is accepted and ignored: the durable engine owns how long a task run may take, and a per-request budget cannot hold across a `step.sleep`.
 - Poll the run id at `GET /app/{appId}/api/workflows/runs/{runId}/status`; `terminate` takes the function key and the run key.
 - A run broadcasts nothing over the WebSocket. Poll.
-- Only a caller over HTTP can start a durable run. A trigger fire cannot (a triggered function is synchronous), and a function cannot start another function from inside.
+- A caller over HTTP starts a task run, and so does `ctx.functions.start` from inside any running function — a request function, a task function's slice, or a webhook- or cron-fired invocation. The callee must be a task function (a request callee answers `FUNCTION_MODE_MISMATCH`; import its module instead), its `access` gate is NOT consulted (yours was the authorization), every run in the tree is keyed by the original external initiator, and nesting stops at 4 levels with `FUNCTION_NEST_DEPTH_EXCEEDED`.
 
 ### Reporting back
 
-A durable run has three ways to deliver its result, and they compose:
+A task run has three ways to deliver its result, and they compose:
 
 | Channel | How | Survives the client being away? |
 |---|---|---|
@@ -646,7 +720,8 @@ A durable run has three ways to deliver its result, and they compose:
   await client.functions.terminate({ functionKey: "order-sync", runKey: run.runKey });
 ```
 
-`functions.waitFor` polls with a backing-off interval and throws `WORKFLOW_WAIT_TIMEOUT` past `timeoutMs` (default 15 minutes; a non-positive or non-finite value waits unbounded).
+`functions.waitFor` polls with a backing-off interval (0.4 s doubling to 5 s) and throws a wait-timeout past its budget (default 15 minutes; a non-positive value waits unbounded). `getStatus` and `terminate` take the run id and the function key respectively; a repeated `runKey` on `start` replays the run that already exists.
+
 
 ### Step discipline
 
@@ -655,29 +730,29 @@ The engine re-executes the handler from the top on every resume and replays each
 - **Put every side effect inside `step.do`.** A charge, an email or a write outside a step runs again on every resume; inside one it runs exactly once.
 - **Do not branch on anything nondeterministic between steps.** `Date.now()`, `Math.random()`, `ulid()` or a fresh read at the top level can take a different path after a resume, and the engine then looks for steps that are not there. Read such values inside a step so the value is stored with it.
 - **Your code is pinned; the platform's is not.** A run is pinned to the content hash of the version that started it — pushing mid-run does not change what a running run executes, and new runs get the new code. The `primitive-functions` SDK and the runtime around your handler are whatever is deployed at resume time; treat the SDK as a stable interface, not a frozen artifact.
-- A durable function cannot declare triggers — push refuses `durable = true` beside a trigger block.
+- **A task function may carry cron entries**, and each fire starts a run. A webhook or a database watch requires request mode: both are waiting inside a request for an answer, so they hand the work over with `ctx.functions.start`.
 
-### Budgets in a durable run
+### Budgets in a task run
 
 The ceilings (see Ceilings) apply **per engine invocation, not per run**. A run is a series of *slices*: the engine runs the handler from the top until it returns or reaches a `sleep`, `sleepUntil` or `waitForEvent` that has not completed, then hibernates; the next wake is a new slice, with completed steps replayed from storage.
 
-| Ceiling | In a durable run |
+| Ceiling | In a task run |
 |---|---|
 | Wall clock | Per slice: every engine invocation mints a fresh credential with a 30 000 ms absolute deadline, so a stretch of code between two sleeps must finish inside it. The request's `timeoutMs` is ignored; the run as a whole has no wall-clock limit. |
 | `cpuMs` (5 000 ms) | Per slice. |
 | `subRequests` (64) | Per slice. Replayed steps spend nothing — their bodies do not run — but any platform call *outside* a step re-spends on every wake. |
-| `ratePerMinute` (1 200) | Per **start**. A durable start reserves a slot and returns it if the start is refused; resumes take none. |
+| `ratePerMinute` (1 200) | Per **start**. A task start reserves a slot and returns it if the start is refused; resumes take none. |
 | Output (1 MiB) and `outputSchema` | Once, on the final return value, at settlement. |
 
-Consequences: budget each stretch between sleeps as if it were a synchronous function; several `step.do` calls with no sleep between them share one slice's budget, so a long job is chunked by sleeps, not by steps; and keep the code outside steps minimal, since it re-executes on every wake.
+Consequences: budget each stretch between sleeps as if it were a request function; several `step.do` calls with no sleep between them share one slice's budget, so a long job is chunked by sleeps, not by steps; and keep the code outside steps minimal, since it re-executes on every wake.
 
 ### Deleting a function with live runs
 
-A hard delete destroys the stored bundles a sleeping run reloads when it wakes, so it is refused — including through `primitive config push --prune` — while any run has not settled; the refusal names the live runs. Wait for them or terminate them, then retry. To stop new runs meanwhile, **archive** the function: an archived function keeps its bundles, so an in-flight run finishes on the version it pinned. While a hard delete is running, an invoke answers `404` and a durable start already in flight answers `409 FUNCTION_DELETE_IN_PROGRESS`.
+A hard delete destroys the stored bundles a sleeping run reloads when it wakes, so it is refused — including through `primitive config push --prune` — while any run has not settled; the refusal names the live runs. Wait for them or terminate them, then retry. To stop new runs meanwhile, **archive** the function: an archived function keeps its bundles, so an in-flight run finishes on the version it pinned. While a hard delete is running, an invoke answers `404` and a task start already in flight answers `409 FUNCTION_DELETE_IN_PROGRESS`.
 
 ## Triggers
 
-A function's config block can declare one inbound **webhook**, up to ten **cron** schedules and up to five **database-change** watches. The platform creates and operates whatever they need. A triggered function is synchronous: push refuses a trigger block beside `durable = true`, so a fire runs inside one bounded invocation and cannot start a durable run.
+A function's config block can declare one inbound **webhook**, up to ten **cron** schedules and up to five **database-change** watches. The platform creates and operates whatever they need. Which modes a kind takes is per kind: a **cron** entry runs on a request or task function, and on a task function each fire starts a run; a **webhook** and a **database-change** watch require request mode, because the delivery or the write is waiting for the function's answer inside the request — those hand slow work to a task function with `ctx.functions.start`.
 
 ```toml
 # functions/stripe-events.toml
@@ -709,9 +784,9 @@ export default async function (input, ctx) {
 }
 ```
 
-**Webhook.** The receiver is `POST /app/{appId}/webhook/{functionKey}`. Verification, replay protection and a delivery log are built in. Accepted keys: `verificationScheme`, `signingSecret`, `toleranceSeconds`, `deduplicationEnabled`, `deduplicationWindowMs`, `maxBodyBytes`, `secretGracePeriodMs`, and a `[function.triggers.webhook.verification]` table for scheme-specific settings (a Discord public key, a JWT's JWKS, …). A verified delivery runs the function and answers `200 {"received": true}` **whatever the function did** — the run row records the outcome. A delivery that cannot run right now (function disabled, rate ceiling hit) answers `202` with the reason in the delivery log and no dedup key stored, so the provider's redelivery runs once the condition clears. A rotation via `primitive webhooks rotate-secret <webhook-id>` survives later pushes: a push touches the signing secret only when the TOML value itself changed.
+**Webhook.** The receiver is `POST /app/{appId}/webhook/{functionKey}`. Verification, replay protection and a delivery log are built in. Accepted keys: `verificationScheme`, `signingSecret`, `toleranceSeconds`, `deduplicationEnabled`, `deduplicationWindowMs`, `maxBodyBytes`, `secretGracePeriodMs`, and a `[function.triggers.webhook.verification]` table for scheme-specific settings (a Discord public key, a JWT's JWKS, …). A verified delivery runs the function and answers `200 {"received": true}` **whatever the function did** — the run row records the outcome. A delivery that cannot run right now (function disabled, rate ceiling hit) answers `202` with the reason in the delivery log and no dedup key stored, so the provider's redelivery runs once the condition clears. A rotation via `primitive webhooks rotate-secret <webhook-id>` survives later pushes: a push touches the signing secret only when the TOML value itself changed. Push refuses `mode = "task"` beside a webhook block: for work that outlasts the delivery, verify and acknowledge in the request function and `ctx.functions.start` a task function, keying the start on the provider's event id or a body id so a redelivery replays rather than starting a second run.
 
-**Cron.** With `overlapPolicy = "skip"`, a fire that arrives while the previous run is still going is counted as a skip.
+**Cron.** Runs on a request or a task function; on a task function each fire starts a run (`ctx.user` is null, `ctx.trigger.kind` is `"cron"`, and the run polls and terminates on the ordinary run routes). With `overlapPolicy = "skip"`, a fire that arrives while the previous run is still going is counted as a skip; for a task run that question goes to the **engine**, so a sleeping run counts as live, and so does one the platform cannot be asked about. `overlapPolicy = "allow"` starts one run per fire. Prefer a request function calling `ctx.functions.start` when you need a run key or an input computed at fire time.
 
 **Database-change.** A `[[function.triggers.database]]` block watches a database **type**; every write request that commits something to any database of that type runs the function once, with the committed changes:
 
@@ -721,11 +796,17 @@ type = "orders"                        # a database type the app already has; up
 ```
 
 ```ts
+// Watches `orders`, writes `shipments` — a type it does NOT watch (see Loops).
+const SHIPMENTS_DB = "…";
 export default async function (input, ctx) {
   if (ctx.trigger.kind === "database") {
     // ctx.trigger.databaseId / ctx.trigger.databaseType say which database
+    const shipments = ctx.db(SHIPMENTS_DB, "shipments").model("Shipment");
     for (const change of input.changes) {
       // change.op, change.modelName, change.id, change.data, change.previousData
+      if (change.op === "save" && change.previousData === null) {
+        await shipments.save({ data: { orderId: change.id } });
+      }
       await ctx.channels.publish(`orders:${change.id}`, { op: change.op });
     }
   }
@@ -733,16 +814,20 @@ export default async function (input, ctx) {
 }
 ```
 
-`input` is `{ databaseId, databaseType, changes, totalChanges, truncated }`. What differs from the other two doors:
+`input` is `{ databaseId, databaseType, changes, totalChanges, truncated }`. The delivery contract:
 
-- **Once per write request, not once per row.** A batch of fifty saves is one fire carrying fifty changes. `changes` is capped at 50 in write order; `totalChanges` and `truncated` describe the rest.
-- **Only what committed.** A database batch is partial-success inside an HTTP `200`; only the operations that landed reach `changes`.
-- **The rows are in the payload.** Every change carries `op`, `modelName`, `id`, `data` and the pre-image of the write in `previousData` (`null` when there was no row before) — read for you whether or not anyone is subscribed to the database.
-- **No run row.** A fire leaves an invocation metric and, on failure, an application error event — nothing in `primitive functions runs`. Publish, write or call out if you need a record of what it did.
-- **Best-effort, off the response path.** The write's caller never waits for the function and never sees its outcome; a fire that fails, times out or is refused by the rate ceiling leaves the write's response as it was. No retry, no queue.
-- **Sync mode only, with no caller.** `durable = true` and a database trigger are refused together at push; `ctx.user` is `null` inside the fire.
+- **After the write's answer, from committed operations only.** Dispatched off the response path once the write's answer is decided; a database batch is partial-success inside an HTTP `200`, and only the operations that landed reach `changes`. The write's caller never waits for the function and never sees its outcome.
+- **Once per write request, not once per row.** A batch of fifty saves is one fire carrying fifty changes, in the order the database committed them; `changes` is capped at 50 and `totalChanges`/`truncated` describe the rest.
+- **No ordering promise across write requests.** Fires from separate write requests may run concurrently or arrive out of order; a function that needs a row's current state reads it.
+- **No retry, no queue.** A fire that fails, times out or is refused by the rate ceiling leaves the write's response as it was and is not retried.
+- **Bounded fanout, as enforced.** Up to 25 functions may watch one type — `config push` refuses the 26th watcher of a type — and a fire reaches every watcher the platform accepted.
+- **The rows are in the payload.** Every change carries `op`, `modelName`, `id`, `data` and the pre-image in `previousData` (`null` when there was no row before), whether or not anyone is subscribed to the database.
+- **No run row.** A fire leaves an invocation metric and, on failure, an application error event — nothing in `primitive functions runs`.
+- **Request mode only, with no caller.** `mode = "task"` and a database trigger are refused together at push; `ctx.user` is `null` inside the fire. Hand slow work to a task function with `ctx.functions.start`.
 
-A type may be watched by up to 25 functions. A push naming a type the app does not have is refused by name, and a write to a database with no `databaseType` fires nothing.
+**Loops.** A fire's own writes fire triggers too. Every database-change fire carries an **origin chain** — the ids of the functions fired so far in its causal chain — and the fired function's writes carry it to the fires they plan (through `ctx.functions.start` as well). The planner refuses a target already in the chain (`LOOP_DETECTED`) and any fire past a depth of 4 (`DEPTH_EXCEEDED`): a function that writes to the type it watches fires itself once and stops, A-writes-B-writes-A stops at the first repeat, and a five-watcher chain fires four. HTTP, webhook, cron and `workflow.call` invocations are roots with an empty chain, so an HTTP-invoked function that writes the type it watches is fired once by that write and that fire's own write is refused. A refused fire is **not an error**: the write commits and answers as before, no application error event is written, and the function's logs show nothing for it. It is **counted** as a `function.invoke` event with `status: "refused"` and the reason, attributed to the user whose write started the chain, and **logged** as one `server-function db-change trigger … outcome=refused` line per function, reason and minute carrying the chain and its depth. Write to a type you do not watch, or make the handler idempotent on `change.data` so the one re-fire is harmless.
+
+A push naming a type the app does not have is refused by name, and a write to a database with no `databaseType` fires nothing.
 
 **Every webhook or cron fire writes a run row** — the only record it leaves, since nobody is waiting for an answer (a database-change fire deliberately writes none; see above). A fire has no caller: `ctx.user` is `null`, and the code acts as the app exactly as it does on an HTTP invoke (see Execution identity).
 
@@ -755,7 +840,7 @@ primitive functions get <function-id>       # receiver URL, schedules, watched t
 
 ## Ceilings
 
-`[function.limits]` may **lower** any ceiling and never raise one; a config asking for more gets the platform value. One caveat: `cpuMs` is enforced — past its budget the invocation is stopped and answers `failed` — but the runtime adds an allowance of about **two seconds** before it stops anything, so `cpuMs = 50` and `cpuMs = 200` buy the same thing and neither stops code in milliseconds. To bound a function tightly, use `timeoutMs` on the request: that is wall clock and is held exactly. The table describes one synchronous invocation; a durable run is bounded per slice (see Budgets in a durable run).
+`[function.limits]` may **lower** any ceiling and never raise one; a config asking for more gets the platform value. One caveat: `cpuMs` is enforced — past its budget the invocation is stopped and answers `failed` — but the runtime adds an allowance of about **two seconds** before it stops anything, so `cpuMs = 50` and `cpuMs = 200` buy the same thing and neither stops code in milliseconds. To bound a function tightly, use `timeoutMs` on the request: that is wall clock and is held exactly. The table describes one request invocation; a task run is bounded per slice (see Budgets in a task run).
 
 | Limit | Platform value | Key |
 |---|---|---|
@@ -774,18 +859,47 @@ primitive functions get <function-id>       # receiver URL, schedules, watched t
 
 ## Recording
 
-Every HTTP invocation writes one `function.invoke` analytics event attributed to the **caller** — never the app, although the app's authority is what the code ran with — carrying the function key, the version that ran, the terminal status and the duration. Trigger fires are recorded as run rows instead.
+Every HTTP invocation writes one `function.invoke` analytics event attributed to the **caller** — never the app, although the app's authority is what the code ran with — carrying the function key, the version that ran, the terminal status and the duration. Trigger fires are recorded as run rows instead. The event is a COUNT: it answers "how often", never "why" — for why, read the invocation records below. A failed invocation's event reports `outcome: "error"` through the shared inspection contract, so failures are countable.
+
+## Debugging a failing function
+
+Every invocation the platform dispatched toward the sandbox leaves a record, and `console.log` is where you read it back:
+
+```bash
+primitive functions logs <function-id>            # newest first
+primitive functions logs <function-id> --json     # the shared inspection items
+primitive functions logs <function-id> --follow   # tail as invocations happen
+primitive functions logs <function-id> --limit 50 --cursor <cursor>
+```
+
+A record carries what the invocation printed (`console.log`/`info`/`debug`/`trace` as stdout, `warn`/`error` as stderr), the thrown error with its code and a bounded stack, and the correlation keys — app, function, config version, the run id for a trigger fire or task run, and what triggered it. **Retention is seven days.**
+
+| | |
+|---|---|
+| Doors that write one | HTTP invoke, webhook fire, cron fire, database-change fire, `workflow.call` from a DSL workflow, a task run's settling slice |
+| Also written | A TIMED-OUT invocation, carrying what the function printed **before** it hung |
+| Never written | A gate refusal — 403 (access), 404 (unknown key), 409 (not pushed), 400 (input schema), 429 (rate). Answered in the HTTP response, and debugged from there |
+| Who can read | Owner and admin, on the CLI, the admin API and `ctx.api.functions.logs({ functionKey, limit })` |
+
+**Secrets are redacted, best-effort.** A value `ctx.secret()` returned is replaced with `[REDACTED:<NAME>]` in the captured lines, in the lines forwarded to the live console, and in the error message and stack — on both sides of the sandbox boundary. It is best-effort by nature: a secret your code transformed before printing is not detectable. Do not print credentials.
+
+**Task functions have a narrower guarantee.** A task run's record is written when the slice that SETTLES it finishes. A `step.do` body that ran in an earlier slice does not re-execute on replay, so what it printed before a `step.sleep` is not in the record — the platform cannot observe a step boundary from outside the sandbox, and a slice that suspends at a sleep never settles. Print what you need in the slice that settles, or write progress as data.
+
+Three markers: `truncated` says a line or the channel hit its cap (2 KiB per line, 16 KiB and 256 entries per invocation) — the invocation is never failed for logging too much; `logsUnavailable` says the platform could not retrieve the buffer at all (an evicted isolate, or a dispatch refused before any code ran), which is not the same as a function that printed nothing; `contentSuppressed` says the platform could not load EVERY secret the version declares at write time (the store did not answer, or a declared `secret:<NAME>` has no value in this environment), so it kept the correlation and the status and dropped the console and the error fields rather than publish them unredacted — an unprovisioned declared secret suppresses every record of that version, so provision it or drop the declaration.
+
+Records outlive the function: archiving does not remove them, and both read surfaces keep answering for an archived function until the seven days are up.
 
 ## Operating
 
 ```bash
 primitive functions list                 # keys, status; --status active|inactive|archived
 primitive functions get <function-id>    # active version, capabilities, manifest, triggers
-primitive functions runs <function-id>   # trigger fires and durable runs, newest first; --limit <n> --cursor <cursor>
+primitive functions runs <function-id>   # trigger fires and task runs, newest first; --limit <n> --cursor <cursor>
+primitive functions logs <function-id>   # what it printed and what it threw; --follow --limit <n> --cursor <cursor>
 primitive functions disable <function-id>
 primitive functions enable <function-id>
 primitive functions archive <function-id>
-primitive functions codegen --check      # --dir <path> to point at another config tree
+primitive functions codegen --check      # the selected environment's tree; --env <name> picks another
 primitive config set function/<key> <path>=<value>
 ```
 

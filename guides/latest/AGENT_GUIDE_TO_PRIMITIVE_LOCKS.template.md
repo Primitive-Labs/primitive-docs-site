@@ -2,6 +2,17 @@
 
 A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code, background jobs, and workflows — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative — they coordinate willing participants, and holding one grants no rights over data. *Who* may take which key is a separate, opt-in question, answered by [Access Control](#access-control) below. The client surface is `client.locks.*`; a workflow uses the `lock.*` steps. Keys are tenant-isolated — the same string in two apps is two independent locks.
 
+## When to Reach for a Lock
+
+A lock is a last resort. Rule out cheaper serialization before acquiring one:
+
+- **Partition the work** so concurrent workers cannot select the same rows — shard a batch by user, resource, or another stable key.
+- **Make writes idempotent** so a retry or an overlapping run is harmless rather than something to serialize against.
+- **Guard the write with a conditional write** instead of locking around it — a `condition` on a mutation step (a field-equality precondition, commonly a `version` field) checked in the same transaction as the write. This is the actual integrity boundary in most "concurrent workers hit the same record" cases: the database, not a held lock, guarantees exactly one writer succeeds. See [Databases — Mutation](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#mutation--write-records).
+- **For scheduled work, use a cron trigger's `overlapPolicy`** instead of locking inside the job body — `"skip"` (the default) already refuses to start a firing while the previous one is still running. A server function's cron trigger carries the same setting: see [Server Functions — Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers), or [Cron triggers](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md#cron-triggers) for a workflow.
+
+Reach for a lock only when none of these fit: a critical section spanning multiple independent writes, or non-database work (an external API call, a multi-step workflow) that must run exclusively. Even then, a held lease is not a correctness guarantee for a long-running critical section — see [Sizing the Lease](#sizing-the-lease): a lease that expires mid-operation lets a second run in.
+
 ## Client SDK Reference
 
 {{#lang ts}}

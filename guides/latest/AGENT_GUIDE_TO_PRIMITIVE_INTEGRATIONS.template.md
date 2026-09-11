@@ -491,7 +491,7 @@ primitive integrations tests runs <id> [--limit 20] [--group <comparison-group>]
 
 ### Sync (TOML <-> server)
 
-Integration configs live at `integrations/<key>.toml`, one file per integration. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`), the `--dir` override, snapshots, pruning, and conflict handling.
+Integration configs live at `integrations/<key>.toml`, one file per integration. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`), how the directory is resolved, snapshots, pruning, and conflict handling.
 
 ## Calling from the Client SDK
 
@@ -563,8 +563,8 @@ Deleting an integration over the API or in the console **archives** it. `primiti
 
 ## Files on Disk (sync mode)
 
-- `config/integrations/<key>.toml` — one file per integration
-- `config/.primitive-sync.json` — sync state (last pull/push hashes)
+- `primitive/<env>/integrations/<key>.toml` — one file per integration
+- `primitive/<env>/.sync-state.json` — sync state (last pull/push hashes), committed with the tree
 
 ## Quick Triage
 

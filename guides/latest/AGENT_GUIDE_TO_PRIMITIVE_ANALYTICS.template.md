@@ -146,7 +146,7 @@ Pass a `context_json` object for per-event debug data. The serialized payload is
 | `browser_version` | `string` | No | Browser version (auto-detected) |
 | `app_version` | `string` | No | Your app's version (or set via `setAppVersionOverride`) |
 | `context_json` | `string \| Record<string, unknown> \| null` | No | Debug context (truncated to 1 KiB) |
-| `user_created_at_epoch_s` | `number` | No | User signup timestamp (epoch seconds) |
+| `user_created_at_epoch_s` | `number` | No | **Deprecated — ignored.** The server records when the user joined the app; any value passed here is dropped before the event is sent. |
 
 ### Don't
 
@@ -171,7 +171,7 @@ window.addEventListener("mousemove", () => {
 {{#lang swift}}
 ### AnalyticsEventInput Fields
 
-`AnalyticsEventInput` carries the same fields as the event row (`action`, `feature`, `route`, `plan`, `tenant_id`, `user_ulid`, `device_type`, `os_name`, `os_version`, `browser_name`, `browser_version`, `app_version`, `context_json`, `user_created_at_epoch_s`). Only `action` is required at the initializer: `user_ulid` is back-filled from the signed-in user (or the unauthenticated-user constant), and `context_json` is a `JSONValue`.
+`AnalyticsEventInput` carries the same fields as the event row (`action`, `feature`, `route`, `plan`, `tenant_id`, `user_ulid`, `device_type`, `os_name`, `os_version`, `browser_name`, `browser_version`, `app_version`, `context_json`). Only `action` is required at the initializer: `user_ulid` is back-filled from the signed-in user (or the unauthenticated-user constant), and `context_json` is a `JSONValue`.
 {{/lang}}
 
 ---
@@ -266,8 +266,17 @@ primitive analytics cohort-retention
 # Top users (default --window-days 30, --limit 10)
 primitive analytics top-users --window-days 7 --limit 20
 
-# Search users (--query is required)
+# Search users (give --query, or a signup filter)
 primitive analytics user-search --query user@example.com
+
+# Who joined the app on a given UTC day, or across a range of up to 90 days
+primitive analytics user-search --signup-day 2026-09-06
+primitive analytics user-search --signup-start-day 2026-09-01 --signup-end-day 2026-09-06
+
+# A busy day holds more matches than one page: keep paging while the answer
+# says it was truncated.
+primitive analytics user-search --signup-day 2026-09-06 --limit 100 --json
+primitive analytics user-search --signup-day 2026-09-06 --limit 100 --offset 100 --json
 
 # Per-user breakdown
 primitive analytics user-detail <user-ulid>
@@ -315,6 +324,8 @@ GET /app/{appId}/api/analytics/cohort-retention
 # Users
 GET /app/{appId}/api/analytics/users/top?windowDays=30&limit=10
 GET /app/{appId}/api/analytics/users/search?q=...&limit=25
+GET /app/{appId}/api/analytics/users/search?signupDay=2026-09-06&limit=100&offset=0
+GET /app/{appId}/api/analytics/users/search?signupStartDay=2026-09-01&signupEndDay=2026-09-06
 GET /app/{appId}/api/analytics/users/{userUlid}/detail
 GET /app/{appId}/api/analytics/users/{userUlid}/snapshot
 
@@ -347,7 +358,7 @@ Every payload also carries `_timing: { total_ms, wae_queries }` — diagnostics 
 | `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }] }` shape |
 | `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages }` |
 | `users.top` — `/users/top` | `{ windowDays, limit, results: [{ userUlid, email, name, firstSeen, firstSeenInWindow, lastSeen, eventCount }] }` |
-| `users.search` — `/users/search` | `{ query, limit, results }` — same row shape as `users.top`, minus `firstSeenInWindow`: it searches the full retained range, so its `firstSeen` is already the all-time value |
+| `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
 | `users.detail` — `/users/{userUlid}/detail` | `{ user: { user_ulid, email, name }, stats: { first_seen, last_active, total_events, days_active }, events_by_action: [{ action, event_count, last_occurred }], events_by_feature: [{ feature, event_count, pct }] }` |
 | `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
 | `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
@@ -366,7 +377,9 @@ Read these before computing anything from a payload:
 - **`rolling-active` always returns 28 rows**, one per day. Its `windowDays` (1–28, default 7) is the length of the trailing window each point counts distinct users over — not the number of points.
 - **Per-user surfaces count app users only.** `users.top`, `users.search`, `daily-active`, `rolling-active`, `overview.dau` / `wau` / `mau` and `overview.growth` exclude the synthetic principal a `runAs = "system"` run executes as (`sys:<appId>`), so a cron firing a system workflow every night never appears as a user and never marks anyone active — a cron trigger's creator is provenance, not an actor. Run analytics are unfiltered: those runs still show up in `workflows.top` (`primitive analytics workflows`), in `events` when you ask for that principal by id, and in `primitive workflows runs list`. Expect `workflows.top` run counts to exceed what the user-activity numbers can account for; that difference is machine activity, not a discrepancy.
 - **Asking for the system principal by name still works.** The exclusion is on the unfiltered listings, not on a lookup: `users.search` with a `q` of `sys:<appId>` returns it, exactly as `events` with that `userId` does. Only `users.search` *without* a `q` — which lists the app's most recently active principals — drops it.
-- **`cohort-retention` retention values are percentages** (0–100, one decimal place), with `null` for a week a cohort hasn't reached yet; week 0 is always 100. `averages` is the per-week mean across the returned cohorts.
+- **Signup means "joined this app".** Every user-attributed event the server writes carries the app-membership join time, so `users.search` can answer "who signed up on day D": pass `signupDay` (one UTC calendar day, `YYYY-MM-DD`) or `signupStartDay` + `signupEndDay` (an inclusive range of at most 90 days), and each row comes back with `signedUpAt` (ISO) and `signupDay` (UTC day). A user who belongs to two apps carries each app's own join date, so joining a second app makes them new on that app the day they joined it. Two limits worth knowing: the answer is drawn from activity, so a member who has not produced an event in the last 90 days does not appear; and `signedUpAt` is `null` for a user none of whose events carries a join time yet, which is why a range that includes `1970-01-01` returns nobody rather than everybody.
+- **Page a signup day until it says it is done.** A filtered search returns at most `limit` rows (1–100) and sets `truncated: true` when more match. Repeat the call with `offset += limit`, stepping by the `limit` the response echoes rather than the one you asked for, until `truncated` is `false`; rows are ordered by signup time then user id, so pages do not overlap. `offset` is accepted only alongside a signup filter. A day whose signups are still arriving can shift a row between pages, so re-run the day's pages once it has closed if you need an exact set.
+- **`cohort-retention` retention values are percentages** (0–100, one decimal place), with `null` for a week a cohort hasn't reached yet; week 0 is always 100. `averages` is the per-week mean across the returned cohorts. A cohort is keyed on the app-join time above, and a member who leaves and rejoins counts in exactly one cohort — their latest — for both the cohort size and every activity week, so no cell can exceed 100%.
 - **`errors.groups` `daily` buckets are sparse** — see [Error groups](#error-groups).
 
 ### Filtering events / events-grouped

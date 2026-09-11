@@ -84,7 +84,7 @@ To add or change a model: edit `models/models.toml`, then run each client's code
 
 ## Running CLI commands
 
-Every `primitive` command walks up from the working directory to the nearest `.primitive/config.json`, the way git finds `.git`. So a command run in `web/`, in `ios/`, or at the root resolves the same project, the same environment and the same sync directory — no `--dir` and no path flag. A path flag is how the tree and the environment drift apart; the walk-up is why one is never needed.
+Every `primitive` command walks up from the working directory to the nearest `primitive/config.json`, the way git finds `.git`. So a command run in `web/`, in `ios/`, or at the root resolves the same project, the same environment and the same config directory — there is no path flag at all. A path flag is how the tree and the environment drift apart; the walk-up is why one is never needed.
 
 ## Environments
 

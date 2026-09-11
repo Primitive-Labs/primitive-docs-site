@@ -988,6 +988,9 @@ Optional fields:
 - `filters` — for `events` and `events.grouped`. Array of `{ field, operator, value }`; values are capped at 200 chars. Same field/operator set as the `/analytics/events` REST endpoint. **At most 10 entries** — an eleventh fails the step non-retryably with the endpoint's 400 body, whose `error` reads `Too many filters: N. Maximum is 10.`, so the run stops rather than returning an aggregate narrowed to the first ten.
 - `page` — 0-indexed page number for the `events` feed.
 - `query` — search string (email or ULID) for `users.search`.
+- `signupDay` — for `users.search`. One UTC calendar day (`YYYY-MM-DD`); returns the users who joined the app that day, each row carrying `signedUpAt` and `signupDay`.
+- `signupStartDay` / `signupEndDay` — for `users.search`. An inclusive range of at most 90 UTC days; give both, and not alongside `signupDay`.
+- `offset` — for a signup-filtered `users.search`. Row offset; the response's `truncated` is `true` while more rows match, so a busy day is retrieved by repeating the step with `offset` advanced by `limit`. Workflow templates have no date helpers, so pass the day in as workflow input or compute it in a `script` step.
 
 ```toml
 [[steps]]
@@ -2282,7 +2285,7 @@ Generate typed invocation wrappers from each workflow's `inputSchema`/`outputSch
 primitive workflows codegen --lang swift [workflow-key] [-o <dir>] [--check] [--json]
 ```
 
-The command reads `workflows/*.toml` from the auto-resolved config directory (`--dir <path>` overrides; `--app <app-id>` disambiguates when several apps are synced — with more than one match and neither flag, it errors rather than guessing) and emits **one `<key>.generated.swift` per workflow** (default output `<config-dir>/workflows/generated/`; stale generated files for removed workflows are cleaned up on full runs). Reserved `__internal.*` workflows are skipped; malformed schema JSON fails the command. A single `[workflow-key]` argument matches the TOML file stem and generates just that file.
+The command reads `workflows/*.toml` from the selected environment's config directory, and from nowhere else — `--env <name>` selects a different environment; no flag relocates the directory — and emits **one `<key>.generated.swift` per workflow** (default output `<config-dir>/workflows/generated/`; stale generated files for removed workflows are cleaned up on full runs). Reserved `__internal.*` workflows are skipped; malformed schema JSON fails the command. A single `[workflow-key]` argument matches the TOML file stem and generates just that file.
 
 Each generated file declares `<Key>Input` / `<Key>Output` `Codable` types plus a factory function (camelCase of the key; a leading digit gets a `_` prefix, a Swift keyword is backtick-escaped) returning a `<Key>Workflow` struct that pins the workflow key so it can't drift from its types:
 
@@ -2357,10 +2360,10 @@ Run `primitive workflows codegen --lang swift` as part of the app's regular code
 primitive workflows codegen --lang swift -o Sources/App/Workflows/Generated
 ```
 
-In a config-as-code repo shared by several clients — the workflow TOML lives outside any one client's checkout, as it typically does for an iOS client paired with a web client — point `--dir` at the shared root instead of relying on auto-resolution:
+In a repo shared by several clients — an iOS client paired with a web client, say — the workflow TOML lives once at the repository root, in `primitive/<env>/workflows/`. Run codegen from the client directory and say where the output goes; the walk-up finds the same project either way:
 
 ```bash
-primitive workflows codegen --dir ../config --lang swift -o Sources/App/Workflows/Generated
+primitive workflows codegen --lang swift -o Sources/App/Workflows/Generated
 ```
 
 `--check` (`primitive workflows codegen --lang swift --check`) belongs in CI next to `primitive databases codegen --check`, so stale generated invokers fail the build instead of drifting silently.

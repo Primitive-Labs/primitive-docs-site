@@ -59,7 +59,7 @@ Permission sub-verbs differ by resource on purpose: documents use `permissions g
 
 ## The log views and their shared item shape
 
-Six views read "what happened": `workflows runs list`, `workflows runs failures`, `workflows runs steps`, `integrations logs`, `webhooks events`, `analytics events`. Under `--json` they emit the same item shape inside the view's pagination envelope — never a bare array:
+Seven views read "what happened": `workflows runs list`, `workflows runs failures`, `workflows runs steps`, `integrations logs`, `webhooks events`, `analytics events`, `functions logs`. Under `--json` they emit the same item shape inside the view's pagination envelope — never a bare array:
 
 ```json
 {
@@ -79,10 +79,10 @@ Six views read "what happened": `workflows runs list`, `workflows runs failures`
 
 | Field | Meaning |
 |---|---|
-| `source` | Discriminator: `workflow-run`, `workflow-step`, `integration`, `webhook`, `activity`. |
+| `source` | Discriminator: `workflow-run`, `workflow-step`, `integration`, `webhook`, `activity`, `function-log`. |
 | `timestamp` | ISO-8601 event time, or `null` when the record carries none. |
 | `outcome` | Normalized verdict: `ok`, `error`, `pending`, `neutral`. |
-| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `failed`/`completed`/`terminated` (run), `skipped` (step), `duplicate`/`workflow_inactive` (webhook), `null` (activity). |
+| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `failed`/`completed`/`terminated` (run), `skipped` (step), `duplicate`/`workflow_inactive` (webhook), `completed`/`failed`/`timeout` or a platform refusal code (function log), `null` for an activity row other than `function.invoke`. |
 | `correlation` | Pivot keys: `runId`, `stepId`, `stepRunId`, `eventId`, `traceId`, `workflowId`, `workflowKey`, `integrationKey`, `webhookId`, `workflowRunId`, `userId` — including the row's own id, so a printed row can always be looked up again. Only the keys a source records are present. |
 | `detail` | Per-source allowlist of operator-facing fields — a projection, not the stored record. |
 
@@ -94,11 +94,16 @@ Outcome mapping, by source:
 | Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | `missing`, `skipped` |
 | Workflow step | `completed` | `failed`, `error_captured` | — | `skipped`, `running` |
 | Webhook | `accepted`, `duplicate`, `handshake`, `workflow_inactive` | `rejected`, `error` | — | — |
-| Activity | — | — | — | always |
+| Function log | `completed` | `failed`, `timeout`, a platform refusal code (`FUNCTION_BUNDLE_MISSING`, …) | `running` (a task slice that has printed and settled nothing) | anything else, and an absent status |
+| Activity | `function.invoke` with `status: "completed"` | `function.invoke` with `status: "failed"` or `"timeout"` | `function.invoke` with `status: "started"` | every other action, always |
 
-`workflow_inactive` is `ok` on purpose: the delivery was accepted and deliberately not dispatched. Activity events are always `neutral` — they carry no success signal, so no `ok` is invented for them.
+`workflow_inactive` is `ok` on purpose: the delivery was accepted and deliberately not dispatched.
 
-Pagination per view: `workflows runs list`, `workflows runs failures` and `webhooks events` return `{ items, hasMore, nextCursor? }` and take `--limit`/`--cursor`; the two run views add `scanned` (runs examined) whenever a filter is in play, since a filtered read searches the index rather than reading one page; `workflows runs steps` returns `{ items }` (a run's steps are not paged); `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--source` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`.
+Activity events are `neutral` with ONE exception. They are counts, and inventing a verdict for a count would be fabricating a signal — but `function.invoke` already carries the settled status in its own event context, so a failed invocation is reported as `error` rather than as `neutral`, which is what makes failures countable through this contract at all. `started` is `pending`: a task start is in flight when its row is written, and its terminal outcome lives on the run row, which the `workflow-run` source already maps. The context may arrive as an object or as a JSON string; an unparseable one stays `neutral` rather than being guessed at.
+
+The `function-log` source is a server function's invocation records (`primitive functions logs <function-id>`). Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind`, `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated` and `logsUnavailable`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId`, the `runId` of a trigger fire or task run, and — for an invocation a DSL workflow's `workflow.call` step made — the parent's `workflowKey` and `stepId`.
+
+Pagination per view: `workflows runs list`, `workflows runs failures`, `webhooks events` and `functions logs` return `{ items, hasMore, nextCursor? }` and take `--limit`/`--cursor`; the two run views add `scanned` (runs examined) whenever a filter is in play, since a filtered read searches the index rather than reading one page; `workflows runs steps` returns `{ items }` (a run's steps are not paged); `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--source` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`.
 
 The normalization is `--json`-only. The human tables stay per-view, because each carries columns the shared shape has no room for — a run's queue delay, a step's inter-step gap and token counts, a webhook event's id. `--watch --json` reprints the same envelope each tick; `--follow --json` emits one item per line (newline-delimited JSON), since a tail has no closing bracket to wait for.
 

@@ -555,7 +555,7 @@ wiring; the pieces, all load-bearing:
 
 Environment selection: `vitest.config.ts` merges the app's Vite config, so the
 `primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
-does for `pnpm dev` — from `.primitive/config.json`, honoring `primitive env
+does for `pnpm dev` — from `primitive/config.json`, honoring `primitive env
 use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
 a `.env` file (no `.env` file repeats them). Point one run elsewhere:
 
