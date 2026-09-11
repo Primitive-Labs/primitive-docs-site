@@ -738,13 +738,15 @@ The ceilings (see Ceilings) apply **per engine invocation, not per run**. A run 
 
 | Ceiling | In a task run |
 |---|---|
-| Wall clock | Per slice: every engine invocation mints a fresh credential with a 30 000 ms absolute deadline, so a stretch of code between two sleeps must finish inside it. The request's `timeoutMs` is ignored; the run as a whole has no wall-clock limit. |
+| Wall clock | Per slice: every engine invocation mints a fresh credential with a 10-minute absolute deadline, and **every step begins with at least 5 minutes of it**. A single step may use up to 10 minutes of wall clock. Between steps the platform watches the slice: when a step finishes with less than 5 minutes left, or a step is about to start with less than 5 minutes left (a cleanup step after the handler catches a failed step, or after code outside steps spent the slice), the platform yields — it ends the slice with a sleep of its own, and the next wake mints a fresh credential. The guarantee holds at every `step.do` boundary; code outside steps still spends the slice it runs in, and the next `step.do` entry restores it. A handler that never calls `step.do` gets no yield and dies at the slice deadline. The request's `timeoutMs` is ignored; the run as a whole has no wall-clock limit. |
 | `cpuMs` (5 000 ms) | Per slice. |
 | `subRequests` (64) | Per slice. Replayed steps spend nothing — their bodies do not run — but any platform call *outside* a step re-spends on every wake. |
 | `ratePerMinute` (1 200) | Per **start**. A task start reserves a slot and returns it if the start is refused; resumes take none. |
 | Output (1 MiB) and `outputSchema` | Once, on the final return value, at settlement. |
 
-Consequences: budget each stretch between sleeps as if it were a request function; several `step.do` calls with no sleep between them share one slice's budget, so a long job is chunked by sleeps, not by steps; and keep the code outside steps minimal, since it re-executes on every wake.
+A budget yield is a hibernation, and it costs a little over 5 minutes of wall clock: the engine hibernates only for a sleep longer than its own five-minute grace period, so that is what the platform's yield sleeps. The threshold decides the pause, not the run's total: every step that finishes with less than 5 minutes of the slice left pays it — the last step of the run included — and so does every step about to start with less than 5 minutes left. A single six-minute step fits in a slice and still pays one pause before the run returns; five one-minute steps pay none; a thirty-minute sequence of ordinary steps pays about five. Steps running in parallel (`Promise.all` over two chains) yield together: a yield waits for every step in flight to finish before it sleeps, because the engine hibernates only when nothing is running. Because it is a hibernation, what the run printed before it is not recoverable on the log record (see Debugging a failing function). Locally, under `wrangler dev`, the engine never hibernates: a yield there is a pause with no fresh credential, and a task run is bounded by one slice.
+
+Consequences: `step.sleep` between chunks is for waiting, not for budget — chunk a long job by steps and sleep when there is something to wait for; keep the code outside steps minimal, since it re-executes on every wake; and a budget yield does not count toward Cloudflare's maximum number of steps per instance (`step.sleep` and `step.sleepUntil` are excluded from that allowance; only your `step.do` calls count).
 
 ### Deleting a function with live runs
 
@@ -847,7 +849,8 @@ primitive functions get <function-id>       # receiver URL, schedules, watched t
 | CPU per invocation | 5 000 ms | `cpuMs` |
 | Outbound subrequests | 64 | `subRequests` |
 | Invocations per minute, per function | 1 200 | `ratePerMinute` |
-| Wall clock | 5 000 ms default, 30 000 ms ceiling | `timeoutMs` (on the request) |
+| Wall clock, request | 5 000 ms default, 30 000 ms ceiling | `timeoutMs` (on the request) |
+| Wall clock, task slice | 10 minutes per slice; every step begins with at least 5 | — (see Budgets in a task run) |
 | Response size | 1 MiB | — |
 | Built bundle | 5 MB | — |
 | Send payload | 64 KiB | — |
@@ -883,7 +886,7 @@ A record carries what the invocation printed (`console.log`/`info`/`debug`/`trac
 
 **Secrets are redacted, best-effort.** A value `ctx.secret()` returned is replaced with `[REDACTED:<NAME>]` in the captured lines, in the lines forwarded to the live console, and in the error message and stack — on both sides of the sandbox boundary. It is best-effort by nature: a secret your code transformed before printing is not detectable. Do not print credentials.
 
-**Task functions have a narrower guarantee.** A task run's record is written when the slice that SETTLES it finishes. A `step.do` body that ran in an earlier slice does not re-execute on replay, so what it printed before a `step.sleep` is not in the record — the platform cannot observe a step boundary from outside the sandbox, and a slice that suspends at a sleep never settles. Print what you need in the slice that settles, or write progress as data.
+**Task functions have a narrower guarantee.** A task run's record is written when the slice that SETTLES it finishes. A `step.do` body that ran in an earlier slice does not re-execute on replay, so what it printed before a `step.sleep` is not in the record — and the same is true of the budget yield the platform takes between steps when a slice runs low (see Budgets in a task run), which is a hibernation like any other sleep. The platform cannot observe a step boundary from outside the sandbox, and a slice that suspends at a sleep never settles. Print what you need in the slice that settles, or write progress as data.
 
 Three markers: `truncated` says a line or the channel hit its cap (2 KiB per line, 16 KiB and 256 entries per invocation) — the invocation is never failed for logging too much; `logsUnavailable` says the platform could not retrieve the buffer at all (an evicted isolate, or a dispatch refused before any code ran), which is not the same as a function that printed nothing; `contentSuppressed` says the platform could not load EVERY secret the version declares at write time (the store did not answer, or a declared `secret:<NAME>` has no value in this environment), so it kept the correlation and the status and dropped the console and the error fields rather than publish them unredacted — an unprovisioned declared secret suppresses every record of that version, so provision it or drop the declaration.
 
