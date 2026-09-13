@@ -1552,6 +1552,19 @@ The point-in-time checks accept an optional `timeoutMs`.
 The point-in-time checks accept a `timeout` — a `TimeInterval` in seconds, default `5`. For a cheap synchronous local read — no round-trip — use `documents.isSynced(documentId:)`.
 {{/lang}}
 
+**A document that cannot sync says so.** The `documentSyncStateChanged` event reports `state: "error"` for an open document whose sync handshake goes unanswered for the whole handshake budget (10 s by default) — what the app is rendering has stopped converging — and repeats it on each timeout while the document stays behind. The client keeps retrying underneath, at a backoff that caps at 15 s, and after three consecutive timeouts on a connection that still reads as open it rebuilds the connection itself (once per stalled document, once per connection). Once the document does sync, the event fires `"synced"` once more so the app can clear what it surfaced:
+
+{{ example: documents/sync-state-events }}
+
+The same event reports `"synced"` as each remote update is applied to an open document, so a loader that reloads on every remote write subscribes here too. It says nothing about a document's overall caught-up/behind state — that is what the point-in-time checks above answer.
+
+{{#lang ts}}
+The handshake budget is `sync.handshakeTimeoutMs` on the client options.
+{{/lang}}
+{{#lang swift}}
+The handshake budget is `SyncConfig.handshakeTimeout`, in seconds.
+{{/lang}}
+
 ### Connectivity vs network mode
 
 Network **mode** is user intent — `auto` by default, or pinned by `goOffline()` / `goOnline()`. **Reachability** is whether the device currently has a network path. They are separate, and the client never turns one into the other: losing connectivity in `auto` pauses the socket and suppresses reconnect, but the reported mode stays `"auto"`. When the network comes back the client reconnects on its own, still in `auto`.

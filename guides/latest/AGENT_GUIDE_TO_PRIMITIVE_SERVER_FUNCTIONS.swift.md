@@ -174,7 +174,7 @@ From the client, `client.functions.invoke` returns the envelope typed by its out
 `functions.invoke` on a task function — and `functions.start` on a request function — throws `FUNCTION_MODE_MISMATCH` ("is a task function" / "is a request function") before you are handed a shape the method's types do not describe. The server decides the mode from the pushed config.
 
 
-The typed overload `invoke<Input, Output>(_:input:…)` decodes `output` into a caller-chosen `Decodable` (`FunctionResult<Output>`); the untyped `invoke(_:input:…)` returns a `FunctionInvokeResult` whose `output` is a `JSONValue?`. A settled invocation never throws — read `status` — while a platform refusal is an `HttpError` carrying the server's `errorCode` on `serverCode`. The typed `input` is sent as whatever JSON value it encodes to (object, array or scalar), so a function whose schema declares a non-object root receives exactly that.
+`invoke<Input, Output>(_:input:…)` decodes `output` into a caller-chosen `Decodable` (`FunctionResult<Output>`) — there is no untyped entry point; a dynamic caller names the witness (`input: nil as JSONValue?`, bound `as FunctionResult<JSONValue>`). A settled invocation never throws — read `status` — while a platform refusal is an `HttpError` carrying the server's `errorCode` on `serverCode`. The typed `input` is sent as whatever JSON value it encodes to (object, array or scalar), so a function whose schema declares a non-object root receives exactly that.
 
 ### The access gate
 
@@ -359,6 +359,35 @@ const answered = await greet(client).invoke({ input: { name: "Ada" } }); // outp
 primitive functions codegen --check   # CI: non-zero when the generated files are stale; no --check regenerates
 primitive functions codegen -o src/generated/functions   # the invokers, somewhere your client code imports from
 ```
+
+**Swift codegen.** `primitive functions codegen --lang swift` emits one
+`<key>.generated.swift` per function instead of the TypeScript artifacts:
+`<Key>Input` / `<Key>Output` as `Codable` types from the declared schemas, and a
+`<Key>Function` invoker struct reached through a `<key>(client)` factory, bound
+over the generic `client.functions` overloads. The mode fixes the verbs exactly
+as it does in TypeScript — a request function's invoker has only `invoke`, a
+task function's only `start` / `getStatus` / `waitFor` / `terminate` — so the
+wrong verb is a compile error. A function with no declared schema gets
+`typealias <Key>Input = JSONValue` rather than an empty struct; a key that is
+not a legal Swift identifier is mangled (`123-job` → `_123JobFunction`,
+`_123Job(client)`) while the call still passes the original key; and a nullable
+root input (`type: ["string","null"]`) is a required `String?` parameter whose
+`nil` reaches the handler as an explicit JSON `null`.
+
+```bash
+primitive functions codegen --lang swift -o Sources/App/Functions/Generated
+```
+
+```swift
+let answered = try await greet(client).invoke(input: GreetInput(name: "Ada"))
+answered.output?.greeting  // String?
+```
+
+Swift mode writes no TypeScript artifact and no tsconfig wiring; `--check` names
+the stale files and its hint carries `--lang swift`. Both languages may share
+`functions/generated/` — each generator sweeps only the files carrying its own
+banner. The Swift app template runs this from `scripts/codegen.sh` on every
+build path, so the committed invokers never drift.
 
 **Push typechecks what it ships.** The same `config push` that writes those declarations compiles your sources against them — the tree's own `functions/tsconfig.json`, so it is the program your editor loads — and refuses the function with the compiler's own diagnostics when they do not hold. esbuild erases types, so a bundle that builds proves nothing: a handler that dereferences `ctx.user` without checking it — written before that field became nullable — builds cleanly and throws on the request path. The refusal is per function (the rest of the tree still lands), `--dry-run` reports the same diagnostics without shipping, and reproducing one by hand is `tsc -p functions/tsconfig.json --noEmit`. `primitive config push --no-typecheck` skips it. A CI job that runs `primitive config push --dry-run` therefore fails on broken function code with no extra wiring.
 
@@ -745,15 +774,19 @@ The ceilings (see Ceilings) apply **per engine invocation, not per run**. A run 
 
 | Ceiling | In a task run |
 |---|---|
-| Wall clock | Per slice: every engine invocation mints a fresh credential with a 10-minute absolute deadline, and **every step begins with at least 5 minutes of it**. A single step may use up to 10 minutes of wall clock. Between steps the platform watches the slice: when a step finishes with less than 5 minutes left, or a step is about to start with less than 5 minutes left (a cleanup step after the handler catches a failed step, or after code outside steps spent the slice), the platform yields — it ends the slice with a sleep of its own, and the next wake mints a fresh credential. The guarantee holds at every `step.do` boundary; code outside steps still spends the slice it runs in, and the next `step.do` entry restores it. A handler that never calls `step.do` gets no yield and dies at the slice deadline. The request's `timeoutMs` is ignored; the run as a whole has no wall-clock limit. |
-| `cpuMs` (5 000 ms) | Per slice. |
-| `subRequests` (64) | Per slice. Replayed steps spend nothing — their bodies do not run — but any platform call *outside* a step re-spends on every wake. |
+| Wall clock | Continuous, up to 12 hours from the slice's start. Each slice is minted with a 10-minute credential and **every step begins with at least 5 minutes of it**. A single step may use up to 10 minutes of wall clock. When a step finishes with less than 5 minutes left, or is about to start with less than 5 minutes left (a cleanup step after the handler catches a failed step, or after code outside steps spent the slice), the platform REFRESHES the credential through the gateway and the clock rolls on with no pause. The guarantee holds at every `step.do` boundary; code outside steps still spends the clock it runs in, and the next `step.do` entry refreshes it. A handler that never calls `step.do` gets no refresh and dies at the 10-minute slice deadline. The request's `timeoutMs` is ignored; the run as a whole is bounded only by the 12-hour ceiling. |
+| `cpuMs` (5 minutes per task slice) | Per slice, not per step — a refreshed slice keeps counting; the paid plan's per-invocation ceiling. A step that exhausts it is killed and the run FAILS (it does not recover from the kill today), so a step's own body must fit in 5 minutes of CPU, and a run whose steps together need more must end the slice between them (a `step.sleep` past the engine's five-minute grace period; the wake starts a fresh CPU budget). |
+| `subRequests` (10 000 per task slice) | Counted across the slice; does NOT reset while it refreshes. Replayed steps spend nothing — their bodies do not run — but any platform call *outside* a step re-spends on every wake. |
 | `ratePerMinute` (1 200) | Per **start**. A task start reserves a slot and returns it if the start is refused; resumes take none. |
 | Output (1 MiB) and `outputSchema` | Once, on the final return value, at settlement. |
 
-A budget yield is a hibernation, and it costs a little over 5 minutes of wall clock: the engine hibernates only for a sleep longer than its own five-minute grace period, so that is what the platform's yield sleeps. The threshold decides the pause, not the run's total: every step that finishes with less than 5 minutes of the slice left pays it — the last step of the run included — and so does every step about to start with less than 5 minutes left. A single six-minute step fits in a slice and still pays one pause before the run returns; five one-minute steps pay none; a thirty-minute sequence of ordinary steps pays about five. Steps running in parallel (`Promise.all` over two chains) yield together: a yield waits for every step in flight to finish before it sleeps, because the engine hibernates only when nothing is running. Because it is a hibernation, what the run printed before it is not recoverable on the log record (see Debugging a failing function). Locally, under `wrangler dev`, the engine never hibernates: a yield there is a pause with no fresh credential, and a task run is bounded by one slice.
+When a refresh is refused — past the 12-hour ceiling, more than once a minute (one per 60-second window on the platform's epoch-aligned clock), or during a rate-limiter or engine outage — the slice falls back to a pause of a little over 5 minutes: the engine hibernates only for a sleep longer than its own five-minute grace period, so that is what the fallback sleeps, and the next wake mints a fresh 10-minute slice with a fresh 12-hour ceiling. So a refused refresh costs a little over five minutes, once. Two budgets do NOT refresh: the subrequest count yields instead — when it passes half the resolved limit (5 000 of 10 000, or half a lower configured value), the next `step.do` boundary takes the fallback yield rather than refreshing; and CPU, which is 5 minutes of active CPU per slice — a step that exhausts it is killed, and the run fails rather than recovering. Steps running in parallel (`Promise.all` over two chains) that reach a fallback yield together: it waits for every step in flight to finish before it sleeps, because the engine hibernates only when nothing is running. Because the fallback is a hibernation, what the run printed before it is not recoverable on the log record (see Debugging a failing function). On a local development server the engine never hibernates: a fallback there is a pause with no fresh credential, and a task run is bounded by one slice.
 
-Consequences: `step.sleep` between chunks is for waiting, not for budget — chunk a long job by steps and sleep when there is something to wait for; keep the code outside steps minimal, since it re-executes on every wake; and a budget yield does not count toward Cloudflare's maximum number of steps per instance (`step.sleep` and `step.sleepUntil` are excluded from that allowance; only your `step.do` calls count).
+Consequences: `step.sleep` between chunks is for waiting, not for budget — chunk a long job by steps and sleep when there is something to wait for; keep the code outside steps minimal, since it re-executes on every wake; and a refresh does not count toward the engine's maximum number of steps per run, and neither does a fallback yield (`step.sleep` and `step.sleepUntil` are excluded from that allowance; only your `step.do` calls count).
+
+**Observing a slice.** `GET /app/{appId}/api/workflows/runs/{runId}/status` carries a `slice` block beside `status` and `run` for a task run that has one — `sliceId`, `startedAt`, `ceilingAt` (the 12-hour bound), `refreshCount`, `lastRefreshAt`, `settledAt` and `settledStatus`; a request invocation and a workflow run carry no `slice` key. `primitive functions runs` prints the count in a `REFRESHES` column, blank for a request run.
+
+`functions.getStatus` answers the block as `slice` on `WorkflowStatusResult`, and so do `workflows.getStatus` and `workflows.terminate` — a function run IS a run row, so the same run read through either surface answers the same block. The typed overloads carry it too. A block the client cannot read is dropped rather than published with a hole in it, so `slice` being absent means "no record to show you", never "this run never refreshed".
 
 ### Deleting a function with live runs
 
@@ -841,7 +874,7 @@ A push naming a type the app does not have is refused by name, and a write to a 
 **Every webhook or cron fire writes a run row** — the only record it leaves, since nobody is waiting for an answer (a database-change fire deliberately writes none; see above). A fire has no caller: `ctx.user` is `null`, and the code acts as the app exactly as it does on an HTTP invoke (see Execution identity).
 
 ```bash
-primitive functions runs <function-id>      # newest first: status, what fired it, timings, failure code
+primitive functions runs <function-id>      # newest first: status, what fired it, refreshes, timings, failure code
 primitive functions get <function-id>       # receiver URL, schedules, watched types, last fired
 ```
 
@@ -853,11 +886,11 @@ primitive functions get <function-id>       # receiver URL, schedules, watched t
 
 | Limit | Platform value | Key |
 |---|---|---|
-| CPU per invocation | 5 000 ms | `cpuMs` |
-| Outbound subrequests | 64 | `subRequests` |
+| CPU per invocation | 5 000 ms request; 5 minutes per task slice | `cpuMs` |
+| Outbound subrequests | 128 request; 10 000 per task slice | `subRequests` |
 | Invocations per minute, per function | 1 200 | `ratePerMinute` |
 | Wall clock, request | 5 000 ms default, 30 000 ms ceiling | `timeoutMs` (on the request) |
-| Wall clock, task slice | 10 minutes per slice; every step begins with at least 5 | — (see Budgets in a task run) |
+| Wall clock, task slice | continuous up to 12 hours; every step begins with at least 5 minutes | — (see Budgets in a task run) |
 | Response size | 1 MiB | — |
 | Built bundle | 5 MB | — |
 | Send payload | 64 KiB | — |
@@ -893,7 +926,7 @@ A record carries what the invocation printed (`console.log`/`info`/`debug`/`trac
 
 **Secrets are redacted, best-effort.** A value `ctx.secret()` returned is replaced with `[REDACTED:<NAME>]` in the captured lines, in the lines forwarded to the live console, and in the error message and stack — on both sides of the sandbox boundary. It is best-effort by nature: a secret your code transformed before printing is not detectable. Do not print credentials.
 
-**Task functions have a narrower guarantee.** A task run's record is written when the slice that SETTLES it finishes. A `step.do` body that ran in an earlier slice does not re-execute on replay, so what it printed before a `step.sleep` is not in the record — and the same is true of the budget yield the platform takes between steps when a slice runs low (see Budgets in a task run), which is a hibernation like any other sleep. The platform cannot observe a step boundary from outside the sandbox, and a slice that suspends at a sleep never settles. Print what you need in the slice that settles, or write progress as data.
+**Task functions have a narrower guarantee.** A task run's record is written when the slice that SETTLES it finishes. A `step.do` body that ran in an earlier slice does not re-execute on replay, so what it printed before a `step.sleep` is not in the record — and the same is true of a fallback yield the platform takes when a refresh is refused (see Budgets in a task run), which is a hibernation like any other sleep. The platform cannot observe a step boundary from outside the sandbox, and a slice that suspends at a sleep never settles. Print what you need in the slice that settles, or write progress as data.
 
 Three markers: `truncated` says a line or the channel hit its cap (2 KiB per line, 16 KiB and 256 entries per invocation) — the invocation is never failed for logging too much; `logsUnavailable` says the platform could not retrieve the buffer at all (an evicted isolate, or a dispatch refused before any code ran), which is not the same as a function that printed nothing; `contentSuppressed` says the platform could not load EVERY secret the version declares at write time (the store did not answer, or a declared `secret:<NAME>` has no value in this environment), so it kept the correlation and the status and dropped the console and the error fields rather than publish them unredacted — an unprovisioned declared secret suppresses every record of that version, so provision it or drop the declaration.
 

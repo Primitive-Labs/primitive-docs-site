@@ -323,7 +323,7 @@ The evaluator output is parsed for `{ passed, reasoning, checks: [{name, passed,
 
 ## CLI Reference
 
-The app is the one the project's selected environment names in `.primitive/config.json` (`primitive whoami` reports it). All commands accept `--app <app-id>` or a positional `[app-id]` to override.
+The app is the one the project's selected environment names in `primitive/config.json` (`primitive whoami` reports it). All commands accept `--app <app-id>` or a positional `[app-id]` to override.
 
 Use `--json` for machine-readable output.
 
@@ -456,7 +456,7 @@ Prompt configs live at `prompts/<key>.toml`, with test cases in a sibling `<key>
 ### Directory layout (verified in `cli/src/commands/sync.ts` — see the layout block in the `sync` command's help text)
 
 ```
-config/
+primitive/<env>/
   prompts/
     summarizer.toml
     summarizer.tests/                # NOTE: dir name is `<key>.tests`
@@ -467,7 +467,7 @@ config/
     evaluator.toml
   workflows/
     ...
-  .primitive-sync.json               # auto-generated state — commit this
+  .sync-state.json                   # auto-generated state — commit this
 ```
 
 ### Test case TOML schema
@@ -624,7 +624,7 @@ primitive prompts tests runs <prompt-id> --json  # compare runs across configs
 
 ```bash
 primitive config pull
-git add .primitive/sync && git commit -m "Snapshot prompts"
+git add primitive/ && git commit -m "Snapshot prompts"
 
 # edit the synced prompts/*.toml files
 

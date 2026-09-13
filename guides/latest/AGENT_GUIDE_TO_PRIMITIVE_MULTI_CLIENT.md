@@ -6,8 +6,8 @@ Guidelines for AI agents working in a Primitive app that has more than one clien
 
 ```
 <repo>/
-  .primitive/config.json          # the environments: apiUrl + appId per environment
-  .primitive/sync/<env>/<appId>/  # exported server config (workflows, database types, app settings)
+  primitive/config.json           # the environments: apiUrl + appId per environment
+  primitive/<env>/                # exported server config (workflows, database types, app settings)
   models/models.toml              # the model schema — one copy
   AGENTS.md                       # app-wide: this layout
   web/                            # Vue client: its own package.json, .env, AGENTS.md
@@ -39,7 +39,7 @@ cd my-app
 primitive init ios --platform ios     # or just `primitive init --platform ios`
 ```
 
-Init finds the nearest ancestor `.primitive/config.json`, and adds the client to THAT app: the app ID and backend URL come from the selected environment, the client is wired to the repo's `models/models.toml`, and the run writes no nested `.primitive/`, no nested `.git/` and no commit — the new files are left for you to review with `git status` and commit in the outer repository. It never creates a second app.
+Init finds the nearest ancestor `primitive/config.json`, and adds the client to THAT app: the app ID and backend URL come from the selected environment, the client is wired to the repo's `models/models.toml`, and the run writes no nested `.primitive/`, no nested `.git/` and no commit — the new files are left for you to review with `git status` and commit in the outer repository. It never creates a second app.
 
 Adding a client to a repository whose single client sits at the root (the flat layout above) moves the schema to `<repo>/models/models.toml` and rewires the existing client to it, with your confirmation. Nothing else about the existing client moves: its `package.json`, its sources and its build config stay exactly where they are.
 
@@ -55,8 +55,8 @@ promote_schema = true     # consent to move a flat repo's schema to the root
 
 | Per app — at the repo root | Per client — in its directory |
 |---|---|
-| `.primitive/config.json` (environments, app ID) | Generated code (models, workflow invokers, database types) |
-| `.primitive/sync/<env>/<appId>/` server config | Runtime connection settings (`.env`, `primitive.json`) |
+| `primitive/config.json` (environments, app ID) | Generated code (models, workflow invokers, database types) |
+| `primitive/<env>/` server config | Runtime connection settings (`.env`, `primitive.json`) |
 | `models/models.toml` | Dependencies, build and test config |
 | App secrets and config vars | Deploy configuration |
 | The app-wide `AGENTS.md` | The client's own `AGENTS.md` |

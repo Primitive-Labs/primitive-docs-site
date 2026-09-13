@@ -21,6 +21,14 @@ How to choose between **documents** and **databases**, and how to combine them. 
 
 The corollaries that follow are what to use when picking sides.
 
+## Record identity and external IDs
+
+Let Primitive assign the primary record ID as a ULID. Keep an external system's identifier in a separate field, such as `plaidTransactionId`, `stripeCustomerId`, or `externalId`. Relationships between app records should reference their Primitive IDs.
+
+A provider identifier or a key assembled from business fields is a lookup value, not the primary record ID. Declare the appropriate unique field or composite constraint for deduplication, including the provider or account scope when the external ID is only unique within that scope. On a retry, look up that identity and reuse the existing record; generating another ULID alone does not make an import idempotent.
+
+For model creates, omit the ID and use the model's automatic assignment. When an API requires an explicit ID, such as a document bulk create, use Primitive's ULID generator. In a durable server function, generate and retain those IDs inside a step so retries reuse them.
+
 ## Decision rules
 
 Apply these in order. Stop at the first one that fits.
