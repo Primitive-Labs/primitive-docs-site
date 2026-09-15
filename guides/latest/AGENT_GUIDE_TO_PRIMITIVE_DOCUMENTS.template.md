@@ -24,7 +24,13 @@ A **document** is:
 - **Read-write** - View and edit capabilities
 - **Owner** - Full control including sharing and deletion
 
-**Size Guidelines:** Documents work best around ~10 MB each (soft limit). For most apps (thousands of records, years of data), this is sufficient.
+**Size Guidelines:** Documents work best around ~10 MB each (soft limit). For most apps (thousands of records, years of data), this is sufficient. Past that, create a **large document** (`documentFormat: 2`, up to 2 GB; `--large` on the CLI). It is opt-in at creation and never migrated.
+
+**Large-document read path (format 2 only):**
+
+- A field read on an instance you already hold may return the previous value between a peer's update arriving and its fold settling. `find()` and `query()` always agree; await the client's projection barrier when you need the settled value.
+- `new Model({ id })` returns schema defaults until its first `await` (`find()` or `save()`). It is NOT a create: its first `save()` patches only the fields you set and preserves every untouched stored field.
+- If a change cannot be folded into the local store, the document goes read-refusing: reads and writes throw `FORMAT2_FOLD_BROKEN` (`error.code`) until the document is reconnected and catches up. Handle it by reconnecting, not by retrying the read.
 
 ## Documents vs. Databases
 

@@ -533,13 +533,17 @@ A [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category va
 
 ### Timestamps
 
-The `timestamps` knob on the `[type]` config stamps `createdAt` and/or `modifiedAt` fields automatically on `save` and `patch` writes, removing the need for per-model trigger boilerplate. Field names are caller-configurable. Stamp values are epoch milliseconds (numbers), written only when the field is absent or `null` in the submission. `increment`, `addToSet`, and `removeFromSet` do not stamp — those ops neither set the create field nor bump the update field.
+The `timestamps` knob on the `[type]` config stamps `createdAt` and/or `modifiedAt` fields automatically on `save` and `patch` writes, removing the need for per-model trigger boilerplate. Field names are caller-configurable. Stamp values are epoch milliseconds (numbers), written only when the field is absent or `null` in the submission.
 
 ```toml
 [type]
 databaseType = "project"
 timestamps = { create = "createdAt", update = "modifiedAt" }
 ```
+
+**Every door, and every verb that carries data.** The directive belongs to the type, so it stamps a `save` or a `patch` whichever call made it: prepared operations (`operations/{name}/execute`, `runOperation`, the workflow database steps), the records routes (`records/save`, `records/patch`, `records/batch` and the deprecated `admin-data/*` aliases), each `save` and `patch` inside a batch — `upsertOn` included, on the create and on the update — and a function's `ctx.db` handle, which is those same routes. No batch operation is exempt. The four verbs that never stamp are `delete`, `increment`, `addToSet` and `removeFromSet`: none of them carries a record body to stamp, so they neither set the create field nor bump the update field.
+
+A batch `save` that inserts is stamped as a create even when an earlier operation in the same batch made it one — a failing save of the same id, or a `delete` of it — so a row that was really inserted always has its create field.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -1464,6 +1468,8 @@ The handle queries with the full filter operator grammar, sort + cursor paginati
 
 `$startsWith`, `$endsWith`, and `$containsText` are mutually exclusive on the same field — only one substring operator per field per query.
 
+**List size (#3451).** A single `$in` or `$nin` list holds at most **1,000 values**; each list in a filter is counted on its own, so two 600-value lists on different fields pass. Past the cap the request is refused with `400` and `code: "QUERY_IN_LIST_TOO_LARGE"`, naming the field, the count and the cap. The list is bound to the statement as ONE value rather than one per element, so a thousand-key filter sorts, pages and cursors exactly as cheaply as a two-key one. Past a thousand, the split depends on the operator: chunk an `$in` across queries and merge the pages (each chunk matches some of the rows, so the union is the answer), but NEVER merge chunked `$nin` queries — a query excluding one chunk returns the rows the others exclude, so the union is nearly every row. Put `$nin` chunks in ONE filter, where they intersect: `{ $and: [{ f: { $nin: chunk1 } }, { f: { $nin: chunk2 } }] }`, each chunk counted against the cap on its own.
+
 **Absent fields (#3166).** `$ne`, `$nin` and `{ field: null }` match records that never wrote the field; equality, the range operators and `$in` match only records that carry it. To keep excluding the missing case, put `null` in the `$nin` list: `{ deleted: { $nin: [null, true] } }`. Full semantics, including `$exists` and how a stored null differs by path: [Documents guide, §Absent fields](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#absent-fields).
 
 Multiple filters on different fields are implicitly combined with AND. Use an explicit `$and` only when you need two conditions on the *same* field (e.g. a range), and combine `$or` with other top-level fields freely.
@@ -1482,6 +1488,7 @@ Multiple filters on different fields are implicitly combined with AND. Use an ex
 - If the same field also carries a caller-supplied `$in`, the result is the **intersection** — group membership AND the caller's list — not a replacement.
 - An invalid spec (missing or empty `type`/`id`) is rejected with `400 INVALID_IN_GROUP`.
 - Expansion is capped at 5,000 members (server-configurable); exceeding it fails with `400 GROUP_FILTER_TOO_LARGE`.
+- Two caps apply at two points. The **5,000-member enumeration cap** above bounds how much membership the server reads. The **1,000-value list cap** bounds the EXPANDED list once it reaches the query, and it applies to whatever the expansion produced: a 3,000-member group intersected with a short caller `$in` is a short list and runs, while the same group with nothing to intersect against is refused with `400 QUERY_IN_LIST_TOO_LARGE`. A feed over a group larger than the list cap wants a fan-out-on-write shape.
 
 Include types: `refersTo` (FK to one record), `hasMany` (target FK to this record), `refersToMany` (StringSet to multiple records). The loaded records land under `_related` on each parent (e.g. `result.data[0]._related.customer`).
 

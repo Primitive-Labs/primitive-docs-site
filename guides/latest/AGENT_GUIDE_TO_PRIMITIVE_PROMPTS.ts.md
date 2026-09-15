@@ -206,6 +206,8 @@ systemPrompt = "You are concise."        # optional
 temperature = 0.3                # optional, number or string ("0.3"); stored as string
 maxTokens = 1000                 # optional integer
 outputFormat = "text"            # optional: text (default) | json — request/response shaping only, never a workflow's type
+reasoningEffort = "minimal"      # optional: none | minimal | low | medium | high — how much the provider may think
+# reasoningBudget = 512          # ...or a token budget instead. Never both.
 ```
 
 ### Field reference (verified against `src/models/app-prompt.js` and `app-prompt-config.js`)
@@ -219,9 +221,13 @@ outputFormat = "text"            # optional: text (default) | json — request/r
 | `description`  | No       |                                                                                      |
 | `accessRule`   | Yes at create | CEL deciding who may execute. Absent/empty = every non-admin execution denied with `403 { errorCode: "PROMPT_ACCESS_DENIED" }`; `"true"` allows any app member |
 | `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
-| `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back                     |
+| `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back. **This is the one a server function reads** — see below                     |
 
 `config push` applies the complete `[prompt]` table: a file with no `outputSchema` key clears any output schema stored on the server. Prompt files written by an older CLI omit that key even when the server has a schema — run `primitive config pull` once before the first push after upgrading the CLI.
+
+**The two `outputSchema` declarations are not the same declaration.** `[prompt.outputSchema]` is the prompt's own: it is what the execute endpoint sends to the provider, and it is what `ctx.prompts.run("<key>")` in a **server function** parses and validates the answer against, handing it back as `parsed` — typed, because `config push` renders it into `functions/primitive-prompt-types.d.ts`. `[configs.outputSchema]` is the selected config's, used by the workflow `prompt.execute` step, and is **not** read on the function path; it retires with the DSL engine.
+
+On the function path a bad answer is the envelope's failure arm, never an HTTP error: `PROMPT_OUTPUT_NOT_JSON` when a declared-JSON prompt answers text that does not parse, or that parses to a number JSON cannot represent, `PROMPT_OUTPUT_SCHEMA_VIOLATION` when it parses and `[prompt.outputSchema]` refuses it (`error` names the failing paths and quotes nothing the model wrote). A provider failure keeps `error` and carries no `errorCode`, so the two are told apart. `outputFormat = "json"` on the config that ran gives `parsed` without a schema, but untyped (`unknown`). See [Server functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md).
 
 **`[[configs]]`:**
 
@@ -238,7 +244,9 @@ outputFormat = "text"            # optional: text (default) | json — request/r
 | `maxTokens`          | No       | Integer                                            |
 | `outputFormat`       | No       | `text` (default) \| `json`. On openrouter, `json` requests provider JSON mode (`response_format`); on gemini it only normalizes the HTTP execute response (fence stripping) — a gemini config constrains the request with `outputSchema` instead. Either way it is **not** the type a workflow step sees: a `prompt.execute` step types its `content` with its own `expect = "json" \| "text"` declaration. |
 | `outputSchema`       | No       | Config-level JSON Schema — the one a workflow `prompt.execute` step uses |
-| `providerConfig`     | No       | Provider-specific options, as a `[configs.providerConfig]` table |
+| `providerConfig`     | No       | Stored with the config and returned by the API, but **not applied to the provider request**. Nothing reads it at execution — to bound the model's reasoning use `reasoningEffort` / `reasoningBudget` below |
+| `reasoningEffort`    | No       | `none` \| `minimal` \| `low` \| `medium` \| `high`. How much the provider may spend on reasoning before answering. Mutually exclusive with `reasoningBudget` |
+| `reasoningBudget`    | No       | The same control as a whole number of reasoning tokens. Mutually exclusive with `reasoningEffort` |
 | `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update. `isActive` is accepted as a legacy spelling |
 
 **Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `config pull` writes back what the server holds, and `config push` rejects a key the CLI does not recognize rather than dropping it silently.
@@ -492,7 +500,7 @@ Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are p
 definition, so pull and push cannot disagree about which fields exist:
 
 - `[prompt]`: `key, displayName, description, status, accessRule, inputSchema, outputSchema`
-- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig`
+- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig, reasoningEffort, reasoningBudget`
 
 A field the server has not set is omitted (there is no TOML `null`), and a JSON
 field TOML cannot represent faithfully — a `null` anywhere inside a schema — is
@@ -665,6 +673,64 @@ Both `AppPrompt` (prompt-level) and `AppPromptConfig` (config-level) have an `ou
 - Workflow `prompt.execute` step → uses **`config.outputSchema`**.
 
 Both are authorable: `[prompt].outputSchema` writes the prompt-level field and `[[configs]].outputSchema` writes the config-level one used by the workflow path.
+
+---
+
+## Reasoning budget
+
+On a reasoning-by-default model, thinking is most of what a call costs — in
+latency as well as money. Measured on a merchant-categorisation prompt
+(`google/gemini-3.6-flash` through openrouter), reasoning was 49–82% of the
+output tokens on every call, and the duration tracked the output count almost
+linearly. A classification task does not want that, and changing the model is
+not the answer: it re-opens accuracy on a prompt whose test cases are tuned to
+the current one.
+
+A config states the budget in one of two ways, never both:
+
+```toml novalidate
+[[configs]]
+reasoningEffort = "minimal"   # none | minimal | low | medium | high
+# reasoningBudget = 512       # ...or a whole number of reasoning tokens
+```
+
+It travels with the NAMED config, so a reasoning and a non-reasoning variant of
+the same prompt are two `[[configs]]` entries and can be A/B'd through the
+ordinary test cases.
+
+**Nothing is silently dropped.** Each value either maps onto the provider's own
+spelling or is refused at push, naming the remedy:
+
+| Provider / family | `reasoningEffort` | `reasoningBudget` |
+| ----------------- | ----------------- | ----------------- |
+| `openrouter` | Sent as OpenRouter's `reasoning.effort`; `none` becomes `reasoning: { enabled: false }` | Sent as `reasoning.max_tokens` |
+| `gemini`, 3.x | `thinkingConfig.thinkingLevel`. Gemini 3 cannot turn thinking off, so `none` is refused; Pro takes `low`/`high` only | Refused — Gemini 3 translates a budget to a level rather than honoring it as a bound. Use `reasoningEffort` |
+| `gemini`, 2.5 | Only `none`, which means a budget of 0. Anything else is refused | `thinkingConfig.thinkingBudget`. Gemini 2.5 Pro cannot stop thinking: its floor is 128 tokens |
+| `gemini`, 2.0 and earlier | Refused — the model has no reasoning control | Refused |
+
+Two caveats worth knowing before you rely on a number:
+
+- On `openrouter`, `reasoningBudget` is an exact bound only on budget-native
+  models. Effort-only models translate it to the nearest effort level. The
+  budget is a request, and `metrics.reasoningTokens` is the record of what was
+  actually spent.
+- Every openrouter request that carries a reasoning setting also carries
+  `provider: { require_parameters: true }`, which keeps it away from endpoints
+  that would accept the request and ignore the setting. A model that cannot
+  honor what you asked for therefore FAILS the execution with the provider's
+  own reason — for example, "Reasoning is mandatory for this endpoint and
+  cannot be disabled" — rather than quietly running without it.
+
+### Measuring it
+
+`metrics.reasoningTokens` is reported separately by every path that returns
+metrics: the SDK's `prompts.execute`, the function `ctx.prompts.run` route, the
+admin execute endpoint, the workflow `prompt.execute` step, and
+`primitive prompts execute`. It is the only honest number: OpenRouter counts
+reasoning INSIDE `completion_tokens`, Gemini counts it OUTSIDE
+`candidatesTokenCount`, so neither headline figure says how much of the decode
+was deliberation. It is absent when the provider reports none, and `0` when a
+setting successfully declined it.
 
 ---
 
