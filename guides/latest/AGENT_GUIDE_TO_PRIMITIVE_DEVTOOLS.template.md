@@ -1133,12 +1133,35 @@ commands against it. Coordinates are in **points** — the same units
 `idb ui describe-all` reports — so there is no pixel conversion:
 
 ```bash
-idb_companion --udid <UDID> --grpc-port 10882 &        # serves on a gRPC port
+DEVELOPER_DIR="$(bash scripts/idb-developer-dir.sh)" idb_companion --udid <UDID> --grpc-port 10882 &   # serves on a gRPC port
 idb --companion localhost:10882 ui describe-all         # the accessibility tree
 idb --companion localhost:10882 ui tap <X> <Y>          # tap a point
 idb --companion localhost:10882 ui text "hello"         # type into the focused field
 idb --companion localhost:10882 ui key 40               # 40 = Return
 ```
+
+**The `DEVELOPER_DIR` is not optional on a current Xcode.** `idb_companion`
+loads SimulatorKit — the framework behind every HID call (`ui tap`, `ui text`,
+`ui key`) — from `$DEVELOPER_DIR/Library/PrivateFrameworks/SimulatorKit.framework`,
+and Xcode 27 ships it at `Xcode.app/Contents/SharedFrameworks/` with no
+`Contents/Developer/Library/PrivateFrameworks` at all. A companion started
+plainly under that Xcode serves `describe-all` happily and fails every tap with
+
+```
+SimulatorKit is required for HID interactions: Error Domain=com.facebook.FBControlCore
+Code=0 "Attempting to load a file at path '…/Developer/Library/PrivateFrameworks/
+SimulatorKit.framework', but it does not exist"
+```
+
+`scripts/idb-developer-dir.sh` prints a developer directory where the framework
+is: a symlink mirror of the Xcode bundle with SimulatorKit restored to the path
+idb looks in, built on first use and shared by every app on the machine
+(`PRIMITIVE_XCODE_SHIM_DIR`, default `~/.local/share/primitive/xcode-hid-shim`).
+Nothing inside `Xcode.app` is written and nothing needs root. On an Xcode that
+still keeps the framework where idb looks, it prints the active developer
+directory unchanged and creates nothing. `ui_signin` runs it itself — including
+in its preflight, so an Xcode it cannot work with is reported before the build
+rather than as a failed tap after it (#3487).
 
 To tap a control by identifier rather than raw coordinates, read
 `describe-all`, find the element whose `AXUniqueId` matches (this is where a

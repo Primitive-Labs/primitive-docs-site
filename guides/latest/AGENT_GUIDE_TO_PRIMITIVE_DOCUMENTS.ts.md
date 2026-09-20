@@ -24,13 +24,20 @@ A **document** is:
 - **Read-write** - View and edit capabilities
 - **Owner** - Full control including sharing and deletion
 
-**Size Guidelines:** Documents work best around ~10 MB each (soft limit). For most apps (thousands of records, years of data), this is sufficient. Past that, create a **large document** (`documentFormat: 2`, up to 2 GB; `--large` on the CLI). It is opt-in at creation and never migrated.
+**Size Guidelines:** Documents work best around ~10 MB each (soft limit). For most apps (thousands of records, years of data), this is sufficient. Past that, create a **large document** (`documentFormat: 2`; `--large` on the CLI) instead of splitting the data across documents or moving it to a database — validated at 320 MB, designed for 2 GB. It is opt-in at creation and never migrated. Past creation it is the same document API: open it, then read and write through the same model classes.
 
 **Large-document read path (format 2 only):**
 
 - A field read on an instance you already hold may return the previous value between a peer's update arriving and its fold settling. `find()` and `query()` always agree; await the client's projection barrier when you need the settled value.
 - `new Model({ id })` returns schema defaults until its first `await` (`find()` or `save()`). It is NOT a create: its first `save()` patches only the fields you set and preserves every untouched stored field.
 - If a change cannot be folded into the local store, the document goes read-refusing: reads and writes throw `FORMAT2_FOLD_BROKEN` (`error.code`) until the document is reconnected and catches up. Handle it by reconnecting, not by retrying the read.
+
+
+**Which clients can open a large document.** It needs a local database that outlives the session: a **Node** client opens one with no extra configuration, a **Swift** client opens one with its default on-disk store (`storageConfig: .sqlite(directory:)`; a client built with `.memory` is refused with `FORMAT2_STORAGE_UNAVAILABLE`), and a **browser** client needs the durable engine configured — `databaseConfig: { type: "opfs", options: { workerURL } }` (desktop Chrome, Firefox, Safari). Without that configuration a browser's engine holds data only for the life of the page, so opening a large document there is refused immediately with a typed `FORMAT2_STORAGE_UNAVAILABLE` error rather than opening a copy a reload would throw away. Ordinary documents are unaffected by this option either way.
+
+**Opening one in several tabs (browser only).** The browser store lives in one worker, which allows one connection to its database. Add `brokerURL` beside `workerURL` in `databaseConfig.options` and every tab of the same app that opens the document shares that one store: the first tab to open it becomes the leader and holds the connection, later tabs reach it through a port a small broker hands over. Saves, reads and queries behave the same in every tab — a save committed in one tab is visible to `find()`/`query()` in another as soon as it settles — and closing the leader tab hands the connection to another open tab automatically, with nothing pending lost. Without `brokerURL`, a second tab opening the same large document is refused with a typed `FORMAT2_WORKER_OPEN_FAILED` error.
+
+**Limits.** Offline writes are bounded by a window — 7 days by default, `largeDocumentWindowDays` in `app.toml`'s `[app]` section (or `PUT /settings`), 1–14 days. A client away longer than the window goes read-only (reads keep serving, local writes throw a typed error) until it syncs and catches up; the same window bounds how long the server keeps the change archives a returning client replays. Composite field values (rich text, nested maps and arrays) are rejected at write time — a large document's fields hold plain JSON values only.
 
 ## Documents vs. Databases
 
@@ -2386,6 +2393,51 @@ primitive documents permissions grant <document-id> --email user@example.com --p
 primitive documents permissions revoke <document-id> <user-id>
 primitive documents permissions revoke <document-id> --email user@example.com -y
 ```
+
+### Bulk-loading a large document
+
+A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal, an archive and a snapshot build every 8 MB, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
+
+```bash
+# A directory of per-model line files: one record per line, either
+# `<id><tab><merge patch JSON>` or one JSON object carrying its own `id`.
+#   records/note.ndjson
+#   records/tag.ndjson.gz
+primitive documents ingest <document-id> --input ./records -y
+
+# An export of the same (or another) document re-loads as it stands
+primitive documents export <app-id> <document-id> --output ./export
+primitive documents ingest <document-id> --input ./export -y
+
+# Watch a session that is already running, or one started with --no-wait
+primitive documents ingests list <document-id>
+primitive documents ingests get <document-id> <session-id>
+```
+
+Each line is an RFC 7396 merge patch over the record: a value replaces a field, `null` unsets it, a StringSet field takes a whole array (`[]` is an empty set, `null` removes it), and `{"_deleted": true}` alone deletes the record. Only the document's EXISTING models and fields are accepted, and every line is checked against them on your machine before a session is opened — the first failure names the file and the line. A bulk load replaces records in a live document and cannot be undone, so it confirms unless `-y`. Exit codes: **0** completed, **1** failed or refused, **124** `--timeout` elapsed, **130** Ctrl-C (the session keeps running).
+
+Application code does not normally drive a bulk load — it is an operator or a server-side job. When it does, the JS client carries thin wrappers over the same eight routes, and the session view they return is the one `documents ingests get` prints:
+
+```ts
+const session = await client.documents.ingests.create(documentId);
+await client.documents.ingests.uploadChunk(documentId, session.sessionId, {
+  model: "note",
+  index: 0,
+  rows,
+  bytes: body.byteLength,
+  rawBytes,
+  sha256,
+  firstId,
+  lastId,
+  body, // gzipped ndjson, as a Blob or a Uint8Array
+});
+await client.documents.ingests.commit(documentId, session.sessionId);
+
+// Poll until it settles; `abort` gives a session up before the swap.
+const status = await client.documents.ingests.get(documentId, session.sessionId);
+```
+
+Connected clients do not reload the document when the swap lands. They keep serving reads throughout, re-fetch only the chunks the artifact actually touched, refold their own recent writes on top, and then report the result through `document:snapshot-load` with `mode: "converge"` and `chunksReused`. A write that was still unacknowledged when the bulk load landed is classified rather than replayed blindly: one on a record the load deleted is dropped and surfaced through `documentOfflineWritesResolved` with `reason: "bulkIngest"`, and one on a record it modified is applied and surfaced as ambiguous with the same reason.
 
 ## Common Errors
 

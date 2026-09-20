@@ -65,9 +65,9 @@ Implemented in `src/workflows/runner/templates.ts`. Single source of truth — s
 }
 ```
 
-### Missing variables fail silent
+### Missing variables fail the render
 
-Missing paths render as **empty string** and emit a warning to logs. They do NOT throw.
+An unresolved reference fails the render — prompts use the same strict engine workflow steps do (see the WORKFLOWS guide). Guard an optional path with a `||` fallback.
 
 ```
 template:  "Hello {{ input.name }}"
@@ -166,8 +166,8 @@ Use a managed prompt (`client.prompts.execute`) or a workflow LLM step instead. 
 ### Don't do this
 
 ```
-# WRONG — assumes missing var throws. It doesn't.
-"Hello {{ input.name }}!"   →  "Hello !"  (silent)
+# WRONG — assumes a missing var renders empty. It doesn't: the render fails.
+"Hello {{ input.name }}!"   →  error (unresolved reference: input.name)
 
 # WRONG — using {{}} inside JSON without escaping breaks parsing.
 "Reply with {\"name\": \"{{ input.name }}\"}"
@@ -778,7 +778,7 @@ await client.prompts.execute("p", { variables: { name: "Alice" } });
 2. Run inside the project so the environment names the app, rather than passing `--app` everywhere.
 3. Prefer TOML + `config push` over CLI flags for anything with multiple configs or test cases.
 4. Always `preview` before `execute` when debugging templates — much faster.
-5. Missing variables silently render as empty. Use `||` fallbacks or `| expect: "..."` to fail loudly. (Note: `inputSchema` is metadata only — it is NOT validated against `variables` at execute time.)
+5. A missing variable fails the render. Use `||` fallbacks for paths that may be absent. (Note: `inputSchema` is metadata only — it is NOT validated against `variables` at execute time.)
 6. Evaluator prompts use `{{ output }}` (top-level), NOT `{{ input.output }}`.
 7. `outputSchema` only works with `provider = "gemini"`. With openrouter, use `outputFormat = "json"` + prompt the model.
    `outputFormat` does **not** decide what a workflow gets: a `prompt.execute` step declares `expect = "json"` (or `"text"`, the default) to fix the type of its `content`. Pair the step's declaration with whatever constrains YOUR provider — `outputFormat = "json"` on openrouter, `outputSchema` on gemini (where `outputFormat` only normalizes the response).

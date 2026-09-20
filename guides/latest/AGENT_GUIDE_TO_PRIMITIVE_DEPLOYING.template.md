@@ -153,7 +153,7 @@ The iOS template **ships Fastlane** — a root `Gemfile`, `fastlane/Appfile`, `f
 bundle install
 ```
 
-`fastlane/Appfile` is generic: it reads the app identifier and Team ID from `project.yml` at runtime, so there's nothing to edit there — set the Team ID with `primitive apple set-team-id <id>` (it writes `DEVELOPMENT_TEAM` in `project.yml`).
+`fastlane/Appfile` is generic: it reads the app identifier and Team ID from `project.yml` at runtime, so there's nothing to edit there — set the Team ID as `DEVELOPMENT_TEAM` in `project.yml`.
 
 ### 4. App Store Connect API Key
 
@@ -190,7 +190,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` still uses Xcode automatic signing, so it still needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
+Each build lane reads the Team ID from `project.yml` (it errors if unset — set `DEVELOPMENT_TEAM` in `project.yml`) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` still uses Xcode automatic signing, so it still needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 

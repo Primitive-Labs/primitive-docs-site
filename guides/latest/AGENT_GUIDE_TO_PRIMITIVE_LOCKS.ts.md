@@ -80,6 +80,30 @@ Reach for a lock only when none of these fit: a critical section spanning multip
 
 `LockTimeoutError` is thrown only by the blocking `acquire()` when it reaches `timeoutMs` without winning the key. `code: "LOCK_TIMEOUT"`; carries `key` and `timeoutMs`. Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `null`.
 
+## Re-taking Your Own Lease
+
+A handle is the only thing that frees a lock, so a caller that loses its handle — a task run the platform resets, a process that restarts — can neither release its key nor acquire it. Name an `owner` on acquire and it can take its own lease back.
+
+```ts
+const handle = await client.locks.tryAcquire(key, { ttlMs: 60_000, owner: myRunId });
+```
+
+Presenting the owner that already holds the key succeeds with a **fresh handle** and a fresh lease; the handle the previous acquire minted is fenced — `release` on it answers `not_holder` and `renew` answers `lease_lost`. The guarantee is one current handle at every instant, with every replaced handle fenced, so the acquire that lost the key can neither release it nor renew it.
+
+It is **not** a way to interrupt the previous holder. Nothing stops code that is already running; it runs on until it next talks to the lock and is told it is not the holder. Re-take when the earlier attempt is known to be gone — a run that was reset, naming itself with `owner: ctx.runId`.
+
+Three things must match, not just the owner:
+
+- **the same principal** — the same signed-in user, or the same function;
+- **the same kind of caller** — a function's hold is re-taken by that function's run, a member's own hold by that member. The owner is readable off `status`, so without this anyone who could read it could take the hold over; a member who starts a task cannot rotate or release the lease their function holds;
+- **the same owner string**, exactly.
+
+Everything else is refused with the contention shape it always had, and a hold made with **no** owner is never re-entered — omit `owner` and the lock is strictly non-reentrant, as before.
+
+**Choosing an owner.** Name the run (`ctx.runId` inside a server function), or the work a run key coalesces. Never a static string: two unrelated callers presenting one would re-enter each other's hold, which is the opposite of a lock.
+
+`status` reports the owner, so a refused caller can tell its own hold from another's.
+
 ## Sizing the Lease
 
 **The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
@@ -118,15 +142,16 @@ primitive config push --only rule-set/lock-policy
 
 | Command | Purpose |
 |---|---|
-| `primitive locks list [app-id] [--json]` | List every held lock in the app (**admin**). |
-| `primitive locks status <key> [app-id] [--json]` | Show the current holder of a key. |
-| `primitive locks acquire <key> [app-id] --ttl <ms> [--json]` | Single non-blocking attempt (`--ttl` default 60000); prints the handle. |
+| `primitive locks list [app-id] [--json]` | List every held lock in the app, with an `OWNER` column (**admin**). |
+| `primitive locks status <key> [app-id] [--json]` | Show the current holder of a key, including its `Owner`. |
+| `primitive locks acquire <key> [app-id] --ttl <ms> [--owner <owner>] [--json]` | Single non-blocking attempt (`--ttl` default 60000); prints the handle. `--owner` re-takes a lease that owner already holds. |
 | `primitive locks release <key> [app-id] --handle <handleId> [--json]` | Release with the handle from `acquire`. |
 
 ```bash
 primitive locks list
 primitive locks status portfolio-import:user-123
 primitive locks acquire portfolio-import:user-123 --ttl 60000
+primitive locks acquire portfolio-import:user-123 --owner run-01M2H5EYQQ
 primitive locks release portfolio-import:user-123 --handle 01HXY...
 ```
 

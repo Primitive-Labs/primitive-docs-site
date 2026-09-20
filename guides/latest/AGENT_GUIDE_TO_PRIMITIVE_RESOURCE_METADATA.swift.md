@@ -103,14 +103,15 @@ primitive metadata-category-configs list             # read-only inspection of c
 primitive metadata-category-configs get user profile # adds the full schema JSON
 ```
 
-Deleting a definition is deleting its file plus a pruning push. **Not** `--only`: a selector has to be declared by a file still on disk, so naming the definition you just deleted aborts the push with `No local file declares…`. Run the unscoped pruning push (`--dry-run` first to see the plan):
+Deleting a definition is deleting its file plus a pruning push, scoped to that one definition with `--only` so the rest of the tree is left alone (`--dry-run` first to see the plan):
 
 ```bash
 rm config/metadata-category-configs/user.profile.toml
-primitive config push --prune --yes
+primitive config push --only 'metadata-category-config/user#profile' --prune --dry-run
+primitive config push --only 'metadata-category-config/user#profile' --prune --yes
 ```
 
-(`--only 'metadata-category-config/user#profile'` scopes a push that *applies* that file — its key is the `resourceType#category` pair the file declares, NOT its dotted file name.)
+The selector's key is the `resourceType#category` pair the file declared, NOT its dotted file name. `--prune` is what makes naming a deleted definition legal: the sync state still tracks it, and that is where the pruning push gets its candidates. Without `--prune` the same selector aborts with `No local file declares…`, since a scoped push with nothing to apply would report success having done nothing. Drop `--only` to prune every removed definition in one run.
 
 - Batch: up to 50 resources, 200 expanded resource/category pairs per call — over either limit fails the **whole** call with `400 BATCH_TOO_LARGE` (checked before any read). Within limits the call is always `200`; per-item problems (missing category → `404 NOT_FOUND`, denied `readRule` → `403 FORBIDDEN`) surface inside `results[].categories[cat]`, never as a call-level failure.
 - Errors on single read/write: `404 NOT_FOUND` (no such category on that resource type), `403 FORBIDDEN` (`readRule`/`writeRule` denied), `400` (schema validation failure, or writing the reserved `attrs` category → `RESERVED_CATEGORY`).
@@ -198,7 +199,7 @@ categories = ["billing"]
 access = "md.caller.billing.status in ['trialing', 'active', 'past_due']"
 ```
 
-`md.caller` is bindable in **database operation `access`** (including per-param access and batch), the database's own `metadataAccess` rule, DO-trigger `when`/`set`, and **workflow `accessRule`** (`start` and `workflow.call`). With no authenticated caller (anonymous request, or a `runAs:"system"` workflow), `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
+`md.caller` is bindable in **database operation `access`** (including per-param access and batch), the database's own `metadataAccess` rule, DO-trigger `when`/`set`, and **workflow `accessRule`** (`start` and `workflow.call`), and in a **group or collection rule set** whose traversal path declares `rootFrom = "user.userId"` (the rule-set example below). With no authenticated caller (anonymous request, or a `runAs:"system"` workflow), `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
 
 ### Declaring a path on the rule entry (rule sets)
 
@@ -286,7 +287,6 @@ A write never checks that the target resource exists — a write for a not-yet-c
 
 - Declaring `[metadata.self] categories` for a plain `md.self.<category>` read — it's redundant, since self-reads are inferred; declaration matters only to load a category the rule never names, or to serve as the source category for a declared traversal path's `via` key. A **traversal path** (`md.<pathName>`) is the opposite: it's never inferred, so referencing one without a `[metadata.paths.*]` declaration is an undeclared reference. `secrets.<KEY>` likewise must be in the config's `secrets` allowlist. How an undeclared path or out-of-allowlist secret fails depends on the rule site: a **metadata category `readRule`/`writeRule`** and a **workflow `accessRule`** are linted at save time (a save-time 400), but a **database operation `access` rule** and a **group/collection rule set** are not — there the undeclared reference binds `null` and denies at runtime instead.
 - Expecting a category's own `readRule` to restrict what a *different* rule can read via `md.self`/`md.caller` — it only gates the read API, not CEL use of the value (trusted-author model).
-- Assuming `md.caller` works inside a group or collection rule set — it isn't bound there; it's for database operations and workflow `accessRule`.
 - Relying on resource deletion to clean up its metadata — there's no cascade; delete metadata explicitly in the same flow.
 - Trying to create or list category configs from the client SDK — that surface is TOML-sync/admin-REST only.
 - Treating `set()` as a merge — it's a full replace of the category's data.

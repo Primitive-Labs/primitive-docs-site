@@ -15,7 +15,7 @@ How to choose between **documents** and **databases**, and how to combine them. 
 | Offline | Yes — reads/writes work offline, sync resumes on reconnect (`offline: true` on the client) | No — every call requires the network |
 | Access control | Whole-document grant: `reader`, `read-write`, `owner` | Per-operation CEL on registered operations |
 | Per-record access for end users | Not possible — anyone with the doc gets everything | Yes — operation CEL + filters scope what each caller sees |
-| Practical size | ~10 MB per ordinary document (soft); up to 2 GB with `documentFormat: 2` | ~5 GB per database (one isolated instance each) |
+| Practical size | ~10 MB per ordinary document (soft); a large document (`documentFormat: 2`) is validated at 320 MB, designed for 2 GB | ~5 GB per database (one isolated instance each) |
 | Server-enforced fields | No (client writes Yjs updates directly) | Yes — `autoPopulatedFields` and per-model triggers |
 | Aggregates / multi-step reads | Client-side over local data | `aggregate`, `pipeline`, `count` operations |
 
@@ -36,7 +36,7 @@ Apply these in order. Stop at the first one that fits.
 1. **Different users need to see different records inside the same dataset?** → **Database**. Documents grant access to the whole document; you cannot project rows out per user.
 2. **Multiple users editing the same data live (Google-Docs style)?** → **Document**. Yjs is the only system here that merges concurrent edits without conflict.
 3. **Must work offline?** → **Document** (open the client with `offline: true`). Databases need the network for every call.
-4. **Dataset will exceed ~10 MB for a single sharing unit, or users only need a slice?** → **Database**. Documents replicate fully to every client. Size alone is the exception: when every member of the sharing unit needs all of the data, a **large document** (`documentFormat: 2`) holds up to 2 GB — records live in a persisted local store instead of in memory — on a client that provides one (Node).
+4. **Dataset will exceed ~10 MB for a single sharing unit, or users only need a slice?** → **Database**. Documents replicate fully to every client. Size alone is the exception: when every member of the sharing unit needs all of the data, create it as a **large document** (`documentFormat: 2`) instead — records live in a persisted local store instead of in memory, validated at 320 MB and designed for 2 GB. A Node client opens one with no extra configuration; a browser client needs the durable engine configured (`databaseConfig: { type: "opfs", options: { workerURL } }`) or the open is refused. See the large-document pattern below.
 5. **Server must own a field (timestamps, audit fields, computed status, role assignments)?** → **Database**. Use triggers; documents have no equivalent.
 6. **Need aggregates, group-by, or one round-trip that touches several models?** → **Database** (`aggregate`, `pipeline`).
 7. **None of the above and the data is per-user or per-shared-workspace?** → **Document**. Cheaper, lower latency, simpler.
@@ -92,6 +92,19 @@ Use for: task managers, journals, settings, preferences. Root document also work
 ```
 
 Use when each workspace is a sharing unit and every member of that workspace needs the full contents. Stays under ~10 MB per workspace.
+
+### Document — past the size threshold (large document)
+
+```typescript
+  await client.documents.open(documentId);
+
+  const imported = new Task({ title: "Imported row", priority: 0 });
+  await imported.save({ targetDocument: documentId });
+
+  const pending = await Task.query({ completed: false }, { documents: documentId });
+```
+
+Use when a workspace document's dataset will exceed ~10 MB and every member still needs all of it — multi-year records, imports. Create it with `documentFormat: 2` (`primitive documents create <title> --large` on the CLI) instead of splitting the data across documents or moving it to a database. Past creation it is the same document API: open it, then read and write through the same model classes — offline writes, live collaboration and permissions behave exactly as they do on an ordinary document.
 
 ### Database — registered operation with CEL access
 
