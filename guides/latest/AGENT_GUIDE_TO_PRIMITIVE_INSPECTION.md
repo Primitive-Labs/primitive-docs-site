@@ -1,23 +1,28 @@
 # Agent Guide to Primitive Inspection
 
-Guidelines for AI agents inspecting a running Primitive app from the CLI — reading what happened (workflow runs, live connections, sessions, blobs, records, metadata) without opening the Admin Console. The inspection commands share one set of conventions so they behave the same across resources, and two tailing modes — `--watch` (snapshot) and `--follow` (tail) — layer on top of any time-ordered list.
+Guidelines for AI agents inspecting a running Primitive app from the CLI — reading what happened (server function runs and invocation logs, live connections, sessions, blobs, records, metadata) without opening the Admin Console. The inspection commands share one set of conventions so they behave the same across resources.
 
 ## The inspection surface
 
 ```bash
-# Workflow runs (the reference tailing command)
-primitive workflows runs list <workflow-id>            # recent runs
-primitive workflows runs list --user-id <user-id>      # one user's runs, across every workflow
-primitive workflows runs steps <workflow-id> <run-id>  # every step run of one run
-primitive workflows runs status <workflow-id> <run-id> # one run's status + step results
-primitive workflows runs failures <workflow-id>        # failed runs only, with cause and failed step
+# Server functions
+primitive functions list                                  # functions + status (app-scoped)
+primitive functions get <function-id>                     # active version, capabilities, manifest, triggers
+primitive functions configs <function-id>                 # every pushed version, newest first
+primitive functions runs <function-id>                    # run rows: task starts, cron fires, webhook deliveries
+primitive functions runs steps <function-id> <run-id>     # one task run's step trace
+primitive functions runs wait <function-id> <run-id>      # poll a run until it settles
+primitive functions logs <function-id>                    # invocation records: output, error, stack
+primitive functions logs <function-id> --run <run-id>     # one run: step trace, then its records oldest first
+primitive functions logs <function-id> --invocation <id>  # one record, by the id an invoke answered with
+primitive functions logs <function-id> --follow           # tail new invocations
 
-# `runs steps` / `runs status` work on an in-flight run: finished steps so far
-# plus a `running` row for the step executing now, finalized in place when it ends.
+# `runs steps` works on an in-flight run: finished steps so far plus a
+# `running` row for the step executing now (a sleeping run's sleep step
+# stays `running` until it wakes).
 
 # The other log views
 primitive integrations logs <integration-id>           # outbound calls: status, timing, actor
-primitive webhooks events <webhook-id>                 # inbound deliveries and how they were handled
 primitive analytics events                             # app activity events
 
 # Blob storage
@@ -50,27 +55,28 @@ primitive metadata get <type> <id> <category>          # resource metadata
 Every inspection command honors the same read flags:
 
 - `--app <id>` — target app; falls back to the resolved environment's app.
-- `--json` — the output you parse. Most commands print the endpoint payload as-is; the log views below normalize theirs into the shared item shape described in the next section. It is always a JSON document, never a bare array. `--json` goes to stdout; status, warnings, progress, and the `CLI Version: …` banner all go to stderr, so a redirected stdout stays a single parseable document. That holds for the always-JSON commands too — `primitive documents dump <doc> | jq .` parses without a `--json` flag.
-- `--limit <n>` / `--cursor <c>` — paged reads. The response envelope is always `{ items, hasMore, nextCursor? }` — read `nextCursor` and pass it back as `--cursor`. Both `records query` verbs print exactly that envelope, whatever shape the underlying endpoint returns, and neither emits the deprecated `cursor` alias; the paginated log views (workflow runs, webhook events) still add `cursor` as a deprecated alias of `nextCursor`, kept for one window. Aggregate reads walk the `nextCursor` chain to the end.
+- `--json` — the output you parse. Most commands print the endpoint payload as-is; the log views below normalize theirs into the shared item shape described in the next section. It is always one JSON document, and never a bare array — EXCEPT `list --json` on the type-config readers (`group-type-configs`, `collection-type-configs`, `metadata-category-configs`, `database-type-configs`, `rule-sets`), which prints the array itself. `--json` goes to stdout; status, warnings, progress, and the `CLI Version: …` banner all go to stderr, so a redirected stdout stays a single parseable document. That holds for the always-JSON commands too — `primitive documents dump <doc> | jq .` parses without a `--json` flag.
+- `--limit <n>` / `--cursor <c>` — paged reads. A page with more after it carries `nextCursor`; pass it back as `--cursor`. `functions logs` and both `records query` verbs print `{ items, hasMore, nextCursor? }` whatever shape the underlying endpoint returns. Aggregate reads walk the `nextCursor` chain to the end.
 
-`list` always requires a **selector** — `--user-id`, `--owner`, a resource id — so it never enumerates the whole app. `--user-id` is the spelling on every list and inspection selector; `connections list`, `sessions list` and `tokens list` still accept `--user` as a deprecated alias that prints a notice on stderr. The one exception to the selector rule is a genuinely app-scoped resource such as `blob-buckets list`, which lists the app's buckets directly.
+`list` always requires a **selector** — `--user-id`, `--owner`, a resource id — so it never enumerates the whole app. `--user-id` is the spelling on every list and inspection selector. The exception to the selector rule is a genuinely app-scoped resource such as `blob-buckets list` or `functions list`, which list the app's buckets and functions directly.
 
 Permission sub-verbs differ by resource on purpose: documents use `permissions grant`/`revoke` (a reader/read-write/owner ladder), databases use `permissions add-manager`/`remove-manager` (a manager/owner ladder). What is uniform is `permissions list` and group nesting — not the mutation verb names.
 
 ## The log views and their shared item shape
 
-Seven views read "what happened": `workflows runs list`, `workflows runs failures`, `workflows runs steps`, `integrations logs`, `webhooks events`, `analytics events`, `functions logs`. Under `--json` they emit the same item shape inside the view's pagination envelope — never a bare array:
+Three views read "what happened" in the shared shape: `functions logs`, `integrations logs`, `analytics events`. Under `--json` they emit the same item shape inside the view's envelope — never a bare array:
 
 ```json
 {
   "items": [
     {
-      "source": "workflow-run",
+      "source": "function-log",
       "timestamp": "2026-07-24T18:03:11.204Z",
       "outcome": "error",
       "nativeStatus": "failed",
-      "correlation": { "runId": "01J…", "workflowId": "01J…", "userId": "01J…" },
-      "detail": { "workflowKey": "summarize", "errorMessage": "…" }
+      "durationMs": 412,
+      "correlation": { "eventId": "01J…", "runId": "01J…", "userId": "01J…" },
+      "detail": { "functionKey": "summarize", "triggerKind": "cron", "runtime": "task", "errorCode": "…", "errorMessage": "…" }
     }
   ],
   "hasMore": false
@@ -79,11 +85,11 @@ Seven views read "what happened": `workflows runs list`, `workflows runs failure
 
 | Field | Meaning |
 |---|---|
-| `source` | Discriminator: `workflow-run`, `workflow-step`, `integration`, `webhook`, `activity`, `function-log`. |
+| `source` | Discriminator: `function-log`, `integration`, `activity`. |
 | `timestamp` | ISO-8601 event time, or `null` when the record carries none. |
 | `outcome` | Normalized verdict: `ok`, `error`, `pending`, `neutral`. |
-| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `failed`/`completed`/`terminated` (run), `skipped` (step), `duplicate`/`workflow_inactive` (webhook), `completed`/`failed`/`timeout` or a platform refusal code (function log), `null` for an activity row other than `function.invoke`. |
-| `correlation` | Pivot keys: `runId`, `stepId`, `stepRunId`, `eventId`, `traceId`, `workflowId`, `workflowKey`, `integrationKey`, `webhookId`, `workflowRunId`, `userId` — including the row's own id, so a printed row can always be looked up again. Only the keys a source records are present. |
+| `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `completed`/`failed`/`timeout`/`running` or a platform refusal code (function log), `null` for an activity row other than `function.invoke`. |
+| `correlation` | Pivot keys — including the row's own id, so a printed row can always be looked up again. Only the keys a source records are present. |
 | `detail` | Per-source allowlist of operator-facing fields — a projection, not the stored record. |
 
 Outcome mapping, by source:
@@ -91,105 +97,55 @@ Outcome mapping, by source:
 | Source | `ok` | `error` | `pending` | `neutral` |
 |---|---|---|---|---|
 | Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
-| Workflow run | `completed` | `failed`, `terminated` | `queued`, `running`, `apply_pending`, `apply_claimed` | `missing`, `skipped` |
-| Workflow step | `completed` | `failed`, `error_captured` | — | `skipped`, `running` |
-| Webhook | `accepted`, `duplicate`, `handshake`, `workflow_inactive` | `rejected`, `error` | — | — |
 | Function log | `completed` | `failed`, `timeout`, a platform refusal code (`FUNCTION_BUNDLE_MISSING`, …) | `running` (a task slice that has printed and settled nothing) | anything else, and an absent status |
 | Activity | `function.invoke` with `status: "completed"` | `function.invoke` with `status: "failed"` or `"timeout"` | `function.invoke` with `status: "started"` | every other action, always |
 
-`workflow_inactive` is `ok` on purpose: the delivery was accepted and deliberately not dispatched.
+Activity events are `neutral` with ONE exception. They are counts, and inventing a verdict for a count would be fabricating a signal — but `function.invoke` carries the settled status in its own event context, so a failed invocation is reported as `error`, which is what makes failures countable through this contract. `started` is `pending`: a task start is in flight when its row is written, and its terminal outcome lives on the run row (`functions runs`). The context may arrive as an object or as a JSON string; an unparseable one stays `neutral` rather than being guessed at.
 
-Activity events are `neutral` with ONE exception. They are counts, and inventing a verdict for a count would be fabricating a signal — but `function.invoke` already carries the settled status in its own event context, so a failed invocation is reported as `error` rather than as `neutral`, which is what makes failures countable through this contract at all. `started` is `pending`: a task start is in flight when its row is written, and its terminal outcome lives on the run row, which the `workflow-run` source already maps. The context may arrive as an object or as a JSON string; an unparseable one stays `neutral` rather than being guessed at.
+The `function-log` source is a server function's invocation records. Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind` (`http`, `webhook`, `cron`, `function`, `manual`), `runtime` (`request` or `task`), `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated`, `logsUnavailable` and `contentSuppressed`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId` (the invocation id), the `runId` of a trigger fire or task run, and the attributed `userId`. Records are kept seven days and outlive an archived function.
 
-The `function-log` source is a server function's invocation records (`primitive functions logs <function-id>`). Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind`, `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated` and `logsUnavailable`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId`, the `runId` of a trigger fire or task run, and — for an invocation a DSL workflow's `workflow.call` step made — the parent's `workflowKey` and `stepId`.
+Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
 
-Pagination per view: `workflows runs list`, `workflows runs failures`, `webhooks events` and `functions logs` return `{ items, hasMore, nextCursor? }` and take `--limit`/`--cursor`; the two run views add `scanned` (runs examined) whenever a filter is in play, since a filtered read searches the index rather than reading one page; `workflows runs steps` returns `{ items }` (a run's steps are not paged); `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--source` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`.
+Not in the shared shape: `functions runs --json` prints the run rows as `{ items, nextCursor }` (each row adds `runtime`), and `functions runs steps --json` prints one run's full trace under `items`, never paged.
 
-The normalization is `--json`-only. The human tables stay per-view, because each carries columns the shared shape has no room for — a run's queue delay, a step's inter-step gap and token counts, a webhook event's id. `--watch --json` reprints the same envelope each tick; `--follow --json` emits one item per line (newline-delimited JSON), since a tail has no closing bracket to wait for.
+The normalization is `--json`-only. The human tables stay per-view, because each carries columns the shared shape has no room for.
 
-Invalid filter values are rejected, not ignored: an unparseable `--from`/`--to`, a non-positive `--limit`, an unknown `--source`, or a malformed `--cursor` fails with the server's validation message. A filter a view cannot serve (`webhooks events --from`, for instance) fails with a message listing the flags that view supports.
+Invalid filter values are rejected, not ignored: an unparseable `--from`/`--to`, a non-positive `--limit`, or a malformed `--cursor` fails with the server's validation message.
 
-## Triaging failures
+## Triaging a failing function
 
-`workflows runs failures <workflow-id>` is the grouping view: failed runs only, each row naming the cause and the step that produced it, so you can tell one repeated bug from several distinct ones without opening each run.
+1. `functions logs <function-id>` — newest first; the table is `TIME | STATUS | TRIGGER | RUNTIME | VERSION | RUN/INVOCATION ID | CODE | ERROR`, where ERROR is the first line of the error (or of stderr). `--json` carries the whole message, the stack, and every printed line.
+2. `functions logs <function-id> --invocation <id>` — one record in full. A record that never existed, belongs to another function, or aged past seven days all answer the same 404.
+3. For a task run: `functions logs <function-id> --run <run-id>` prints the step trace, then each record the run wrote, oldest first, with its lines under it. A run that slept writes one record per slice that settled; output printed before a hibernation is not recoverable.
+4. `functions runs <function-id>` — the run level: `RUN ID | STATUS | FIRED BY | RUNTIME | VERSION | PARENT | REFRESHES | RESETS | STARTED | ENDED | CODE`. Every cron fire and every webhook delivery writes a run row, so this is where a schedule's or a provider's effect shows. A run that RESET (a platform deploy tore a slice down and the engine replayed the step) and then completed carries no error — the RESETS column is the only place it shows.
+5. `functions get <function-id>` — the triggers as the platform holds them: the webhook's id, URL, scheme, status and last delivery; each cron entry's name, schedule, timezone, status, next fire, fire count and last run.
 
-```bash
-primitive workflows runs failures <workflow-id>
-primitive workflows runs failures <workflow-id> --json | jq -r '.items[].detail.errorTitle' | sort | uniq -c
-```
+`--invocation` cannot be combined with `--run`, `--follow`, `--cursor` or `--limit`. A filtered `--run` page that holds only other runs' records is followed a bounded number of times; if it is still empty the command prints the `--cursor` to continue rather than a bare "none".
 
-The table is `RUN ID | STEP | ERROR | STARTED | ENDED`. `ERROR` is the run's failure message, truncated to fit; `--json` carries it whole.
-
-Under `--json` each item is a `workflow-run` item whose `detail` carries the failure fields:
-
-| Field | Meaning |
-|---|---|
-| `errorMessage` | The failure message, verbatim. |
-| `errorTitle` | `errorMessage` with ids, numbers, URLs and quoted free-text values replaced by placeholder tokens; the keys of a JSON error body, quoted `SCREAMING_SNAKE` error enums and a status under a `code` / `status` key are kept, so two upstream errors of the same shape stay distinct. A `Caused by:` chain folds to its **head** message, so `errorTitle` shows the failure, not the chain — the full chain stays in `errorMessage`. Runs that failed for the same reason share one title, so this is the field to group and count on — and it is the same string `primitive analytics errors-groups` titles its groups with, so a spiking group can be grepped straight back to the runs that caused it. Both are derived from the message's first 2,000 characters, so an extremely long message groups by that prefix. |
-| `failedStepId` | The step that failed the run — the lowest-index step whose status is `failed`. Also in `correlation.stepId`, so it pivots to `runs steps` / `runs error`. |
-| `failedStepKind` | That step's kind (`database.query`, `llm`, …). |
-| `failedStepErrorTitle` | Normalized title of the step's own error, for grouping by step-level cause. |
-
-A `-` in the STEP column is a normal outcome, not a bug: a run can fail before any step runs, be reclaimed after its executor died, or fail output-schema validation after every step completed. The failure message is still there. Runs that finished before this attribution shipped have no step either. Note the two layers spell that absence differently: the HTTP response always carries all five failure keys, explicitly `null` when there is nothing to name, while the CLI's `--json` projection drops empty keys, so `detail.failedStepId` is absent rather than `null` (`jq` treats the two the same; a JS test for `=== null` does not).
-
-`runs error <workflow-id> <run-id>` remains the drill-down — it adds the caret-annotated expression, the step's input and config, and the full error detail, which the list deliberately never carries.
-
-The `--status` filter on `runs list` (and `runs failures`, which is `--status failed`) searches the index rather than filtering one page, so a failure older than the most recent successes is still found.
-
-`--limit` on `runs failures` is a number of **failures**, not a number of runs to look at: the command keeps searching back through history until it has that many failures, history runs out, or it has examined `--max-scan` runs (default 5,000; `--max-scan 0` removes the row cap). `--max-scan` is honoured to the nearest request — the count is checked after each request and one request examines up to 1,000 runs, so a small `--max-scan` still examines up to 1,000; the number in the closing line is always the number actually examined. One invocation issues at most 200 requests regardless of `--max-scan`, so a very deep search finishes across several `--cursor` continuations rather than in one command. It never reports a bare "no failures" over a search that stopped early — the closing line is one of:
-
-```
-No failures. Searched all 342 runs.
-No failures in the 5000 most recent runs. More history remains — re-run with --cursor eyJ… (or raise --max-scan).
-3 of 10 requested failures found in the 5000 most recent runs. More history remains — re-run with --cursor eyJ… (or raise --max-scan).
-```
-
-A sweep that stopped on the 200-request ceiling offers only `--cursor` (raising `--max-scan` cannot move that bound). A sweep started from `--cursor` counts rows from that position, so its wording is "… in N runs from this position", never "the N most recent runs" — do not read a resumed result as a statement about recent history.
-
-Under `--json` the same fact is a number: `scanned` is the total runs examined across every page the command fetched, and `nextCursor` is present only when history remains. `jq '{found: (.items|length), scanned, more: .hasMore}'` is the check for "how much of the history does this answer cover".
-
-```bash
-primitive workflows runs failures <workflow-id> --limit 25 --max-scan 20000
-primitive workflows runs failures <workflow-id> --json | jq '{found: (.items|length), scanned, more: .hasMore}'
-```
-
-`runs list --status <s>` stays a pager — its `--limit` is a page size and it does not resume itself — but its empty state reports the same way: how many runs it searched, and the `--cursor` to continue.
+A gate refusal (403 access, 404 unknown key, 400 input schema, 429 rate) writes no record — it never reached the code; debug it from the HTTP response.
 
 ## Reading one user's activity
 
 ```bash
-primitive workflows runs list --user-id <user-id>            # every run that user started, app-wide
-primitive workflows runs list <workflow-id> --user-id <id>   # narrowed to one workflow
-primitive analytics events --user-id <user-id>               # that user's activity events
+primitive analytics events --user-id <user-id>   # that user's activity events, function.invoke included
 ```
 
-`<workflow-id>` is optional when `--user-id` is given. The user-keyed run view reads a by-user index, so it does not offer `--follow`; use `--watch`.
+An invocation's record carries the attributed user as `correlation.userId`, so a `function.invoke` row in the user's events pivots to `functions logs` by function and time. Work with no human behind it is recorded against the app's own principal `sys:<appId>`, which the analytics surfaces display as `System`; `analytics events --user-id sys:<appId>` reads exactly that activity.
 
-`integrations logs` and `webhooks events` take no `--user-id`. An integration invocation records the acting user in `detail`/`correlation` but is indexed by integration, and a webhook event carries no user identity at all — it comes from an outside system. The recipe for those: read the user's runs first, then match `correlation.runId` or `correlation.traceId` in `integrations logs`, and `correlation.workflowRunId` in `webhooks events`.
+## `--follow`
 
-## `--watch` vs `--follow`
-
-Both poll on an interval — there is no server push — but they answer different questions:
-
-- **`--watch`** re-fetches the current snapshot each interval and re-renders the whole view. It is a periodic re-`list`/re-`get` and works on any list command with no server change. Use it to keep an eye on current state (statuses updating in place).
-- **`--follow`** tails: it appends new or changed rows since a server-owned checkpoint, like `tail -f`. Its first poll establishes a baseline and prints nothing for rows that predate the invocation ("show me what happens from now"). Use it to watch activity as it arrives.
+`functions logs <function-id> --follow` tails: it appends invocations as their records are written, like `tail -f`. Its first poll establishes a baseline and prints nothing for rows that predate the invocation ("show me what happens from now").
 
 ```bash
-primitive workflows runs list <workflow-id> --watch     # re-render the list every 2s
-primitive workflows runs list <workflow-id> --follow    # append runs as they start or change
-primitive workflows runs list <workflow-id> --follow --interval 5   # poll every 5s
+primitive functions logs <function-id> --follow
+primitive functions logs <function-id> --follow --interval 5   # poll every 5s
 ```
 
 Rules:
 
-- `--interval <seconds>` sets the poll interval — minimum 1s, default 2s.
-- `--watch` and `--follow` are mutually exclusive.
-- `--follow` is offered **only** where the endpoint supports the resume contract (today: `workflows runs list`). Other tailing candidates offer `--watch` until their endpoint adds it; passing `--follow` where it isn't supported fails with a clear message.
-- `--json --follow` emits **NDJSON** — one JSON object per new row per line. A tail is an unbounded stream, so it can't be one array; pipe it to `jq -c` and read line by line. `--json --watch` emits one array per redraw.
-- Ctrl-C stops a tail cleanly and exits 0.
+- `--interval <seconds>` — a positive number, default 2. There is no server push; the CLI polls.
+- `--follow` cannot be combined with `--cursor` (a tail starts from now), `--run` (a run's records are a bounded set; a tail walks the whole index), or `--invocation`.
+- `--json --follow` emits **NDJSON** — one shared-shape item per line. Pipe it to `jq -c` and read line by line.
+- Ctrl-C stops a tail cleanly.
 
-## What `--follow` guarantees
-
-`--follow` shows the **latest observed version** of a row, not every state change. It re-emits a run when a newer version is observed between polls, so a run you already saw reappears at its new position after its status changes — that is expected, not a duplicate. Two transitions that happen between the same pair of polls collapse to the latest stored version, so `--follow` is not an exactly-once event log.
-
-This is **near-lossless observed-version tailing**: it orders runs by when they last changed (`modifiedAt`), which has no guaranteed order among rows sharing a timestamp, and the underlying index is eventually consistent. So under a burst, rows sharing a timestamp or a delayed index update can occasionally be skipped or re-shown. Use `--follow` to watch activity, and `workflows runs status <workflow-id> <run-id>` for the authoritative state of one run.
+What it guarantees: an invocation id is minted at START and its record written at SETTLE, so a slow invocation lands below rows already printed. The tail looks back a minute past its high-water mark (the 30 s request ceiling plus the token's grace) and remembers which ids in that window it has shown, so each record prints once and the slow, failed and timed-out ones are not skipped. A burst larger than one page between polls is walked page by page back to the mark rather than skipped.

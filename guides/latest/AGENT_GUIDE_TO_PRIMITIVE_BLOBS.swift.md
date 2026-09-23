@@ -69,7 +69,7 @@ let blobs = client.documents.blobs(documentId: documentId)
 let blobs = client.documents.blobs(documentId: documentId)
 ```
 
-For general-purpose storage outside any document context — avatars, workflow outputs, public assets, anonymous reads via signed URLs — use a **blob bucket** instead (100 MB per blob). The [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) covers buckets and the full decision rule for choosing between the two.
+For general-purpose storage outside any document context — avatars, server-generated files, public assets, anonymous reads via signed URLs — use a **blob bucket** instead (100 MB per blob). The [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) covers buckets and the full decision rule for choosing between the two.
 
 ---
 

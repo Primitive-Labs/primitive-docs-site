@@ -7,7 +7,7 @@ Guidelines for AI agents working in a Primitive app that has more than one clien
 ```
 <repo>/
   primitive/config.json           # the environments: apiUrl + appId per environment
-  primitive/<env>/                # exported server config (workflows, database types, app settings)
+  primitive/<env>/                # exported server config (functions, database types, app settings)
   models/models.toml              # the model schema — one copy
   AGENTS.md                       # app-wide: this layout
   web/                            # Vue client: its own package.json, .env, AGENTS.md
@@ -28,7 +28,7 @@ primitive init my-app --platform web,ios   # one app, both clients, one reposito
 primitive init my-app --platform web       # one client: the flat standalone layout
 ```
 
-`--platform` takes one platform or a comma-separated list; the interactive prompt is a multi-select. A multi-platform run creates the app once, downloads and validates every template before creating anything, puts each client in a platform-named directory, and makes one initial commit at the root.
+`primitive init my-app` downloads the template for each platform, creates the app on the server, writes `primitive/config.json` with a `dev` environment bound to it, and installs dependencies (`pnpm install` for web, `swift package resolve` for Apple) unless you pass `--skip-install`. `--platform` takes one platform or a comma-separated list; the interactive prompt is a multi-select. A multi-platform run creates the app once, downloads and validates every template before creating anything, puts each client in a platform-named directory, and makes one initial commit at the root.
 
 ## Adding a client to an app that already exists
 
@@ -55,13 +55,13 @@ promote_schema = true     # consent to move a flat repo's schema to the root
 
 | Per app — at the repo root | Per client — in its directory |
 |---|---|
-| `primitive/config.json` (environments, app ID) | Generated code (models, workflow invokers, database types) |
+| `primitive/config.json` (environments, app ID) | Generated code (models, function invokers) |
 | `primitive/<env>/` server config | Runtime connection settings (`.env`, `primitive.json`) |
 | `models/models.toml` | Dependencies, build and test config |
 | App secrets and config vars | Deploy configuration |
 | The app-wide `AGENTS.md` | The client's own `AGENTS.md` |
 
-Workflow and database **definitions** are per app — they live in the sync tree. Their **generated code** is per client: run `primitive workflows codegen --lang ts -o …` in the web client and `--lang swift -o …` in the native one, from each client's own directory.
+Server function and database type **definitions** are per app — they live in the sync tree, and so do the database-type declarations functions compile against (`config push` writes them into the tree's `functions/` directory). The **client code** generated from the definitions is per client: run `primitive functions codegen --lang ts -o …` in the web client and `primitive functions codegen --lang swift -o …` in the native one, from each client's own directory, to write each client's typed invokers into its own source tree.
 
 ## The model schema
 

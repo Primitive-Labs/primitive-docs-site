@@ -1,6 +1,6 @@
 # Agent Guide to Primitive App Secrets
 
-Guidelines for AI agents managing credentials in Primitive apps. App secrets are the platform's server-side store for API keys, tokens, and other credentials referenced from backend config as `{{secrets.KEY}}`. Values resolve only on the server — they never appear in the repo, client code, or anything shipped to users. **Config vars** (below) are the non-secret twin of the same mechanism.
+Guidelines for AI agents managing credentials in Primitive apps. App secrets are the platform's server-side store for API keys, tokens, and other credentials referenced from backend config as `{{secrets.KEY}}` or read by a server function with `ctx.secret`. Values resolve only on the server — they never appear in the repo, client code, or anything shipped to users. **Config vars** (below) are the non-secret twin of the same mechanism.
 
 ## CLI
 
@@ -18,14 +18,14 @@ primitive secrets delete OPENAI_API_KEY
 
 | Surface | Fields | When resolved |
 |---|---|---|
-| Integrations | `requestConfig.defaultHeaders`, `requestConfig.staticQuery` | Per request, when the proxy executes the call |
-| Workflows | Any step-config template string; CEL contexts (`runIf`, `switch` `when`) expose `secrets.*` | Just before the step runs |
-| Inbound webhooks | A webhook's `signingSecret` / `previousSigningSecret` — which must each be a **whole** reference, never a literal (`400` `SIGNING_SECRET_MUST_BE_SECRET_REF`) | Server-side, immediately before HMAC verification of an incoming event. Referenced key must exist at create/update; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery, or `signing_secret_unset` if the stored value is missing. A raw value stored before this rule (`signingSecretStatus: legacy-literal`) still verifies, but updating **or rotating** that webhook is rejected `400` `SIGNING_SECRET_MIGRATION_REQUIRED` until the same write migrates it — rotation refuses so a raw value can never be moved into the grace slot. A stored value carrying reference syntax that resolves to nothing (`signingSecretStatus: malformed-reference`) does **not** verify — it fails closed like an unresolvable reference, and is blocked from writes the same way |
-| Databases | Operation `access` / per-param `access` CEL; trigger stamp `value` CEL | When the operation executes (secrets load only when the expression references `secrets.`) |
+| Integrations | `requestConfig.defaultHeaders`, `requestConfig.staticQuery` | Per request, when the platform makes the outbound call (including a function's `ctx.integrations.call` — the value never enters the sandbox) |
+| Server functions | `ctx.secret("KEY")` — not a template; requires `secret:KEY` in the function's `capabilities` | At call time. Undeclared → `FUNCTION_SECRET_GRANT_MISSING`; declared but unset in this environment → `FUNCTION_SECRET_NOT_FOUND`. Read through a short cache, so a just-rotated value may serve the old one for about a minute |
+| Function webhook triggers | `[function.triggers.webhook] signingSecret` — a **whole** reference, never a literal (refused at push) | Server-side, immediately before verification of an incoming event. The referenced key must exist when the push applies the trigger; **fails closed** with a `401` (`rejectionReason: secret_unresolved`) if unresolvable at delivery. `primitive webhooks rotate-secret` moves the trigger onto a new reference and keeps the previous one verifying through the grace window |
+| Databases | Server-stamped field trigger `value` CEL | When the trigger evaluates (secrets load only when the expression references `secrets.`) |
 
-`{{secrets.KEY}}` ≡ `{{ secrets.KEY }}` — whitespace around the reference is tolerated everywhere it resolves (integration/webhook fields and workflow step templates alike), but not inside `secrets.KEY` itself (no space around the dot). Uppercase key, max 64 chars. Type the reference rather than pasting it out of a document: a reference-only field (a webhook `signingSecret`, a Google client's `[auth.google.clients.<type>].clientSecret`) rejects a reference carrying an invisible character — a zero-width space or a byte-order mark — instead of resolving it with the stray character inside the credential.
+`{{secrets.KEY}}` ≡ `{{ secrets.KEY }}` — whitespace around the reference is tolerated everywhere it resolves (integration and webhook fields alike), but not inside `secrets.KEY` itself (no space around the dot). Uppercase key, max 64 chars. Type the reference rather than pasting it out of a document: a reference-only field (a webhook `signingSecret`, a Google client's `[auth.google.clients.<type>].clientSecret`) rejects a reference carrying an invisible character — a zero-width space or a byte-order mark — instead of resolving it with the stray character inside the credential.
 
-**The CEL `secrets.*` variable is declared-only.** In a CEL expression (workflow `runIf` / `switch` `when`, a database operation or per-param `access` rule, a trigger stamp `value`), `secrets.*` binds **only** the keys the owning config declares in a top-level `secrets = ["KEY", ...]` manifest — on the database or collection type config, or the workflow definition. An undeclared `secrets.KEY` is absent at evaluation, so a rule that reads it denies closed. The `{{secrets.KEY}}` template form (the rows above) is unaffected: it resolves any set key.
+**The CEL `secrets.*` variable is declared-only.** In a CEL expression (a database trigger stamp `value`, a collection rule), `secrets.*` binds **only** the keys the owning config declares in a top-level `secrets = ["KEY", ...]` manifest — on the database or collection type config. An undeclared `secrets.KEY` is absent at evaluation, so a rule that reads it denies closed. The `{{secrets.KEY}}` template form (the rows above) is unaffected: it resolves any set key.
 
 There is no client-side surface: apps cannot read secret values through any API.
 
@@ -34,10 +34,10 @@ Integration templates only match uppercase keys — `{{secrets.MY_KEY}}` with `[
 ## Rules
 
 1. **Never inline a credential in TOML** — config files are committed. Reference `{{secrets.KEY}}` and set the value with the CLI.
-2. **Resolve secrets in integration config, not workflow step config.** A workflow step's resolved config is recorded in the run's step output snapshots — a secret templated into `request.headers` becomes readable in run detail. Secrets in the integration's `defaultHeaders`/`staticQuery` resolve after that snapshot and stay invisible. (See the integrations guide.)
+2. **Resolve credentials in integration config, not function code.** A secret in the integration's `defaultHeaders`/`staticQuery` is resolved by the platform into the outbound request and never enters the function. Use `ctx.secret` only when the function itself must hold the value (e.g. to compute a signature), and never print it: invocation logs redact a `ctx.secret` value best-effort only (`[REDACTED:<NAME>]`), and a transformed value is not detectable. (See the integrations and server-functions guides.)
 3. **Rotation is an overwrite**: `primitive secrets set KEY --value <new>` takes effect on the next resolution — no config push needed, since config references the key, not the value. A key holds exactly one value, so this is a sharp cutover; where a provider gives an overlap window (a webhook signing secret), create a SECOND key and rotate the reference onto it instead.
-4. After changing which keys exist, re-check references: an unresolved `{{secrets.MISSING}}` in a workflow fails the step, naming the key; an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook whose referenced key is gone rejects every signed delivery `401`.
-5. **Budget the 100-key limit.** Every credential a server-side config references is one key — an integration's API key, each signed webhook's signing secret (plus a second key while a rotation window is open), a database rule's token. An app with many signed webhooks needs one key per webhook.
+4. After changing which keys exist, re-check references: a function reading a deleted key gets `FUNCTION_SECRET_NOT_FOUND`, naming it; an integration header referencing a deleted key sends the unresolved placeholder upstream; a webhook trigger whose referenced key is gone rejects every signed delivery `401`.
+5. **Budget the 100-key limit.** Every credential the server side uses is one key — an integration's API key, each webhook trigger's signing secret (plus a second key while a rotation window is open), a token a function reads. An app with many signed webhook triggers needs one key per trigger.
 
 ## Config Vars
 
@@ -58,14 +58,14 @@ Var writes classify their `409` by code: `VAR_KEY_EXISTS` (a create targets a ke
 
 ### Where `{{ vars.KEY }}` resolves
 
-`{{ vars.KEY }}` resolves everywhere `{{secrets.KEY}}` resolves — the same table as above: integration `requestConfig.defaultHeaders`/`requestConfig.staticQuery` (per request, at proxy time) and any workflow step-config template string (including forEach/compensate/durable-batch contexts), just before the step runs. Same grammar as secrets: uppercase key, `{{vars.KEY}}` ≡ `{{ vars.KEY }}` (whitespace-tolerant), `[A-Z][A-Z0-9_]`, max 64 chars.
+`{{ vars.KEY }}` resolves in integration `requestConfig.defaultHeaders`/`requestConfig.staticQuery` (per request, when the outbound call is made). A server function reads a var with `ctx.configVar("KEY")` — no capability line; a missing var answers `FUNCTION_VAR_NOT_FOUND`; each name is read once per config version and cached in the sandbox, so a changed value reaches a function on its next pushed version. Same grammar as secrets: uppercase key, `{{vars.KEY}}` ≡ `{{ vars.KEY }}` (whitespace-tolerant), `[A-Z][A-Z0-9_]`, max 64 chars.
 
 Two deliberate divergences from secrets, both worth tracking explicitly:
 
 1. **Never redacted.** A var resolved into a header/query value is not marked sensitive and is not masked in admin logs or the test-mode request preview — only a value substituted from `{{secrets.*}}` becomes `[redacted]`. Vars are non-secret and stay visible everywhere.
 2. **Not validated at save time.** Saving/updating an integration whose `defaultHeaders`/`staticQuery` reference a nonexistent `{{secrets.KEY}}` fails with a 400 naming the missing key. The same integration referencing a nonexistent `{{vars.KEY}}` saves successfully — the reference simply resolves to the literal `{{vars.KEY}}` placeholder at call time (the same behavior secrets fall back to only if the key is deleted *after* save).
 
-### Declared-only in CEL — with one carve-out
+### Declared-only in CEL
 
 Declare a var for CEL access in the owning config's top-level manifest:
 
@@ -73,20 +73,7 @@ Declare a var for CEL access in the owning config's top-level manifest:
 vars = ["ADMIN_GROUP_ID"]
 ```
 
-A rule reads it as `vars.<KEY>`, bound only to declared keys. That declared-only rule governs database operation `access`/per-param `access`, database trigger CEL, trigger stamp `value` expressions, and every `accessRule` (workflows, prompts, integrations).
-
-**Workflow guard CEL is the carve-out.** A step's `runIf`, a `forEach` step's per-iteration `runIf` and `successWhen`, a `switch` case's `when`, a compensation step's guard, and any named `expr.*` definition all bind the app's **full** config-vars map, with no `vars = [...]` declaration — the same values `{{ vars.KEY }}` renders in that workflow's step config. Vars are non-secret by construction and the workflow author already reads the whole map through templating in the same file, so there is nothing for a declaration to protect there.
-
-`secrets.*` is NOT carved out. A guard reading `secrets.KEY` still sees only the manifest-declared keys, never the full app-secret map, in every context.
-
-An undeclared key does not "deny closed" — its behavior depends on the site:
-
-| Site | Reading a key that isn't bound |
-|---|---|
-| `runIf` (step, `forEach`, compensation) | throws `No such key: KEY`; the wrapped error carries the `in`-operator hint and fails the step (or is captured by `continueOnError`) |
-| `switch` case `when` | throws `No such key: KEY` as an ordinary step failure (no runIf hint) |
-| `forEach` `successWhen` | the error is logged and the iteration is classified `succeeded` — a broken classifier never fails the run |
-| database `access`, trigger CEL, stamps, `accessRule` | the key is unbound, so the rule errors and the access is refused |
+A rule reads it as `vars.<KEY>`, bound only to declared keys — in every CEL context: collection rules, database trigger CEL and trigger stamp `value` expressions alike. An undeclared key is unbound, so the rule errors and access is refused.
 
 Test presence first when a key may be missing: `'KEY' in vars` is false rather than throwing, and `vars.?KEY` returns an optional. This CEL path is independent of the template-resolution form above — a config can use either or both.
 
@@ -96,7 +83,7 @@ Unlike secrets — which never appear in TOML, by design — config vars round-t
 
 ```toml
 # Per-environment non-secret config vars.
-# Bind as {{ vars.KEY }} in workflow/integration config and vars.* in CEL rules.
+# Bind as {{ vars.KEY }} in integration config and vars.* in CEL rules.
 # Values are checked into the repo and NOT secret — never put a credential
 # here; use `primitive secrets` for that.
 
@@ -109,11 +96,11 @@ API_HOST = "https://api.example.com"
 - `config diff` reports var add/remove/modified rows like any other synced entity.
 - **Concurrent-edit guard**: if the server's value drifted since the last local sync (edited from the Admin Console, say), push reports `CONFLICT var: KEY` — with `Local last sync:` / `Server modified:` lines, the same pattern used for every other synced entity type — and exits non-zero. `--force` bypasses the check and overwrites/deletes unconditionally.
 
-There is no client-side read API for vars — `primitive vars list` / `primitive vars get`, the admin API, `vars.toml`, and the Admin Console's Config Vars view are the only read surfaces.
+There is no client-side read API for vars — `primitive vars list` / `primitive vars get`, the admin API, `vars.toml`, the Admin Console's Config Vars view, and a server function's `ctx.configVar` are the only read surfaces.
 
 ## Related guides
 
 - **integrations** — the most common secret and var consumer (auth headers, static query params)
-- **workflows** — `secrets.*` / `vars.*` in the template/CEL context
-- **databases** — `secrets.*` / `vars.*` in operation access rules and trigger stamps
+- **server-functions** — `ctx.secret`, `ctx.configVar`, the `secret:` capability, webhook trigger signing secrets
+- **databases** — `secrets.*` / `vars.*` in trigger stamps
 - **configuration** — the sync loop that carries secret-referencing TOML and the var-carrying `vars.toml`

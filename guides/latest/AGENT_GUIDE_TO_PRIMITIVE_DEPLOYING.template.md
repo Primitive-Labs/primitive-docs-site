@@ -47,7 +47,7 @@ VITE_OAUTH_REDIRECT_URI=https://my-app-prod.your-subdomain.workers.dev/oauth/cal
 
 The app ID and backend URL live in `primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
 
-**A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them. For an app scaffolded by an older CLI, that deletion is the entire migration.
+**A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them.
 
 ### 3. Deploy
 
@@ -131,7 +131,7 @@ The Team ID is the single setting required for device, TestFlight, and App Store
    bash scripts/regenerate-project.sh
    ```
 
-   That script is the one entry point for regeneration: it runs `scripts/codegen.sh` (models, workflow factories and database types — `xcodegen` can only list files that already exist, so a newly emitted one has to be on disk first), then `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+   That script is the one entry point for regeneration: it runs `scripts/codegen.sh` (models and the typed code generated from your server configuration — `xcodegen` can only list files that already exist, so a newly emitted one has to be on disk first), then `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
 
    The generated sources are committed, so a regeneration that changes them is a diff to review and commit — including one produced by a release build. `./archive.sh` has no codegen policy of its own: it regenerates and builds like every other path.
 
@@ -190,7 +190,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors if unset — set `DEVELOPMENT_TEAM` in `project.yml`) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` still uses Xcode automatic signing, so it still needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
+Each build lane reads the Team ID from `project.yml` (it errors if unset — set `DEVELOPMENT_TEAM` in `project.yml`) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` uses Xcode automatic signing, so it needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 

@@ -10,7 +10,7 @@ running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
 1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds, plus server-side databases.
+   client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
 3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
@@ -247,7 +247,7 @@ in this panel, in the same authenticated session as the host app, and headlessly
 in Node under vitest (see "Headless runs (vitest / CI)" below). Key
 invariants (both contexts unless noted):
 
-1. **Explicit document lifecycle.** Tests that need database/model operations
+1. **Explicit document lifecycle.** Tests that need document/model operations
    call `createTestDocument()` / `destroyTestDocument()` themselves.
    `createTestDocument()` creates a local-only document titled
    `===TEST=== {timestamp}-{random}`, opens it with
@@ -447,7 +447,7 @@ run: async (log) => {
 //   src/tests/foo.test.ts          ← NOT discovered
 //   src/tests/foo.primitive-test.ts ← discovered
 
-// WRONG — using createTestDocument when no database ops are needed
+// WRONG — using createTestDocument when no document/model ops are needed
 // (wastes time creating/destroying a document for nothing)
 run: async (log) => {
   const doc = await createTestDocument();  // unnecessary

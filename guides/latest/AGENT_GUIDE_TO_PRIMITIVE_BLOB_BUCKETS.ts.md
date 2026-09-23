@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Blob Buckets
 
-Guidelines for AI agents implementing bucket storage in Primitive apps. **Blob buckets** are general-purpose binary storage that isn't tied to a document — use them for avatars, public assets, workflow outputs, short-lived exports, and anywhere you need a signed URL. Binary files attached to a specific document live in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
+Guidelines for AI agents implementing bucket storage in Primitive apps. **Blob buckets** are general-purpose binary storage that isn't tied to a document — use them for avatars, public assets, server-generated files, short-lived exports, and anywhere you need a signed URL. Binary files attached to a specific document live in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
 
 ## Bucket operations
 
@@ -76,7 +76,7 @@ Admin/owner only. Deleting a bucket cascades to every blob inside it.
   await client.blobBuckets.getSignedUrl("avatars", blobId, 3600);
 ```
 
-**Decision rule:** use document-scoped blobs when the file's lifetime and access naturally match a document's. Use a bucket for avatars, workflow outputs, public assets, anonymous reads via signed URLs, or anything that should live outside any specific document. Document-scoped blobs (10 MB cap, permission inheritance, offline caching) are covered in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
+**Decision rule:** use document-scoped blobs when the file's lifetime and access naturally match a document's. Use a bucket for avatars, server-generated files, public assets, anonymous reads via signed URLs, or anything that should live outside any specific document. Document-scoped blobs (10 MB cap, permission inheritance, offline caching) are covered in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
 
 ---
 
@@ -85,7 +85,7 @@ Admin/owner only. Deleting a bucket cascades to every blob inside it.
 A bucket has a `ttlTier` and a `preset` (or a `ruleSetId` for a custom bucket). Configure via TOML sync (preferred), the CLI, or `createBucket` (see **Bucket admin** above).
 
 ```toml
-# config/blob-buckets/avatars.toml
+# primitive/dev/blob-buckets/avatars.toml
 [bucket]
 key = "avatars"
 name = "User avatars"
@@ -96,7 +96,7 @@ preset = "authenticated"                    # public | authenticated | admin-onl
                                             # is governed entirely by the rule set (see below)
 ```
 
-The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `config/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
+The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `primitive/<env>/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
 
 Scaffold and apply it:
 
@@ -212,13 +212,11 @@ imgEl.src = url;
 
 ---
 
-## Workflow integration
+## From a server function
 
-The `blob.upload`, `blob.download`, `blob.signedUrl`, and `blob.delete` workflow steps write to, read from, sign URLs for, and delete from buckets. Steps reference the bucket by `bucketId` or `bucketKey`; `blob.delete` also takes a batch `blobIds` form (up to 500 ids, screened against the `delete` policy all-or-nothing before anything is removed). A `runAs:"caller"` run evaluates this bucket policy per op with the same mapping as direct calls (upload → `write`, download → `read`, signedUrl → `share`, delete → `delete`); a `runAs:"system"` run is app-privileged and skips it. See the [Workflows guide](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md).
+A server function reaches buckets through `ctx.api.blobBuckets` — `upload`, `download`, `getMetadata`, `getSignedUrl`, `list`, `delete`, `deleteBatch` (up to 500 ids), and bucket-level `getBucket` / `listBuckets` / `updateBucket`, plus `createBucket` / `deleteBucket`, which need the `blobBuckets:createBucket` / `blobBuckets:deleteBucket` capabilities. Function code acts as the system, so the bucket's preset or rule set — which governs client calls — is not evaluated; the function's own `access` gate is the authorization.
 
-A blob a workflow run reads as input must outlive the run's retry window: retries re-read the same `blobId`, and deleting the blob between attempts fails the next retry — and the run — with a not-found error. Don't delete such blobs from outside the run (a cancel path, another workflow) — put them in a bucket whose TTL tier matches their lifespan and let expiry clean them up.
-
----
+A blob a task run reads as input must outlive the run: a retried or replayed step re-reads the same `blobId`, and deleting the blob between attempts fails the step — and the run — with a not-found error. Don't delete such blobs from outside the run (a cancel path, another function) — put them in a bucket whose TTL tier matches their lifespan and let expiry clean them up.
 
 ## Anti-patterns
 

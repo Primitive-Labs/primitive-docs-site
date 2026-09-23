@@ -10,7 +10,7 @@ running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
 1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds, plus server-side databases.
+   client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
 3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
@@ -260,7 +260,7 @@ in this panel, in the same authenticated session as the host app, and headlessly
 in Node under vitest (see "Headless runs (vitest / CI)" below). Key
 invariants (both contexts unless noted):
 
-1. **Explicit document lifecycle.** Tests that need database/model operations
+1. **Explicit document lifecycle.** Tests that need document/model operations
    call `createTestDocument()` / `destroyTestDocument()` themselves.
    `createTestDocument()` creates a local-only document titled
    `===TEST=== {timestamp}-{random}`, opens it with
@@ -460,7 +460,7 @@ run: async (log) => {
 //   src/tests/foo.test.ts          ← NOT discovered
 //   src/tests/foo.primitive-test.ts ← discovered
 
-// WRONG — using createTestDocument when no database ops are needed
+// WRONG — using createTestDocument when no document/model ops are needed
 // (wastes time creating/destroying a document for nothing)
 run: async (log) => {
   const doc = await createTestDocument();  // unnecessary
@@ -849,22 +849,6 @@ directly. `ctx.log` accumulates output; `ctx.check(Bool, String)` throws on fals
 any thrown `Error` marks the test failed with its description. Writing a test that
 does the minimum setup to reproduce a bug is usually the fastest way to build a
 repro and iterate.
-
-## Databases
-
-Two CRUD paths over a server-side database, in one view:
-
-1. **Models (primary)** — generic CRUD on rows, bypassing operation rules. Gated
-   server-side to app admins and database owners; a non-admin query returns
-   401/403 and the UI auto-expands the operations path with an explanation. This
-   is the admin debugging door.
-2. **Registered operations (secondary)** — the CEL-gated, app-defined named
-   operations registered via `DatabasesAPI.createOperation(databaseId:params:)`.
-   Anyone with access can run an operation within its rule; the result renders as
-   a table (array of dicts) or raw JSON.
-
-Both coexist so any user can interact with any database: admins browse raw via
-Models; everyone else uses the operations path.
 
 ## Collections
 

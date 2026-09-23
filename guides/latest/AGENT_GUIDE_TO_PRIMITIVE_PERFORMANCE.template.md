@@ -10,15 +10,15 @@ This guide catalogs the patterns that reliably cut cold-load time, the anti-patt
 
 | Lever | Typical wins |
 |---|---|
-| Replace N+1 ops with a bulk op | one round trip instead of N |
-| Replace several related ops with a `pipeline` op | one round trip instead of many |
+| Return several models from one function call | one round trip instead of one per model |
+| Replace N+1 calls with one bulk call — and one bulk query inside it | one round trip instead of N |
 | Use bulk third-party endpoints (e.g. `/v7/finance/quote?symbols=`) instead of one call per ID | one HTTP per page instead of N |
-| Move third-party API calls to a server-side cron + cache | zero client calls per page |
-| Parallelize independent awaits | wall-clock cut by serialization length |
+| Move third-party API calls to a scheduled function + cache | zero client calls per page |
+| Parallelize independent awaits — in app code and inside functions | wall-clock cut by serialization length |
 | Defer non-critical work off the cold path (memberships, auth config, prefs init) | one or more sequential round trips removed from first paint |
 | Render with stale/imported values immediately, refresh in background | first paint independent of slow upstream |
 | Pure-compute over cached source data instead of reloading | next render is ~free |
-| `client.databases.subscribe` for cache invalidation | warm navigation between screens can be 0 round trips |
+| A channel message for cache invalidation | warm navigation between screens can be 0 round trips |
 
 The rest of this guide explains each in detail with the patterns and the anti-patterns they replace.
 
@@ -35,184 +35,110 @@ Two recurring reasons "background" work ends up blocking:
 
 Both look correct in isolation. Both are bugs.
 
-## Pattern 1 — Bundle related queries into a pipeline op
+## Pattern 1 — Return several models from one function call
 
 ### Anti-pattern
 
-A page needs several pieces of data from the same database, fetched one at a time:
-
-{{#lang ts}}
-```ts
-// 5 sequential round trips to the SAME database
-const groups = await db.executeOperation("listGroups");
-const accounts = await db.executeOperation("listAccounts");
-const holdings = await db.executeOperation("listHoldings");
-const targets  = await db.executeOperation("listAllTargets");
-const latest   = await db.executeOperation("listLatestSnapshot");
-```
-{{/lang}}
-{{#lang swift}}
-```swift
-// 5 sequential round trips to the SAME database
-let groups = try await client.databases.executeOperation(databaseId: dbId, name: "listGroups")
-let accounts = try await client.databases.executeOperation(databaseId: dbId, name: "listAccounts")
-let holdings = try await client.databases.executeOperation(databaseId: dbId, name: "listHoldings")
-let targets = try await client.databases.executeOperation(databaseId: dbId, name: "listAllTargets")
-let latest = try await client.databases.executeOperation(databaseId: dbId, name: "listLatestSnapshot")
-```
-{{/lang}}
-
-Each call has its own request/response overhead. They serialize even though none depend on each other.
+A page needs several collections from the same database and makes one function call per collection — `list-groups`, `list-accounts`, `list-holdings`, `list-targets`, `latest-snapshot` — one after another. Each call has its own request/response overhead, and they serialize even though none depends on another.
 
 ### Pattern
 
-Define a single pipeline operation in the database TOML:
+Write one function that reads every model the page needs, in parallel, and returns them together:
 
-```toml
-[[operations]]
-name = "dashboardBundle"
-type = "pipeline"
-modelName = "_pipeline"
-access = "user.userId == database.metadata.ownerId"
-[operations.definition]
-return = "all"
+```ts
+// primitive/dev/functions/dashboard-bundle/index.ts
+import { defineFunction } from "primitive-functions";
 
-[[operations.definition.steps]]
-name = "groups"
-type = "query"
-modelName = "groups"
-filter = { ownerId = "$user.userId" }
-limit = 50
-
-[[operations.definition.steps]]
-name = "accounts"
-type = "query"
-modelName = "accounts"
-filter = { ownerId = "$user.userId" }
-limit = 100
-
-[[operations.definition.steps]]
-name = "holdings"
-type = "query"
-modelName = "holdings"
-filter = { ownerId = "$user.userId" }
-limit = 1000
-
-[[operations.definition.steps]]
-name = "targets"
-type = "query"
-modelName = "targets"
-filter = {}
-limit = 1000
-
-[[operations.definition.steps]]
-name = "latestSnapshot"
-type = "query"
-modelName = "snapshots"
-filter = { ownerId = "$user.userId" }
-sort = { createdAt = -1 }
-limit = 1
+export default defineFunction(async (input: { databaseId: string }, ctx) => {
+  const db = ctx.db(input.databaseId, "portfolio");
+  const owner = ctx.user!.userId;
+  const [groups, accounts, holdings, targets, latest] = await Promise.all([
+    db.model("groups").query({ filter: { ownerId: owner }, options: { limit: 50 } }),
+    db.model("accounts").query({ filter: { ownerId: owner }, options: { limit: 100 } }),
+    db.model("holdings").query({ filter: { ownerId: owner }, options: { limit: 1000 } }),
+    db.model("targets").query({ options: { limit: 1000 } }),
+    db.model("snapshots").query({ filter: { ownerId: owner }, options: { sort: { createdAt: -1 }, limit: 1 } }),
+  ]);
+  return {
+    groups: groups.items,
+    accounts: accounts.items,
+    holdings: holdings.items,
+    targets: targets.items,
+    latestSnapshot: latest.items[0] ?? null,
+  };
+});
 ```
 
-Then execute it in one round trip and read each step's `data`:
+Then call it once:
 
-{{ example: performance/pipeline-bundle }}
+{{ example: performance/function-bundle }}
 
 ### When to reach for it
 
-Whenever a page reads three or more independent collections from the same database. Always when you're in a `for` loop calling the same op with different params (see Pattern 2).
+Whenever a page reads three or more independent collections. Always when you're in a `for` loop calling the same function with different input (see Pattern 2).
 
 ### Gotchas
 
-- Pipeline steps need an explicit `filter` field, even if empty (`"filter": {}`). Omitting it fails `primitive config push` with a 400 (`query step requires a "filter" field`) attributed to that operation.
-- Each step's `limit` matters — pipelines don't paginate. Per-step `limit` caps at 1000, a pipeline allows at most 10 steps, and step types are `query`/`count`/`aggregate` only. Pick limits that comfortably cover real data without blowing past the reasonable size of a single response.
-- Pipelines only span one database. If the page also needs data from a *different* database, that's a second call (e.g. a per-user portfolio DB plus a shared securities-ref DB).
+- Each `query` answers one page. Set `limit` to comfortably cover real data, and page with `nextCursor` inside the function when a model can outgrow it — the client still pays one round trip.
+- A function can open several databases (`ctx.db(otherId, "securities-ref")`) and read them in the same `Promise.all`, so a per-user database plus a shared reference database is still one call.
+- A read that many callers repeat can be registered with `defineQuery` and `cache: { ttlMs }` — honored only when the run touched nothing but its declared `models` and wrote nothing, and capped at one minute. See [Registered queries](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#registered-queries).
+- The function's response counts against its output ceiling; return the fields the page renders, not whole records it ignores (`options.projection`).
 
-See [Databases — Pipeline operations](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#pipeline--multi-step-read-operations) for the full pipeline reference.
-
-## Pattern 2 — Replace N+1 with a bulk op
+## Pattern 2 — Replace N+1 with a bulk query
 
 ### Anti-pattern
 
-A per-item operation called once for every item in a collection:
+A per-item read for every item in a collection — either the client invoking a per-group function in a loop, or a function querying once per group:
 
-{{#lang ts}}
 ```ts
-for (const group of groups) {
-  const targets = await db.executeOperation("listTargetsByGroup", {
-    params: { groupId: group.id },
-  });
+// Inside a function: 5 groups → 5 sequential queries
+for (const group of groups.items) {
+  const targets = await db.model("targets").query({ filter: { groupId: group.id } });
   // ...use targets
 }
 ```
-{{/lang}}
-{{#lang swift}}
-```swift
-for group in groups {
-  let targets = try await client.databases.executeOperation(
-    databaseId: dbId,
-    name: "listTargetsByGroup",
-    options: ExecuteOperationOptions(params: ["groupId": .string(group.id)])
-  )
-  // ...use targets
-}
-```
-{{/lang}}
 
 With 5 groups, 5 sequential round trips. Doubles to 10 with 10 groups.
 
 ### Pattern
 
-Add a `listAllTargets` op (no `groupId` filter), call it once, group client-side:
+One query for every row, grouped in memory:
 
-```toml
-[[operations]]
-name = "listAllTargets"
-type = "query"
-modelName = "targets"
-access = "user.userId == database.metadata.ownerId"
-[operations.definition]
-filter = {}
-sort = { groupId = 1 }
-limit = 1000
+```ts
+const ids = groups.items.map((g) => g.id);
+const targets = await db.model("targets").query({
+  filter: { groupId: { $in: ids } },           // up to 1,000 values per list
+  options: { sort: { groupId: 1 }, limit: 1000 },
+});
+const byGroup = new Map<string, typeof targets.items>();
+for (const t of targets.items) {
+  byGroup.set(t.groupId, [...(byGroup.get(t.groupId) ?? []), t]);
+}
 ```
 
-Call it once, then group client-side:
+From the client, the same shape is one call to a function that returns every row, grouped on the device:
 
 {{ example: performance/bulk-then-group }}
 
-If you can fold the bulk op into a pipeline (Pattern 1), do that instead — same round-trip count, fewer named ops to maintain.
+If the rows belong in a page bundle anyway, fold the query into Pattern 1's function instead.
 
 ### When to reach for it
 
-Any time you find an `await ...executeOperation(...)` inside a `for` loop. This is the most common N+1 in Primitive apps.
+Any `await` inside a `for` loop — `client.functions.invoke(...)` in app code, or `.query(...)` in a function. This is the most common N+1 in Primitive apps. When per-item calls are genuinely unavoidable inside a function (a third-party call per item with no bulk endpoint), use `pMap` from `primitive-functions`, which bounds the concurrency (`PMAP_DEFAULT_CONCURRENCY` by default) instead of spending the invocation's subrequest budget in one line.
 
 ## Pattern 3 — Parallelize independent awaits
 
 ### Anti-pattern
 
-Three independent reads awaited one after another:
-
-{{#lang ts}}
-```ts
-const a = await db.executeOperation("opA");
-const b = await db.executeOperation("opB");
-const c = await db.executeOperation("opC");
-```
-{{/lang}}
-{{#lang swift}}
-```swift
-let a = try await client.databases.executeOperation(databaseId: dbId, name: "opA")
-let b = try await client.databases.executeOperation(databaseId: dbId, name: "opB")
-let c = try await client.databases.executeOperation(databaseId: dbId, name: "opC")
-```
-{{/lang}}
-
-Three sequential round trips even though none depends on the others.
+Independent reads awaited one after another — three function calls in app code, or three queries in a function — even though none depends on the others.
 
 ### Pattern
 
-{{ example: performance/parallel-operations }}
+In app code:
+
+{{ example: performance/parallel-calls }}
+
+Inside a function, the same `Promise.all` over the handle (Pattern 1).
 
 One round trip's worth of wall-clock latency.
 
@@ -222,45 +148,31 @@ Any sequence of `await` calls where the second doesn't read the first's result. 
 
 ### Gotcha
 
-Don't parallelize blindly — if call 2 needs call 1's result (e.g. `getSecuritiesBySymbols(symbols)` where `symbols` comes from the holdings query), they have to stay sequential. Two reads of holdings (once for symbols, once for the page) is worse than one read followed by securities serial.
+Don't parallelize blindly — if call 2 needs call 1's result (e.g. securities looked up by the symbols the holdings query returned), they have to stay sequential. Two reads of holdings (once for symbols, once for the page) is worse than one read followed by the dependent one.
 
 ## Pattern 4 — Bulk-call third-party APIs through integrations
 
 ### Anti-pattern
 
-One proxy call per ID — here, 21 calls for 21 symbols:
+One integration call per ID from a function — here, 21 calls for 21 symbols:
 
-{{#lang ts}}
 ```ts
-// 21 individual proxy calls for 21 symbols
 for (const symbol of symbols) {
-  await client.integrations.call({
-    integrationKey: "yahoo-finance",
-    path: `/v8/finance/chart/${symbol}`,
-    // ...
-  });
+  await ctx.integrations.call("yahoo-finance", { method: "GET", path: `/v8/finance/chart/${symbol}` });
 }
 ```
-{{/lang}}
-{{#lang swift}}
-```swift
-// 21 individual proxy calls for 21 symbols
-for symbol in symbols {
-  _ = try await client.integrations.call(IntegrationCallRequest(
-    integrationKey: "yahoo-finance",
-    method: "GET",
-    path: "/v8/finance/chart/\(symbol)"
-    // ...
-  ))
-}
-```
-{{/lang}}
 
 ### Pattern
 
-Use the third party's bulk endpoint (most have one) and a single proxy call:
+Use the third party's bulk endpoint (most have one) and a single call:
 
-{{ example: performance/integration-bulk-call }}
+```ts
+const quotes = await ctx.integrations.call("yahoo-finance", {
+  method: "GET",
+  path: "/v7/finance/quote",
+  query: { symbols: symbols.join(",") },
+});
+```
 
 Update the integration's TOML to allow the bulk path and forward the new query param:
 
@@ -270,12 +182,12 @@ allowedPaths = ["/v7/finance/quote", "..."]
 forwardQueryParams = ["symbols", "..."]
 ```
 
-Cap symbols per request at the provider's per-URL limit. Most apps don't hit it.
+The function needs the integration's capability line (`capabilities = ["integration:yahoo-finance"]`). Cap symbols per request at the provider's per-URL limit. Most apps don't hit it.
 
 ### Gotchas
 
 - Read the upstream API's response shape. v8 chart and v7 quote have different field names (`chartPreviousClose` vs. `regularMarketPreviousClose`).
-- Even better — see Pattern 8 (move third-party calls server-side).
+- Even better — see Pattern 8 (fetch on a schedule, not per page).
 
 See [Integrations — request config](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md) for `allowedPaths` and `forwardQueryParams`.
 
@@ -485,7 +397,7 @@ Any time you call a third-party API on cold load and you have *any* reasonable f
 
 ### Pair with
 
-Pattern 8 — moving the third-party call to a server-side cron means the "cached value" is always available and ≤refresh-interval stale, which closes the gap between this and a fully fresh first paint.
+Pattern 8 — moving the third-party call to a scheduled function means the "cached value" is always available and ≤refresh-interval stale, which closes the gap between this and a fully fresh first paint.
 
 ## Pattern 7 — Pure compute over cached source data
 
@@ -552,7 +464,7 @@ func onPricesChanged() {
 ```
 {{/lang}}
 
-Hold the source in a shared, observable store so the cache survives navigation between screens, and invalidate it via `client.databases.subscribe` when something actually changes upstream:
+Hold the source in a shared, observable store so the cache survives navigation between screens, and invalidate it when a channel message says something actually changed upstream. The functions that write the source data publish to a channel (`ctx.channels.publish("source:<userId>", …)`); the store subscribes with a grant from an authorizing function:
 
 {{#lang ts}}
 ```ts
@@ -573,13 +485,18 @@ export const useSourceStore = defineStore("source", () => {
   }
   function invalidate() { source.value = null; }
 
-  // Wire up DB subscribe once on first use. `subscribe` takes the database id,
-  // a server-registered subscription key, and an options object carrying the
-  // `onChange` callback (plus any `params` forwarded to the subscription's
-  // filter CEL).
-  client.databases.subscribe(dbId, "source-changes", { onChange: invalidate });
+  // Join the channel once on first use: an authorizing function mints the
+  // grant, the socket presents it, and any publish to it invalidates.
+  async function observe(channel: string) {
+    const res = await client.functions.invoke<{ grant: string }>("source-channel");
+    if (res.status !== "completed" || !res.output) return;
+    await client.subscribeToChannel(channel, res.output.grant);
+    client.on("channelMessage", (event) => {
+      if (event.channel === channel) invalidate();
+    });
+  }
 
-  return { source, ensureLoaded, invalidate };
+  return { source, ensureLoaded, invalidate, observe };
 });
 ```
 {{/lang}}
@@ -590,7 +507,7 @@ final class SourceStore: ObservableObject {
   @Published private(set) var source: SourceData?
   private var loadedAt: Date?
   private var inFlight: Task<SourceData, Error>?
-  private var subscription: EventSubscription?
+  private var listener: Task<Void, Never>?
 
   func ensureLoaded() async throws -> SourceData {
     if let source { return source }
@@ -605,28 +522,28 @@ final class SourceStore: ObservableObject {
   }
   func invalidate() { source = nil }
 
-  // Wire up DB subscribe once on first use. `subscribe` takes the database id,
-  // a server-registered subscription key, an options value (any `params` are
-  // forwarded to the subscription's filter CEL), and the change callback as a
-  // trailing @Sendable closure. Store the returned EventSubscription: the
-  // subscription ends when the handle is released.
-  func observe(dbId: String) throws {
-    subscription = try client.databases.subscribe(
-      databaseId: dbId,
-      subscriptionKey: "source-changes"
-    ) { [weak self] _ in
-      Task { @MainActor in self?.invalidate() }
+  // Join the channel once on first use: an authorizing function mints the
+  // grant, the socket presents it, and any publish to it invalidates.
+  func observe(channel: String) async throws {
+    struct Grant: Decodable, Sendable { let grant: String }
+    let res: FunctionResult<Grant> = try await client.functions.invoke("source-channel", input: nil as JSONValue?)
+    guard let grant = res.output?.grant else { return }
+    _ = try await client.subscribeToChannel(channel, grant: grant)
+    listener = Task { [weak self] in
+      for await event in client.stream(for: ChannelMessageEvent.self) where event.channel == channel {
+        self?.invalidate()
+      }
     }
   }
 }
 ```
 {{/lang}}
 
-Navigating between screens then becomes ~zero network calls until something actually changes upstream. The DB-subscribe handler also catches changes from other devices / sessions for free.
+Navigating between screens then becomes ~zero network calls until something actually changes upstream. Because the writing function publishes whoever made the change, the message also catches changes from other devices / sessions for free. A channel grant expires (300 s by default, 900 s at most) — renew it ahead of `expiresAt`.
 
-See [Databases — real-time subscriptions](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#real-time-subscriptions) for the `databases.subscribe` API.
+See [Channels](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#channels) for authorizing, subscribing, publishing and renewal.
 
-## Pattern 8 — Server-side cron for stale-tolerant third-party data
+## Pattern 8 — A scheduled function for stale-tolerant third-party data
 
 ### When applicable
 
@@ -634,10 +551,25 @@ You're calling the same third-party API for the same set of values on behalf of 
 
 ### Pattern
 
-1. Add the cached fields to the relevant database row (no schema migration needed if you're using Primitive's schemaless model — the workflow just writes them).
-2. Add a workflow that runs on a cron trigger, queries rows whose value is stale (`lastUpdatedAt < now() - refreshInterval`), calls the integration in bulk, and writes back via a bulk-update op.
-3. Restrict the bulk-update op's `access` rule to the workflow's service identity (`access = "fromWorkflow('refresh-security-prices')"`).
-4. The client-side fetch goes away entirely. The page reads the cached value from the same query it already runs.
+1. Add the cached fields to the relevant database rows (no schema change needed — the database is schemaless; the function just writes them).
+2. Add a function with a cron trigger that queries rows whose value is stale, calls the integration in bulk (Pattern 4), and writes back with one `batch`:
+
+```toml
+# primitive/dev/functions/refresh-security-prices.toml
+[function]
+key = "refresh-security-prices"
+entry = "functions/refresh-security-prices/index.ts"
+access = "hasRole('admin')"                    # members cannot run it by hand
+capabilities = ["integration:yahoo-finance"]
+
+[[function.triggers.cron]]
+name = "every-15-minutes"
+cron = "*/15 * * * *"
+```
+
+3. The client-side fetch goes away entirely. The page reads the cached value from the same function call it already makes.
+
+Every cron fire starts a task run (`primitive functions runs refresh-security-prices` lists them); see [Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers).
 
 ### Wins
 
@@ -645,8 +577,6 @@ You're calling the same third-party API for the same set of values on behalf of 
 - Same value across all users (no inter-user disagreement)
 - Survives third-party rate limits (one app-wide budget, not N)
 - Removes a whole subsystem of client code (price store, retry, status UI, watchers)
-
-See [Workflows — cron triggers](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md) and [Databases — `fromWorkflow()` access](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#cel-access-expressions).
 
 ## Pattern 9 — Bound how often you talk to your own server
 
@@ -666,22 +596,22 @@ When auditing an existing Primitive app, these usually find real wins:
 {{#lang ts}}
 | Pattern | What to grep |
 |---|---|
-| N+1 in a loop | `for.*await.*executeOperation` (regex) |
-| Per-symbol third-party call | calls to `client.integrations.call` inside a loop |
+| N+1 in a loop | `for.*await.*functions\.invoke` (regex) in app code; `for.*await.*\.query\(` in function code |
+| Per-symbol third-party call | `ctx.integrations.call` inside a loop in function code |
 | Eager full-reload on every state change | `watch(..., async () => { ... await load... })` |
 | Awaiting non-critical init | `await client.getAuthConfig()`, `await listUserMemberships`, `await initializeUserPrefs()` inside `initialize()` / `completeAuthentication()` |
 | Cached value behind a re-block | `await ensurePrefsReady(); const cached = getPref(...)` (yes — really) |
-| Sequential awaits | three or more consecutive `await db.executeOperation(...)` lines |
+| Sequential awaits | three or more consecutive `await client.functions.invoke(...)` lines, or `await ….query(...)` lines in a function |
 {{/lang}}
 {{#lang swift}}
 | Pattern | What to grep |
 |---|---|
-| N+1 in a loop | `for .* in` followed by `try await .*executeOperation` |
-| Per-symbol third-party call | calls to `client.integrations.call` inside a loop |
+| N+1 in a loop | `for .* in` followed by `try await .*functions.invoke` |
+| Per-symbol third-party call | `ctx.integrations.call` inside a loop in function code |
 | Eager full-reload on every state change | a change observer whose body does `try await load…` |
 | Awaiting non-critical init | `try await client.auth.getAuthConfig()`, `try await listUserMemberships`, `try await initializeUserPrefs()` inside `initialize()` / `completeAuthentication()` |
 | Cached value behind a re-block | `await ensurePrefsReady(); let cached = getPref(...)` (yes — really) |
-| Sequential awaits | three or more consecutive `try await client.databases.executeOperation(...)` lines |
+| Sequential awaits | three or more consecutive `try await client.functions.invoke(...)` lines |
 {{/lang}}
 
 ## Measuring
@@ -741,11 +671,11 @@ For a new Primitive page that feels slow, run through these in order:
 
 1. **Count network requests on cold load** (filtered to your API host). Is it more than 5? Each one is a candidate for elimination.
 2. **Identify the critical path** — which calls block first paint? Which fire in parallel?
-3. **Bundle related queries** into a pipeline (Pattern 1).
-4. **Replace N+1 ops with bulk ops** (Pattern 2).
+3. **Bundle related reads** into one function call (Pattern 1).
+4. **Replace N+1 calls with a bulk query** (Pattern 2).
 5. **Parallelize the remaining independent awaits** (Pattern 3).
-6. **Move third-party calls server-side** if practical (Pattern 8), otherwise switch to bulk endpoints (Pattern 4).
+6. **Move third-party calls to a scheduled function** if practical (Pattern 8), otherwise switch to bulk endpoints (Pattern 4).
 7. **Render with stale data, refresh reactively** for non-critical freshness (Pattern 6).
 8. **Defer non-critical init** (Pattern 5) — but watch for the re-block trap.
-9. **Cache source data in a shared store with DB-subscribe invalidation** (Pattern 7) so warm navigation between screens is ~free.
+9. **Cache source data in a shared store with channel invalidation** (Pattern 7) so warm navigation between screens is ~free.
 10. **Measure after each change.** Confirm the win is real and the output hash is stable.

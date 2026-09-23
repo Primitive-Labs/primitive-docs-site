@@ -253,7 +253,7 @@ Check quota, mint the app invitation, share the project document by email, and a
 - Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share, group add, and collection add linked to that invitation. Use the per-resource `removePermission`/`removeMember` by email.
 - Showing a member invite button without checking `client.invitations.quota()` first — a member with a 0 quota hits a 403.
 - Re-granting access after signup — email-matched deferred grants already resolved (Path A); the user has access.
-- Expecting a WebSocket event when an invitation is accepted. The `invitation` event was removed in #2951 along with the per-document invitation system that emitted it; poll `invitations.list()` or refresh on the next user action instead.
+- Expecting a WebSocket event when an invitation is accepted — no event fires. Poll `invitations.list()` or refresh on the next user action instead.
 
 ---
 

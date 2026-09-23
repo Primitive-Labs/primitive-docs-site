@@ -89,10 +89,10 @@ For app-specific user data (preferences, settings, profile fields beyond name/em
   });
   await profile.save({ targetDocument: userDocumentId });
 
-  // Or in a database via a registered operation. The operation uses
-  // $user.userId server-side — no need to pass the userId yourself.
-  await client.databases.executeOperation(dbId, "updateProfile", {
-    params: { bio: "Software engineer", theme: "dark" },
+  // Or in a database, through a server function. The function takes the
+  // caller from ctx.user — no need to pass the userId yourself.
+  await client.functions.invoke("update-profile", {
+    input: { databaseId: dbId, bio: "Software engineer", theme: "dark" },
   });
 ```
 
@@ -112,7 +112,7 @@ user.id = generateNewId();        // Use platform userId instead
 |---------|----------|
 | **Root document** | Personal settings, preferences (auto-created per user, never shared) |
 | **User's document** | App-specific profile data that follows document sharing rules |
-| **Database** | User metadata visible to other users (e.g., public profile, reputation score) accessed via operations with `$user.userId` |
+| **Database** | User metadata visible to other users (e.g., public profile, reputation score), read and written through a server function |
 
 ### Looking up users
 
@@ -131,7 +131,17 @@ primitive users list
 # --search: ULID → userId lookup; '@' → email lookup; otherwise substring
 # name search (backed by a global search index on User.name).
 primitive users list --search "ali"
+
+# Block a user from signing in to this app, and restore them. Disabling signs
+# them out of this app (sessions deleted, API tokens revoked, open connections
+# dropped) and is reversible: memberships and ownership are untouched, and
+# after `enable` they sign in again and their group access resumes. The app's
+# only owner cannot be disabled. `users remove` detaches the user instead.
+primitive users disable <user-id> [-y]
+primitive users enable <user-id>
 ```
+
+Console admin accounts have their own pair, `primitive admins disable <admin-id>` / `primitive admins enable <admin-id>` — super-admin only, like every `primitive admins` verb.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -222,7 +232,7 @@ Groups are identified by a `(groupType, groupId)` pair, allowing multiple taxono
 1. Create a group with `client.groups.create({ groupType, groupId, name })` — `groupId` is optional; omit it (or pass `null`) and the server assigns a ULID, returned in the response.
 2. Add members with `client.groups.addMember(...)` (by `userId` or `email`).
 3. Grant group access to a document with `client.documents.grantGroupPermission(...)`.
-4. Gate database operations in CEL: `access: "isMemberOf('team', database.metadata.teamId)"`.
+4. Check membership where database data is read: in a server function's `access` gate (`isMemberOf('team', 'engineering')`) or, when the group depends on the input, in its code.
 
 The full create/list/get/update/delete surface is in [Managing Groups](#managing-groups); membership in [Managing Members](#managing-members).
 
@@ -330,7 +340,7 @@ See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-gra
   // avatar or the membership is orphaned (deleted user).
 ```
 
-Pass `{ include: "profiles" }` to join each member's profile in the same call. Without it, `GroupMemberInfo` is the sparse legacy shape: `{ userId, addedAt, addedBy, userName?, userEmail? }` — no `avatarUrl` key at all. With `include: "profiles"`, `userName`/`userEmail` become reliably populated and a new `avatarUrl?: string | null` field is always present: a resolved URL to the uploaded avatar, or `null` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go null. `include` is opt-in and purely additive: omitting it returns exactly the pre-existing response shape.
+Pass `{ include: "profiles" }` to join each member's profile in the same call. Without it, `GroupMemberInfo` is the sparse shape: `{ userId, addedAt, addedBy, userName?, userEmail? }` — no `avatarUrl` key at all. With `include: "profiles"`, `userName`/`userEmail` become reliably populated and a new `avatarUrl?: string | null` field is always present: a resolved URL to the uploaded avatar, or `null` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go null. `include` is opt-in and purely additive: omitting it returns exactly the sparse shape above.
 
 ### Remove members
 
@@ -371,7 +381,7 @@ Each entry carries a `deferredId` — cancel that invitation by revoking the def
 
 Group types are configured via TOML config files and the `primitive config` command (version-controlled alongside your code).
 
-**File:** `config/group-type-configs/team.toml`
+**File:** `primitive/dev/group-type-configs/team.toml`
 
 ```toml
 [groupTypeConfig]
@@ -398,7 +408,7 @@ primitive config push
 - A group type with **no config** falls back to built-in default rules. Per-op fallback also applies: when a configured rule set leaves a `(category, op)` pair undefined, that op resolves against the defaults too. The defaults: `group.create = "true"` (any signed-in member); `group.edit/delete` and `member.create/edit/delete` are creator-only (`user.userId == group.createdBy`); `group.get` and `member.list` allow the creator OR any direct group member (`isMemberOf(group.groupType, group.groupId)`).
 - A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive config push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
 
-See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#configuring-with-the-cli) for the full sync workflow (`init`, `pull`, `diff`, `push`).
+See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the full sync loop (`init`, `pull`, `diff`, `push`).
 
 ## Groups and Documents
 
@@ -420,82 +430,74 @@ The grant call is shown in [Grant document access to a group](#grant-document-ac
 
 ## Groups and Databases
 
-Databases support a coarse-grained group grant that gives every member of the group `manager`-level access (the database's admin permission, the only level supported for groups):
+A database can carry a group grant that records every member of the group as a `manager` — an administrative permission record (the only level a group can hold), not a way into the data: the database routes refuse a non-admin caller, so the grant gives members nothing directly. App admins manage it, and a function reads it with `ctx.api.databases.listGroupPermissions` to make its own decisions. A function makes it, declaring `capabilities = ["databases:grantGroupPermission"]`:
 
-```typescript
-  await client.databases.grantGroupPermission(databaseId, {
-    groupType: "team",
-    groupId: "engineering",
-    permission: "manager",
-  });
+```ts
+await ctx.api.databases.grantGroupPermission({
+  databaseId: input.databaseId,
+  body: { groupType: "team", groupId: "ops", permission: "manager" },
+});
 ```
 
-For everything else — gating individual queries and mutations — group memberships are checked in **CEL access expressions** on registered operations. See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for how to register operations.
+End users reach database records through **server functions**, so group membership gates data in two places — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access):
 
-The shared identity context every rule can use (`user.*`, `isMemberOf`, `memberGroups`, `hasRole`, `isAnonymous`) is documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere); the database-operation `access` context (`database.celContext`, `params.*`, `secrets.*`, `workflow`) is documented in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#cel-access-expressions). This section covers only how group membership factors into those rules.
+- **The function's `access` gate** — CEL over the caller's identity: `user.userId`, `user.role`, `isMemberOf`, `memberGroups`, `hasRole` (the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere)). The gate does not see the function's input, so it checks fixed groups and roles. App owners and admins bypass it.
+- **The function's code** — for a group that depends on the input (the team that owns `input.databaseId`, the student in `input.studentId`), read the caller's memberships and refuse before touching the rows.
 
-**Common CEL patterns for database operations:**
+**Gate patterns:**
 
 ```
-// Team members of the database's team
-access: "isMemberOf('team', database.metadata.teamId)"
+// Any member of one fixed group
+access = "isMemberOf('staff', 'all')"
 
-// Team ID passed as parameter — caller must belong to that team
-access: "isMemberOf('team', params.teamId)"
+// Either of two fixed groups
+access = "isMemberOf('staff', 'all') || isMemberOf('support', 'tier-2')"
+```
 
-// User can only query groups they belong to (containment check)
-access: "params.teamId in memberGroups('team')"
+**Code pattern — membership that depends on the input:**
 
-// Per-parameter access: parent can only view their own child's data
-params: {
-  studentId: {
-    type: "string",
-    required: true,
-    access: "value in memberGroups('parent-of')"
+```ts
+import { defineFunction } from "primitive-functions";
+
+export default defineFunction(async (input: { databaseId: string }, ctx) => {
+  // A bare array of { groupType, groupId, name, … }.
+  const teams = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "team" });
+  if (!teams.some((m: { groupId: string }) => m.groupId === input.databaseId)) {
+    throw new Error("Not a member of this team");
   }
-}
-
-// Allow only when called from a specific workflow
-access: "fromWorkflow('grade-import')"
+  return await ctx.db(input.databaseId, "team").model("tasks").query({});
+});
 ```
 
 **Don't do this — common CEL footguns:**
 
 ```
 // BAD — `user.appRole` does not exist in CEL. Use `user.role` or hasRole().
-access: "user.appRole == 'admin'"
+access = "user.appRole == 'admin'"
 
 // GOOD — checks the caller's app role.
-access: "hasRole('admin') || hasRole('owner')"
-// (Note: admins/owners bypass *rule-set* evaluation for groups/collections,
-// but database operation `access` CEL is NOT bypassed. You must allow them
-// explicitly if you want them in.)
+access = "hasRole('editor-in-chief')"
 
 // BAD — isMemberOf returns bool, not the group. `==` is meaningless.
-access: "isMemberOf('team') == params.teamId"
+access = "isMemberOf('team') == 'engineering'"
 
 // GOOD
-access: "isMemberOf('team', params.teamId)"
+access = "isMemberOf('team', 'engineering')"
 
 // BAD — memberGroups returns an array, can't compare with ==.
-access: "memberGroups('team') == params.teamId"
+access = "memberGroups('team') == 'engineering'"
 
 // GOOD — use `in` for containment.
-access: "params.teamId in memberGroups('team')"
+access = "'engineering' in memberGroups('team')"
 
 // BAD — referencing fields not in the context (silently denies; runtime
 // errors are caught and turned into "deny").
-access: "user.email == 'admin@example.com'"   // user.email is not in context
-
-// BAD — assuming database.metadata.teamId exists when it doesn't.
-// Missing fields evaluate to null; `isMemberOf('team', null)` returns false.
-// Either guarantee metadata is set at create time, or guard:
-access: "has(database.metadata.teamId) && isMemberOf('team', database.metadata.teamId)"
+access = "user.email == 'admin@example.com'"   // user.email is not in context
 ```
 
 ## Rule Sets for Groups
 
-Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `config/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set pipeline under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
+Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `primitive/dev/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set mechanism under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
 
 **Resource type:** `group`. **Categories and operations:**
 - `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
@@ -566,7 +568,7 @@ Users create teams. Team members get access to team documents and databases.
 
 **Setup** (via CLI config):
 
-**File:** `config/group-type-configs/team.toml`
+**File:** `primitive/dev/group-type-configs/team.toml`
 
 ```toml
 [groupTypeConfig]
@@ -592,7 +594,7 @@ autoAddCreator = true
   });
 ```
 
-Gate the team's database operations on membership in CEL: `access: "isMemberOf('team', database.metadata.teamId)"`.
+When each team has its own database (the database id reused as the team's group id), the function that reads it checks the caller's `team` membership against `input.databaseId` in code — see [Groups and Databases](#groups-and-databases).
 
 ### Role-based access (reviewer, editor, viewer)
 
@@ -616,34 +618,30 @@ Use group types as roles within a context.
   });
 ```
 
-Gate the operations on role membership in CEL — editors can modify (`access: "isMemberOf('editor', params.projectId)"`); viewers can read (`access: "isMemberOf('viewer', params.projectId) || isMemberOf('editor', params.projectId)"`).
+The project comes from the input, so the function checks role membership in code: a write function requires an `editor` membership whose `groupId` is `input.projectId`; a read function accepts `viewer` or `editor`.
 
 ### Relationship modeling (parent-child, mentor-mentee)
 
 Use groups to model relationships between users.
 
-**Setup** (via CLI config):
+**Server side** — the function that reads a student's grades checks the relationship before it reads:
 
-**File:** `config/database-type-configs/classroom.toml` (excerpt)
+```ts
+import { defineFunction } from "primitive-functions";
 
-```toml
-[[operations]]
-name = "viewGrades"
-type = "query"
-modelName = "grades"
-access = "true"
-[operations.definition]
-filter = { studentId = "$params.studentId" }
-sort = { date = -1 }
-
-[[operations.params]]
-name = "studentId"
-type = "string"
-required = true
-access = "value in memberGroups('parent-of')"
+export default defineFunction(async (input: { databaseId: string; studentId: string }, ctx) => {
+  const children = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "parent-of" });
+  if (!children.some((m: { groupId: string }) => m.groupId === input.studentId)) {
+    throw new Error("Not this student's parent");
+  }
+  return await ctx.db(input.databaseId, "classroom").model("grades").query({
+    filter: { studentId: input.studentId },
+    options: { sort: { date: -1 } },
+  });
+});
 ```
 
-The per-parameter `access` expression ensures parents can only view their own children's grades.
+The membership check is what ensures parents can only view their own children's grades; the caller never supplies whose relationship is checked.
 
 **Runtime** (in app code):
 
@@ -656,9 +654,9 @@ The per-parameter `access` expression ensures parents can only view their own ch
   });
   await client.groups.addMember("parent-of", "student-123", { userId: parentUserId });
 
-  // Parent queries their child's grades — server enforces access.
-  const grades = await client.databases.executeOperation(dbId, "viewGrades", {
-    params: { studentId: "student-123" },
+  // Parent asks for their child's grades — the function enforces access.
+  const grades = await client.functions.invoke("view-grades", {
+    input: { databaseId: dbId, studentId: "student-123" },
   });
 ```
 
@@ -683,7 +681,7 @@ Model nested organizational structure with multiple group types.
   await client.groups.addMember("team", "backend", { userId });
 ```
 
-CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMemberOf('dept', params.deptId)"`, `"isMemberOf('team', database.metadata.teamId)"`.
+A function can check any level: a fixed one in its `access` gate (`isMemberOf('org', 'acme')`), and one named by the input in its code, with `listUserMemberships({ userId, type: "dept" })`.
 
 ## Best Practices
 
@@ -691,7 +689,7 @@ CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMem
 
 - **Always use the platform user model** for identity. Reference `userId` from the platform, don't generate your own user IDs.
 - **Use `client.users.getBasic()`** to display user info (name, avatar, email). It caches results automatically.
-- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data accessible via operations).
+- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data, read through a server function).
 - **Don't duplicate platform fields.** Name, email, and avatar are managed by the platform — read them from there.
 
 ### Groups
@@ -699,14 +697,14 @@ CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMem
 - **Choose meaningful group types.** Use types that map to your domain: `team`, `class`, `department`, `parent-of`. The `groupType` is the taxonomy, the `groupId` is the instance.
 - **Use `autoAddCreator: true`** (default) for groups where the creator should be a member (teams, clubs). Set to `false` for groups managed by admins (classes, departments).
 - **Prefer groups over per-user grants** for document access. Easier to manage and audit.
-- **Use CEL `isMemberOf()` for database access** rather than trying to grant database permissions to individual users.
+- **Check group membership in the function** that reads a database, rather than granting database permissions to individual users.
 
 ### Access control
 
 - **App owners and admins bypass all group/collection rule-set evaluation.** Design rules for regular members — don't try to restrict owners/admins there.
-- **Database operation `access` CEL is NOT bypassed for admins.** If admins should be able to call an operation, include them explicitly: `hasRole('admin') || hasRole('owner') || isMemberOf(...)`.
-- **Use per-parameter access** for sensitive relationships (parent-child, manager-report).
-- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer multiple focused operations over one operation with complex access logic.
+- **A function's `access` gate is bypassed by app owners and admins too.** A check in the function's code is not — write it to let them through if they should be.
+- **Check sensitive relationships in code** (parent-child, manager-report): read the caller's memberships and compare against the input.
+- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer several focused functions over one function with complex gate logic.
 - **Test rules** with `client.ruleSets.test()` before deploying, and use `client.ruleSets.debug()` to trace evaluation for real users.
 
 ## Common Errors

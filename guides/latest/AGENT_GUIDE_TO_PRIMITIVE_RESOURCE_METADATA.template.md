@@ -1,13 +1,13 @@
 # Agent Guide to Primitive Resource Metadata
 
-Guidelines for AI agents attaching typed, access-controlled metadata to a resource — a user, a group, a collection, a database, or a workflow's subject. Metadata is grouped into named **categories**; each category has its own schema and its own CEL `readRule`/`writeRule`, so different data about the same resource can carry different rules (a self-editable `profile` category vs. a workflow-only `billing` category).
+Guidelines for AI agents attaching typed, access-controlled metadata to a resource — a user, a group, a collection, or a database. Metadata is grouped into named **categories**; each category has its own schema and its own CEL `readRule`/`writeRule`, so different data about the same resource can carry different rules (a self-editable `profile` category vs. a server-function-only `billing` category).
 
 ## Category configs
 
 A category is defined once per `(resourceType, category)` — schema plus optional `readRule`/`writeRule` — and synced like any other config, one file per category:
 
 ```toml
-# config/metadata-category-configs/user.profile.toml
+# primitive/dev/metadata-category-configs/user.profile.toml
 [metadataCategoryConfig]
 resourceType = "user"
 category = "profile"
@@ -30,10 +30,10 @@ primitive config push
 ```
 
 - **Field types:** `string`, `number`, `boolean`, `date`, `id`, `stringset`. `enum` (string array) is valid only on a `string` field; other supported constraints are `required`, `maxLength`, `maxCount`.
-- **`unique`:** set `unique = true` on one `string`/`id` field (at most one per category) to enforce that no two resources of that type share the value AND make the value reverse-resolvable (`resourceMetadata.resolve` / `primitive metadata resolve` / the `metadata.resolve` step, all below). The indexed value is capped at 512 UTF-8 bytes. Writing a value another resource already owns is rejected `409` (atomic — the write rolls back); rewriting the same value on the same resource is idempotent; clearing the field or deleting the row frees the value in the same write. Enabling `unique` on a category that already has rows is refused (they'd be unindexed) — declare it at category-creation time, or recreate the category.
+- **`unique`:** set `unique = true` on one `string`/`id` field (at most one per category) to enforce that no two resources of that type share the value AND make the value reverse-resolvable (`client.resourceMetadata.resolve` / `primitive metadata resolve` / `ctx.api.resourceMetadata.resolve` from a function, all below). The indexed value is capped at 512 UTF-8 bytes. Writing a value another resource already owns is rejected `409` (atomic — the write rolls back); rewriting the same value on the same resource is idempotent; clearing the field or deleting the row frees the value in the same write. Enabling `unique` on a category that already has rows is refused (they'd be unindexed) — declare it at category-creation time, or recreate the category.
 - **Category name `attrs` is reserved** — it's the read-only projected category (see **`md.self.attrs`** below), not a category you define.
 - **Limits:** up to 100 keys per category, 16 KB per category item.
-- **`readRule`/`writeRule` context:** `user.userId`, `user.role` (the caller), `resource.resourceType`, `resource.resourceId` (also bound as `resource.id`), `resource.category` — plus `workflow.workflowKey` when the call originates from a `metadata.write`/`metadata.read` step (so `fromWorkflow('key')` works). When the subject is a `database`, `workflow`, or `collection`, the rule can also read the resource's own columns via **`resource.attrs.<column>`** — `database`: `databaseId`, `databaseType`, `createdBy`; `workflow`: `workflowId`, `workflowKey`, `runAs`, `createdBy`; `collection`: `collectionId`, `collectionType`, `contextId`, `name`, `createdBy`. The canonical use is creator bootstrap: `writeRule = "user.userId == resource.attrs.createdBy"`. The subject row loads lazily (a rule that never references `resource.attrs` issues no extra read) and the binding fails closed: any other resource type, an unmapped column, or a missing row denies. The membership helpers `isMemberOf`/`memberGroups`/`hasRole` are also wired, so a rule can be group-scoped (`isMemberOf('class-teachers', resource.id)`) instead of only self-scoped; memberships load once, only when the rule references a membership helper (`hasRole` needs no load — it reads only `user.role`). `hasCollectionAccess` is rejected at save time in a category rule (collection-scoped only; it can never resolve here). An **app-level** owner or admin always bypasses both rules; a resource-level permission (e.g. a database's `owner`/`manager` grant) never bypasses — the rule itself is what authorizes resource-scoped callers. Omitting either rule defaults to deny.
+- **`readRule`/`writeRule` context:** `user.userId`, `user.role` (the caller), `resource.resourceType`, `resource.resourceId` (also bound as `resource.id`), `resource.category`. When the subject is a `database` or `collection`, the rule can also read the resource's own columns via **`resource.attrs.<column>`** — `database`: `databaseId`, `databaseType`, `createdBy`; `collection`: `collectionId`, `collectionType`, `contextId`, `name`, `createdBy`. The canonical use is creator bootstrap: `writeRule = "user.userId == resource.attrs.createdBy"`. The subject row loads lazily (a rule that never references `resource.attrs` issues no extra read) and the binding fails closed: any other resource type, an unmapped column, or a missing row denies. The membership helpers `isMemberOf`/`memberGroups`/`hasRole` are also wired, so a rule can be group-scoped (`isMemberOf('class-teachers', resource.id)`) instead of only self-scoped; memberships load once, only when the rule references a membership helper (`hasRole` needs no load — it reads only `user.role`). `hasCollectionAccess` is rejected at save time in a category rule (collection-scoped only; it can never resolve here). An **app-level** owner or admin always bypasses both rules; a resource-level permission (e.g. a database's `owner`/`manager` grant) never bypasses — the rule itself is what authorizes resource-scoped callers. Omitting either rule defaults to deny.
 - **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`/`resolve`); the CLI's `primitive metadata-category-configs list`/`get` inspect the definitions read-only (the `metadata` noun carries value verbs only), and a definition is removed by deleting its `metadata-category-configs/<resourceType>.<category>.toml` and running `primitive config push --prune` — there is no delete verb. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
 - **A category rule can declare its own `metadataManifest`** (same `self`/`paths`/`secrets` shape as any other owning config) so it can reach declared secrets or a traversal path's source category — see "A category rule's own manifest" below. Without one, the rule still gets inferred `md.self` reads but binds no `secrets`/`vars`.
 
@@ -147,7 +147,7 @@ primitive metadata-category-configs get user profile # adds the full schema JSON
 Deleting a definition is deleting its file plus a pruning push, scoped to that one definition with `--only` so the rest of the tree is left alone (`--dry-run` first to see the plan):
 
 ```bash
-rm config/metadata-category-configs/user.profile.toml
+rm primitive/dev/metadata-category-configs/user.profile.toml
 primitive config push --only 'metadata-category-config/user#profile' --prune --dry-run
 primitive config push --only 'metadata-category-config/user#profile' --prune --yes
 ```
@@ -162,10 +162,10 @@ The selector's key is the `resourceType#category` pair the file declared, NOT it
 
 ## Declaring metadata for CEL rules
 
-A rule reads a resource's own metadata as `md.self.<category>.<key>`. These self-reads are **inferred** — referencing a category loads it automatically, so you don't declare it on the owning config (a group type, collection type, database type, or workflow definition). An explicit `[metadata.self]` declaration is also supported and unions with the inferred set (declare a category the rule doesn't name directly, and it loads too). A category's own `readRule` gates the read API only, not a rule author's use of it (trusted-author model).
+A rule reads a resource's own metadata as `md.self.<category>.<key>`. These self-reads are **inferred** — referencing a category loads it automatically, so you don't declare it on the owning config (a group type, collection type, or database type). An explicit `[metadata.self]` declaration is also supported and unions with the inferred set (declare a category the rule doesn't name directly, and it loads too). A category's own `readRule` gates the read API only, not a rule author's use of it (trusted-author model).
 
 ```toml
-# on the owning config (group-type-config shown; same shape for collection/database type configs and workflow definitions)
+# on the owning config (group-type-config shown; same shape for collection/database type configs)
 [metadata.self]
 categories = ["config"]
 ```
@@ -176,10 +176,10 @@ member.create = "md.self.config.tier == \"pro\""
 
 ### A category rule's own manifest
 
-The declaration above is for *other* configs (group/collection/database type, workflow definition) reading the resource they're attached to. A metadata **category config** can declare the same manifest shape on itself, letting its `readRule`/`writeRule` reach the resource's *other* categories:
+The declaration above is for *other* configs (group/collection/database type) reading the resource they're attached to. A metadata **category config** can declare the same manifest shape on itself, letting its `readRule`/`writeRule` reach the resource's *other* categories:
 
 ```toml
-# config/metadata-category-configs/class-post.post.toml
+# primitive/dev/metadata-category-configs/class-post.post.toml
 [metadataCategoryConfig]
 resourceType = "class-post"
 category = "post"
@@ -240,7 +240,7 @@ categories = ["billing"]
 access = "md.caller.billing.status in ['trialing', 'active', 'past_due']"
 ```
 
-`md.caller` is bindable in **database operation `access`** (including per-param access and batch), the database's own `metadataAccess` rule, DO-trigger `when`/`set`, and **workflow `accessRule`** (`start` and `workflow.call`), and in a **group or collection rule set** whose traversal path declares `rootFrom = "user.userId"` (the rule-set example below). With no authenticated caller (anonymous request, or a `runAs:"system"` workflow), `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
+`md.caller` is bindable in database trigger `when`/`set`, and in a **group or collection rule set** whose traversal path declares `rootFrom = "user.userId"` (the rule-set example below). With no authenticated caller, `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
 
 ### Declaring a path on the rule entry (rule sets)
 
@@ -273,22 +273,11 @@ and `loads.vars` are config-level and rejected here. An empty `loads` or
 `loads.paths` collapses back to a bare expression, so the two spellings carry
 identical intent.
 
-### Database operation substitution
+## From a server function
 
-Beyond CEL `access` rules, an operation's `definition` (`filter`/`data`) can substitute a declared category value directly, alongside `$params.*` / `$user.userId` / `$now` / `$steps.*`:
+A server function reads, writes, deletes, and reverse-resolves metadata through `ctx.api.resourceMetadata` — the same operations as `client.resourceMetadata`, on the app's own authority. Function code acts as the system, which is owner-equivalent, so category `readRule`/`writeRule` are bypassed exactly as they are for an app owner or admin; the function's own `access` gate is the authorization, and nothing is declared in `capabilities`.
 
-```toml novalidate
-[operations.definition]
-filter = { tier = "$md.self.profile.tier" }
-```
-
-`$md.self.<category>.<key>` resolves to `null` (not the literal string) when the category isn't declared on that database type's manifest, or the key is missing — same fail-closed convention as `$database.metadata.<key>`.
-
-## Workflow steps: `metadata.write` / `metadata.read` / `metadata.delete` / `metadata.resolve`
-
-A workflow reads, writes, deletes, and reverse-resolves metadata with the `metadata.write` / `metadata.read` / `metadata.delete` / `metadata.resolve` steps. They route through the same read/write/delete path (and the same `readRule`/`writeRule` gate) as the client and CLI — no parallel authorization logic; `metadata.resolve` is a system-only reverse-index lookup that bypasses `readRule`. The full step contract — params, return shapes, `saveAs`, retry behavior, and the `runAs:"system"` bypass rules — lives in the [Workflows guide](AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.md).
-
-The metadata-side control is the category's own rule: gate a category to exactly one workflow with `fromWorkflow('workflowKey')` in its `writeRule`/`readRule` — a REST call or a different workflow gets `403`. The workflow identity is a privileged, call-local value the step runner passes in-process; it is never derived from a request header (an `X-Workflow-Context` header on a REST call has no effect). A `runAs:"system"` run gets no app-level owner/admin bypass on metadata calls, so `fromWorkflow('key')` is the only thing that authorizes a system-run write/read/delete; a `runAs:"caller"` run keeps the bypass.
+That is how to make a server-owned category: give it a `writeRule` no client satisfies (`writeRule = "false"`), keep `readRule` as open as clients need, and write it only from the function that owns it (e.g. the webhook-triggered function that records a payment provider's customer id). There is no rule-side way to name the one function allowed to write; keep writes to such a category in one function by convention.
 
 ## Create-time initial metadata
 
@@ -303,45 +292,24 @@ primitive collections create "Class 42" --initial-metadata '{"settings":{"visibi
 - The category's `writeRule` is **waived** for this stamp — creation authority already covers it. The waiver is unreachable from the regular REST write route: it never accepts a caller-supplied `resourceId`, so it can't be used to bypass `writeRule` on an existing resource.
 - Capped at 10 categories per create.
 
-{{#lang ts}}
-In the client, `collections.create()` / `databases.create()` take an optional `initialMetadata: Record<string, Record<string, unknown>>`:
+In the client, `collections.create()` takes an optional `initialMetadata` — category name → that category's values:
 
-```typescript
-const database = await client.databases.create({
-  title: "Class Roster",
-  databaseType: "roster",
-  initialMetadata: {
-    settings: { visibility: "class-only" },
-  },
-});
-```
-{{/lang}}
-{{#lang swift}}
-In the client, `collections.create(params:)` / `databases.create(params:)` take an optional `initialMetadata: [String: [String: JSONValue]]?` — category name → that category's values:
+{{ example: documents/collection-initial-metadata }}
 
-```swift
-let database = try await client.databases.create(params: CreateDatabaseParams(
-    title: "Class Roster",
-    databaseType: "roster",
-    initialMetadata: ["settings": ["visibility": .string("class-only")]]
-))
-```
-{{/lang}}
-
-On the workflow path, an authored `initialMetadata` (or `database.create`'s `metadata`) whose template resolves to `null` fails the step non-retryably instead of creating the resource without it — so a create gated on staged metadata never silently degrades into a misleading 403. An omitted key stays a no-op. On a collection specifically, staging `initialMetadata` at create time can also gate the `collection.create` rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide. `database.create` has no caller create rule to gate; `group.create` takes no `initialMetadata`.
+On a collection specifically, staging `initialMetadata` at create time can also gate the `collection.create` rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide. A database create has no caller create rule to gate; `group.create` takes no `initialMetadata`.
 
 ## Metadata lifecycle
 
 A write never checks that the target resource exists — a write for a not-yet-created or already-deleted resource succeeds silently, and deleting a resource does not delete its metadata (no cascade). This is deliberate: it keeps a write to a single cheap put, and doesn't race provisioning flows that write metadata immediately after — or interleaved with — creating the resource itself.
 
 **Consequences an implementation should account for:**
-- Gate writes with a category `writeRule` (owner-only, or `fromWorkflow('key')`) to limit who can create dangling metadata in the first place.
-- Whatever flow deletes a resource must also delete that resource's metadata — the platform doesn't do it for you. Delete each category with `delete` (client/CLI) or a `metadata.delete` step; a teardown workflow that deletes the resource deletes its categories in the same run.
+- Gate writes with a category `writeRule` (owner-only, or `"false"` for a category only server functions write) to limit who can create dangling metadata in the first place.
+- Whatever flow deletes a resource must also delete that resource's metadata — the platform doesn't do it for you. Delete each category with `delete` (client/CLI) or `ctx.api.resourceMetadata` from a function; a teardown function that deletes the resource deletes its categories in the same invocation.
 - **Order deletes correctly.** Delete a category's *values* before deleting the category *config* — once the config is gone, the values are orphaned and can no longer be deleted through any surface. And when a `writeRule` reads `resource.attrs.<column>`, delete the metadata before the owning resource — the rule loads the resource's own columns to authorize the delete, so it fails closed once the resource row is gone.
 
 ## Anti-patterns
 
-- Declaring `[metadata.self] categories` for a plain `md.self.<category>` read — it's redundant, since self-reads are inferred; declaration matters only to load a category the rule never names, or to serve as the source category for a declared traversal path's `via` key. A **traversal path** (`md.<pathName>`) is the opposite: it's never inferred, so referencing one without a `[metadata.paths.*]` declaration is an undeclared reference. `secrets.<KEY>` likewise must be in the config's `secrets` allowlist. How an undeclared path or out-of-allowlist secret fails depends on the rule site: a **metadata category `readRule`/`writeRule`** and a **workflow `accessRule`** are linted at save time (a save-time 400), but a **database operation `access` rule** and a **group/collection rule set** are not — there the undeclared reference binds `null` and denies at runtime instead.
+- Declaring `[metadata.self] categories` for a plain `md.self.<category>` read — it's redundant, since self-reads are inferred; declaration matters only to load a category the rule never names, or to serve as the source category for a declared traversal path's `via` key. A **traversal path** (`md.<pathName>`) is the opposite: it's never inferred, so referencing one without a `[metadata.paths.*]` declaration is an undeclared reference. `secrets.<KEY>` likewise must be in the config's `secrets` allowlist. How an undeclared path or out-of-allowlist secret fails depends on the rule site: a **metadata category `readRule`/`writeRule`** is linted at save time (a save-time 400), but a **group/collection rule set** is not — there the undeclared reference binds `null` and denies at runtime instead.
 - Expecting a category's own `readRule` to restrict what a *different* rule can read via `md.self`/`md.caller` — it only gates the read API, not CEL use of the value (trusted-author model).
 - Relying on resource deletion to clean up its metadata — there's no cascade; delete metadata explicitly in the same flow.
 - Trying to create or list category configs from the client SDK — that surface is TOML-sync/admin-REST only.
@@ -354,6 +322,5 @@ A write never checks that the target resource exists — a write for a not-yet-c
 
 - **access-control** — the shared CEL identity context every rule builds on, including the membership helpers
 - **users-and-groups** — group/collection `metadataManifest` and the projected `attrs` category
-- **databases** — `md.self`/`md.caller` in operation `access` and `$md.self.*` substitution
-- **workflows** — the `metadata.write`/`metadata.read`/`metadata.delete` step shapes and `fromWorkflow()`
+- **server-functions** — `ctx.api.resourceMetadata` and the system authority it runs with
 - **app-secrets** — the declared-only `secrets.*` binding a category manifest can also reach

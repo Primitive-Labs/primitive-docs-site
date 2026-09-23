@@ -15,10 +15,10 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-09-19",
+    "stampedAt": "2026-09-23",
     "channel": "alpha",
     "packages": {
-      "js-bao-wss-client": "3.3.0",
+      "js-bao-wss-client": "3.4.0",
       "js-bao": "0.9.0",
       "primitive-admin": "1.0.62",
       "primitive-app": "3.1.0"
@@ -28,19 +28,20 @@
     {
       "topic": "authentication",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.ts.md",
-      "description": "Implementing user authentication with OAuth, Magic Link, OTP, and Passkeys",
+      "description": "Implementing user authentication with OAuth, email sign-in, and Passkeys",
       "keywords": [
         "authentication",
         "auth",
         "OAuth",
         "Google",
-        "Magic Link",
-        "OTP",
         "Passkey",
         "WebAuthn",
         "login",
         "sign-in",
-        "JWT"
+        "JWT",
+        "email sign-in",
+        "sign-in code",
+        "sign-in link"
       ],
       "useCases": [
         "Implementing Google OAuth sign-in",
@@ -52,9 +53,8 @@
       ],
       "concepts": [
         "OAuth",
-        "magicLinkRequest",
+        "emailSignInRequest",
         "magicLinkVerify",
-        "otpRequest",
         "otpVerify",
         "passkeyAuthStart",
         "passkeyAuthFinish",
@@ -100,7 +100,7 @@
         "Managing upload queues",
         "Prefetching blobs for offline use",
         "Using blobs in img/video tags",
-        "Creating general-purpose blob buckets (avatars, public assets, workflow outputs)",
+        "Creating general-purpose blob buckets (avatars, public assets, function outputs)",
         "Configuring access policies and TTL tiers for buckets",
         "Generating time-limited signed URLs",
         "Applying CEL-based access rules to buckets"
@@ -125,7 +125,7 @@
       "prerequisites": [],
       "relatedGuides": [
         "documents",
-        "workflows"
+        "server-functions"
       ],
       "variants": [
         {
@@ -211,7 +211,7 @@
         "Adding group members by userId or email",
         "Removing group members",
         "Granting group-based document and database permissions",
-        "Using groups in database CEL access expressions",
+        "Using groups in a server function's access gate",
         "Configuring rule sets for group management",
         "Modeling user relationships (parent-child, mentor-mentee)",
         "Supplementing platform user data without replacing it"
@@ -254,82 +254,81 @@
     {
       "topic": "databases",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.ts.md",
-      "description": "Server-side databases — CEL access rules, registered operations, triggers, realtime subscriptions",
+      "description": "Server-side databases — types, schemas, triggers; records via ctx.db in server functions",
       "keywords": [
         "databases",
         "database",
         "server-side",
-        "CEL",
-        "access control",
-        "operations",
+        "database type",
+        "schema",
+        "models",
         "triggers",
         "autoPopulatedFields",
-        "defaultAccess",
+        "timestamps",
+        "ctx.db",
         "query",
-        "mutation",
+        "filter",
+        "save",
+        "patch",
+        "batch",
         "aggregate",
-        "pipeline",
+        "compare-and-swap",
+        "defineQuery",
+        "registered queries",
+        "$caller",
+        "channels",
         "permissions",
-        "groups",
-        "subscription",
-        "subscriptions",
-        "real-time",
-        "applyToQuery",
-        "DatabaseTypeSubscription",
-        "DatabaseGroupPermission",
-        "subscribe",
-        "db.change",
-        "live updates"
+        "managers",
+        "grantGroupPermission",
+        "rule sets",
+        "primitive databases",
+        "import",
+        "indexes"
       ],
       "useCases": [
-        "Creating and managing server-side databases",
-        "Defining registered operations with access control",
-        "Configuring triggers for computed fields",
-        "Setting up group-based access with CEL expressions",
-        "Querying and filtering database records",
-        "Executing mutations and batch operations",
-        "Running query-and-mutate operations with applyToQuery",
-        "Building multi-step pipeline operations",
-        "Configuring autoPopulatedFields and defaultAccess on a type",
-        "Subscribing to real-time database changes over WebSocket",
-        "Granting database access to a group via DatabaseGroupPermission",
-        "Importing CSV data into databases",
-        "Managing database permissions",
-        "Subscribing to real-time database changes",
-        "Building live dashboards and notification badges"
+        "Configuring a database type with a schema and triggers",
+        "Creating and managing databases from a server function",
+        "Reading and writing records from a function with ctx.db",
+        "Filtering, sorting, and paging record queries",
+        "Conditional writes, batch writes, and atomic increments",
+        "Aggregating records (count, sum, avg, min, max)",
+        "Scoping reads to the caller in function code or with a $caller registered query",
+        "Pushing realtime updates for database data over channels",
+        "Managing owners, managers, and group grants on a database",
+        "Inspecting and editing records with the primitive databases CLI",
+        "Splitting data into one database per team or tenant"
       ],
       "concepts": [
-        "databases.create",
-        "databases.connect",
-        "databases.executeOperation",
-        "DatabaseTypeConfig",
-        "registered operations",
-        "autoPopulatedFields",
-        "defaultAccess",
-        "CEL expressions",
-        "isMemberOf",
-        "hasRole",
+        "database",
+        "database type",
+        "schema",
         "triggers",
-        "pipeline",
-        "aggregate",
-        "bulk import",
-        "DoDb",
-        "syncIndexes",
-        "applyToQuery",
-        "itemAccess",
-        "databases.subscribe",
-        "DatabaseTypeSubscription",
-        "select projection",
-        "originConnectionId",
-        "DatabaseGroupPermission",
-        "grantGroupPermission"
+        "timestamps",
+        "ctx.db",
+        "query options",
+        "filter operators",
+        "writes",
+        "conditional writes",
+        "batch writes",
+        "atomic increments",
+        "aggregation",
+        "access gate",
+        "registered queries",
+        "$caller",
+        "channels",
+        "database type config",
+        "rule set config",
+        "group type config",
+        "managing databases",
+        "owner and manager",
+        "reserved field names"
       ],
       "prerequisites": [],
       "relatedGuides": [
         "documents",
         "data-modeling",
         "users-and-groups",
-        "workflows",
+        "server-functions",
         "resource-metadata"
       ],
       "variants": [
@@ -395,7 +394,7 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "workflows",
+        "server-functions",
         "devtools",
         "databases",
         "data-modeling"
@@ -412,110 +411,9 @@
       ]
     },
     {
-      "topic": "workflows",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.ts.md",
-      "description": "Multi-step automation pipelines — LLM calls, integrations, cron, sync runs, database steps",
-      "keywords": [
-        "workflows",
-        "automation",
-        "pipelines",
-        "steps",
-        "LLM",
-        "AI",
-        "OpenAI",
-        "Gemini",
-        "TOML",
-        "templates",
-        "email.send",
-        "switch step",
-        "forEach",
-        "zip",
-        "successWhen",
-        "runSync",
-        "syncCallable",
-        "analytics.query",
-        "applyToQuery",
-        "cron",
-        "scheduled",
-        "include fragments",
-        "$params validator",
-        "cron-triggers",
-        "overlap policy",
-        "timezone",
-        "schedule"
-      ],
-      "useCases": [
-        "Building multi-step automation pipelines",
-        "Chaining LLM calls together",
-        "Calling external APIs from workflows",
-        "Using managed prompts in workflows",
-        "Sending emails from workflows (template or inline mode)",
-        "Writing blobs from workflows",
-        "Running analytics queries from workflows",
-        "Running query+mutate database operations",
-        "Branching with switch steps and runIf predicates",
-        "Fanning out work with forEach (concurrent or zip) and successWhen",
-        "Scheduling workflows with cron triggers",
-        "Invoking short workflows synchronously via runSync",
-        "Sharing common step blocks via include fragments",
-        "Inspecting workflow run steps for debugging"
-      ],
-      "concepts": [
-        "workflow",
-        "steps",
-        "llm.chat",
-        "gemini.generate",
-        "integration.call",
-        "prompt.execute",
-        "transform",
-        "switch",
-        "runIf",
-        "saveAs",
-        "templates",
-        "now",
-        "today",
-        "uuid",
-        "ulid",
-        "CEL safe navigation",
-        "syncCallable",
-        "workflows.runSync",
-        "forEach zip",
-        "successWhen",
-        "include fragments",
-        "email.send",
-        "blob.upload",
-        "analytics.query",
-        "database.applyToQuery",
-        "cron trigger",
-        "overlapPolicy",
-        "workflow run steps"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "prompts",
-        "scripts",
-        "integrations",
-        "databases",
-        "blobs",
-        "analytics",
-        "app-secrets",
-        "resource-metadata"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_WORKFLOWS.swift.md"
-        }
-      ]
-    },
-    {
       "topic": "notifications",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.ts.md",
-      "description": "Multi-channel notifications (in-app inbox, push) — client SDK, notification.send step, dedupe",
+      "description": "Multi-channel notifications (in-app inbox, push) — client SDK, server-function sends, dedupe",
       "keywords": [
         "notifications",
         "push notifications",
@@ -523,7 +421,7 @@
         "APNs",
         "FCM",
         "device token",
-        "notification.send",
+        "ctx.api.notifications.send",
         "idempotency",
         "rate limit",
         "unreadCount",
@@ -533,7 +431,7 @@
         "Sending an in-app notification to a user",
         "Reading and marking a user's notification inbox",
         "Registering a device for push notifications",
-        "Sending a notification from a workflow step",
+        "Sending a notification from a server function",
         "Listening for live notification events over the WebSocket",
         "Making a notification send safe to retry with idempotencyKey",
         "Handling notification rate limits"
@@ -546,14 +444,14 @@
         "client.notifications.list",
         "registerDevice",
         "tokenSuffix",
-        "notification.send step",
+        "ctx.api.notifications.send",
         "idempotencyKey",
         "deduplicatedChannels",
         "NotificationRateLimitError"
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "workflows"
+        "server-functions"
       ],
       "variants": [
         {
@@ -569,7 +467,7 @@
     {
       "topic": "locks",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.ts.md",
-      "description": "Named locks: mutual exclusion by key across client, CLI, and workflows; leases, LockTimeoutError",
+      "description": "Named locks: mutual exclusion by key from client, CLI, and server functions; leases",
       "keywords": [
         "lock",
         "named lock",
@@ -581,7 +479,7 @@
         "renew",
         "status",
         "LockTimeoutError",
-        "lock.acquire",
+        "ctx.api.locks.tryAcquire",
         "serialize",
         "concurrency"
       ],
@@ -590,8 +488,8 @@
         "Acquiring a lock with a timeout and handling contention",
         "Releasing or renewing a held lock by handle",
         "Checking who holds a key without acquiring it",
-        "Coordinating overlapping workflow runs with lock.* steps",
-        "Holding a lock for an entire workflow run",
+        "Taking a lock from a server function with ctx.api.locks.tryAcquire",
+        "Re-taking a task run's own lease on a later slice (owner: ctx.runId)",
         "Sizing a lock lease so it covers the work"
       ],
       "concepts": [
@@ -601,14 +499,15 @@
         "LockHandle",
         "client.locks.acquire",
         "client.locks.tryAcquire",
-        "lock.acquire step",
-        "run-scoped lock",
+        "ctx.api.locks.tryAcquire",
+        "re-taking your own lease",
         "LockTimeoutError",
-        "lock rate limit"
+        "lock rate limit",
+        "lock rule set"
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "workflows"
+        "server-functions"
       ],
       "variants": [
         {
@@ -622,59 +521,9 @@
       ]
     },
     {
-      "topic": "scripts",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_SCRIPTS.md",
-      "description": "Sandboxed Rhai scripts for workflow transforms — input/output contract, parse_json gotcha, limits",
-      "keywords": [
-        "scripts",
-        "Rhai",
-        "transforms",
-        "script step",
-        "parse_json",
-        "JSON transform",
-        "ScriptConfig",
-        "sandbox",
-        "deterministic",
-        "limits",
-        "transforms/*.rhai"
-      ],
-      "useCases": [
-        "Reshaping nested JSON in a workflow",
-        "Computing derived fields from step output",
-        "Mapping, filtering, and reducing arrays in a script step",
-        "Parsing JSON-string database/document fields",
-        "Working around the parse_json top-level-array error",
-        "Bounding a script step with per-run limits",
-        "Testing a script via workflow test cases"
-      ],
-      "concepts": [
-        "script",
-        "Rhai",
-        "ScriptConfig",
-        "activeConfigId",
-        "ref",
-        "configId",
-        "input",
-        "ctx",
-        "with",
-        "parse_json",
-        "limits",
-        "scriptMetrics",
-        "non-retryable error"
-      ],
-      "prerequisites": [
-        "workflows"
-      ],
-      "relatedGuides": [
-        "workflows",
-        "configuration",
-        "server-functions"
-      ]
-    },
-    {
       "topic": "server-functions",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.ts.md",
-      "description": "Server functions — TypeScript pushed as config: grants, ctx SDK, durable runs, triggers, ceilings",
+      "description": "Server functions — TypeScript pushed as config: access gate, ctx SDK, invoke/start, triggers",
       "keywords": [
         "server functions",
         "functions",
@@ -682,72 +531,89 @@
         "defineFunction",
         "defineQuery",
         "defineMutation",
+        "access gate",
         "capabilities",
-        "grants",
-        "unscopedReads",
-        "durable",
+        "invoke",
+        "start",
+        "functions.invoke",
+        "functions.start",
+        "assertRuntime",
+        "ctx.runtime",
+        "task run",
         "step.do",
         "step.sleep",
         "triggers",
         "webhook",
+        "verificationScheme",
+        "signingSecret",
         "cron",
         "ctx.api",
         "ctx.db",
-        "integrations.call",
-        "prompts.run",
-        "secret",
-        "configVar",
-        "users.send",
-        "email.send",
+        "ctx.doc",
+        "ctx.integrations.call",
+        "ctx.prompts.run",
+        "ctx.secret",
+        "ctx.configVar",
+        "ctx.users.send",
+        "ctx.channels",
+        "channels",
         "pMap",
         "ulid",
         "stepPolicy",
         "functions/*.toml",
-        "functions.invoke",
-        "functions.start"
+        "functions logs",
+        "functions runs"
       ],
       "useCases": [
-        "Writing custom server-side TypeScript that runs under the caller's authority",
-        "Reading and writing database records from a function under declared grants",
-        "Calling an external API through a granted integration without exposing its credential",
+        "Writing custom server-side TypeScript behind an access gate",
+        "Invoking a function from the client and reading its response envelope",
+        "Starting a function as a task run and polling it",
+        "Refusing one runtime with assertRuntime and branching on ctx.runtime",
+        "Reading and writing database records from a function with ctx.db",
+        "Calling an external API through an integration without exposing its credential",
         "Running a saved prompt from a function",
-        "Sending realtime messages or email from a function",
-        "Running long-lived work with a durable function (step.do, step.sleep)",
+        "Sending to a connected client, publishing to a channel, or sending email",
+        "Running long-lived work as a task run (step.do, step.sleep)",
         "Firing a function from a webhook or a cron schedule",
-        "Invoking a function from the client and handling its envelope",
-        "Operating functions: enable, disable, archive, runs, codegen"
+        "Debugging a failing function with functions logs and functions runs",
+        "Operating functions: enable, disable, archive, versions, codegen"
       ],
       "concepts": [
         "server function",
         "functions/<key>.toml",
         "entry",
         "access gate",
-        "runAs",
+        "execution identity",
         "capabilities",
-        "database grant",
-        "unscopedReads",
-        "$caller",
+        "high-blast capability",
+        "manifest",
         "ctx.api",
         "ctx.db",
         "typed handle",
-        "runOperation",
+        "registered queries",
         "defineQuery",
         "defineMutation",
-        "query cache",
+        "$caller",
+        "ctx.doc",
         "ctx.integrations.call",
         "ctx.prompts.run",
         "ctx.secret",
         "ctx.configVar",
         "ctx.users.send",
-        "direct.message",
-        "email:send",
-        "analytics:writeForUser",
+        "ctx.channels.authorize",
+        "ctx.channels.publish",
+        "subscribeToChannel",
+        "ctx.api.email.send",
         "pMap",
         "ulid",
         "stepPolicy",
-        "durable",
+        "request runtime",
+        "task runtime",
+        "ctx.runtime",
+        "assertRuntime",
         "step.do",
         "step.sleep",
+        "ctx.runId",
         "runKey",
         "step discipline",
         "webhook trigger",
@@ -755,14 +621,15 @@
         "ctx.trigger",
         "ceilings",
         "FUNCTION_THREW",
-        "OUTPUT_TOO_LARGE"
+        "OUTPUT_TOO_LARGE",
+        "functions logs",
+        "functions runs"
       ],
       "prerequisites": [
         "configuration"
       ],
       "relatedGuides": [
         "configuration",
-        "workflows",
         "databases",
         "integrations",
         "prompts",
@@ -783,7 +650,7 @@
     },
     {
       "topic": "prompts",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.ts.md",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md",
       "description": "Managing LLM prompts with templates, configurations, and testing",
       "keywords": [
         "prompts",
@@ -797,6 +664,7 @@
         "TOML"
       ],
       "useCases": [
+        "Running a prompt from a server function",
         "Creating managed prompt templates",
         "Using variable substitution in prompts",
         "Testing prompts with test cases",
@@ -810,7 +678,7 @@
         "userPromptTemplate",
         "systemPrompt",
         "variables",
-        "execute",
+        "ctx.prompts.run",
         "preview",
         "test cases",
         "evaluator",
@@ -819,22 +687,12 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "workflows"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.swift.md"
-        }
+        "server-functions"
       ]
     },
     {
       "topic": "integrations",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.ts.md",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md",
       "description": "Connecting to third-party APIs with secure credential storage",
       "keywords": [
         "integrations",
@@ -867,18 +725,8 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "workflows",
+        "server-functions",
         "app-secrets"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.swift.md"
-        }
       ]
     },
     {
@@ -899,10 +747,11 @@
       "useCases": [
         "Storing API keys and tokens for external services",
         "Referencing credentials from integration headers",
-        "Using secrets in workflow templates and CEL",
-        "Reading secrets in database access rules and trigger stamps",
+        "Reading a secret in a server function with ctx.secret",
+        "Reading declared secrets in database trigger stamps and collection rules",
         "Rotating a credential without a config push",
-        "Keeping per-environment secret values"
+        "Keeping per-environment secret values",
+        "Referencing a webhook trigger's signing secret"
       ],
       "concepts": [
         "primitive secrets set",
@@ -911,12 +760,15 @@
         "write-only store",
         "per-app scope",
         "defaultHeaders",
-        "step output snapshots"
+        "ctx.secret",
+        "secret:<NAME> capability",
+        "declared secrets manifest",
+        "config vars"
       ],
       "prerequisites": [],
       "relatedGuides": [
         "integrations",
-        "workflows",
+        "server-functions",
         "databases",
         "configuration"
       ]
@@ -945,7 +797,7 @@
         "Configuring automatic lifecycle event tracking",
         "Querying app-wide analytics (DAU, WAU, MAU)",
         "Viewing top users and user timelines",
-        "Tracking integration and workflow metrics",
+        "Tracking function, integration, and prompt metrics",
         "Overriding plan or app version for analytics",
         "Handling pre-auth event logging",
         "Flushing events before navigation"
@@ -964,7 +816,7 @@
         "authentication"
       ],
       "relatedGuides": [
-        "workflows",
+        "server-functions",
         "integrations",
         "blobs"
       ],
@@ -990,47 +842,55 @@
         "latency",
         "round trips",
         "N+1",
-        "pipeline op",
+        "bulk query",
         "Promise.all",
+        "pMap",
         "cold path",
         "first paint",
-        "bulk op",
-        "subscribe",
-        "cron cache",
+        "functions.invoke",
+        "integrations",
+        "scheduled function",
+        "cron",
+        "cache",
         "stale-while-revalidate",
-        "Pinia",
+        "channels",
+        "cache invalidation",
+        "defineQuery",
         "measure"
       ],
       "useCases": [
         "Diagnosing why a page is slow on cold load",
-        "Replacing N+1 executeOperation loops with a single bulk call",
-        "Bundling related queries into a pipeline operation",
-        "Parallelizing independent awaits with Promise.all",
-        "Moving third-party API calls to a server-side cron",
-        "Rendering with cached values and refreshing reactively",
-        "Caching source data with DB-subscribe invalidation",
+        "Returning several models from one function call",
+        "Replacing N+1 invoke loops with one bulk call and one bulk query",
+        "Parallelizing independent awaits in app code and inside functions",
+        "Bulk-calling third-party APIs through integrations",
         "Deferring non-critical init off the cold path",
+        "Rendering with stored values and refreshing reactively",
+        "Pure compute over cached source data, invalidated by a channel message",
+        "Moving stale-tolerant third-party data to a scheduled function",
         "Auditing an existing Primitive app for common slow patterns",
         "Instrumenting first-paint time to verify a perf win"
       ],
       "concepts": [
-        "pipeline operation",
-        "bulk op",
-        "Promise.all",
         "cold path vs background",
+        "one function call, several models",
+        "bulk query",
+        "Promise.all",
+        "pMap",
+        "integration bulk call",
         "re-block trap",
         "stale-while-revalidate",
-        "client.databases.subscribe",
-        "fromWorkflow",
-        "server-side cron",
         "pure compute",
-        "Pinia store"
+        "channel invalidation",
+        "scheduled function",
+        "registered query cache",
+        "measuring first paint"
       ],
       "prerequisites": [],
       "relatedGuides": [
         "databases",
         "integrations",
-        "workflows"
+        "server-functions"
       ],
       "variants": [
         {
@@ -1112,7 +972,7 @@
       ],
       "useCases": [
         "Setting up the config directory for an app",
-        "Pushing workflow/prompt/integration/database-type changes to the server",
+        "Pushing function/prompt/integration/database-type changes to the server",
         "Managing dev/staging/prod environments from one repo",
         "Storing app secrets referenced as {{ secrets.KEY }}",
         "Authenticating the CLI in CI pipelines"
@@ -1125,60 +985,64 @@
     {
       "topic": "inspecting-and-debugging",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_INSPECTION.md",
-      "description": "Inspect a running app from the CLI — runs, connections, blobs, and --watch/--follow tailing",
+      "description": "Inspect a running app from the CLI — function runs and logs, connections, sessions, blobs",
       "keywords": [
         "inspect",
         "inspection",
         "debug",
         "debugging",
-        "watch",
         "follow",
         "tail",
-        "workflow runs",
+        "functions runs",
+        "functions logs",
+        "run steps",
         "connections",
         "sessions",
         "blob-buckets",
+        "records",
         "logs",
         "--json"
       ],
       "useCases": [
-        "Listing recent workflow runs and their statuses",
-        "Tailing new workflow runs live with --follow",
-        "Watching a list update in place with --watch",
+        "Listing a function's runs and a task run's step trace",
+        "Reading a function's invocation logs, output, and errors",
+        "Tailing new invocations live with --follow",
+        "Triaging a failing function",
         "Inspecting active connections and sessions for a user",
+        "Reading database and document records from the CLI",
         "Reading blob metadata without downloading the object"
       ],
       "relatedGuides": [
         "devtools",
-        "workflows"
+        "server-functions"
       ]
     },
     {
       "topic": "access-control",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md",
-      "description": "CEL access rules — identity context, per-surface rule contexts, management rule sets",
+      "description": "CEL access rules — a server function's access gate and management rule sets",
       "keywords": [
         "access control",
         "CEL",
         "permissions",
         "authorization",
+        "access gate",
         "isMemberOf",
         "hasRole",
         "memberGroups",
-        "accessRule",
+        "isAnonymous",
         "rule sets",
         "rule-sets",
-        "defaultAccess",
-        "fromWorkflow",
-        "subscription",
+        "FUNCTION_ACCESS_DENIED",
+        "lock rule set",
         "entitlement",
         "billing",
         "paywall"
       ],
       "useCases": [
-        "Writing access rules for database operations",
-        "Gating who can subscribe to database changes",
-        "Restricting who can start a workflow",
+        "Writing a server function's access gate",
+        "Writing rule sets for groups, collections, buckets, database types, and locks",
+        "Scoping what a caller reaches inside function code",
         "Governing who can create groups or manage members",
         "Testing and debugging CEL rules",
         "Building a subscription-entitlement (Stripe billing) gate end to end"
@@ -1190,7 +1054,7 @@
     {
       "topic": "resource-metadata",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.ts.md",
-      "description": "Typed metadata on any resource — categories, md.self/md.caller in CEL, batch reads, workflow steps",
+      "description": "Typed metadata on any resource — categories, md.self/md.caller in CEL, batch reads",
       "keywords": [
         "resource metadata",
         "metadata category",
@@ -1202,18 +1066,17 @@
         "writeRule",
         "resourceMetadata",
         "getBatch",
-        "metadata.write",
-        "metadata.read",
-        "attrs",
-        "fromWorkflow"
+        "ctx.api.resourceMetadata",
+        "initialMetadata",
+        "attrs"
       ],
       "useCases": [
-        "Attaching schema'd, access-controlled data to a user, group, collection, database, or workflow subject",
+        "Attaching schema'd, access-controlled data to a user, group, collection, or database",
         "Reading and writing a metadata category from the client or CLI, including a batch read",
         "Referencing declared metadata in a group, collection, or database access rule",
         "Reading the calling user's own metadata (md.caller) in an access rule",
-        "Writing metadata from a workflow step, restricted to that workflow with fromWorkflow()",
-        "Substituting a metadata value into a database operation's filter or data"
+        "Writing a server-owned category from a server function (writeRule = \"false\")",
+        "Stamping initial metadata when creating a collection or database"
       ],
       "concepts": [
         "metadata category config (schema + readRule/writeRule)",
@@ -1221,14 +1084,14 @@
         "md.self.<category>.<key>",
         "md.self.attrs (projected category)",
         "md.caller (user.userId root)",
-        "metadata.write / metadata.read workflow steps",
-        "trusted-author model"
+        "ctx.api.resourceMetadata from a server function",
+        "create-time initial metadata"
       ],
       "relatedGuides": [
         "access-control",
         "users-and-groups",
         "databases",
-        "workflows"
+        "server-functions"
       ],
       "variants": [
         {
@@ -1281,7 +1144,7 @@
     {
       "topic": "blob-buckets",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.ts.md",
-      "description": "Blob buckets — configuration, access policies, TTL tiers, signed URLs, workflow integration",
+      "description": "Blob buckets — configuration, access policies, TTL tiers, signed URLs, server functions",
       "keywords": [
         "blob bucket",
         "buckets",
@@ -1292,13 +1155,13 @@
         "public-read",
         "owner-only",
         "avatars",
-        "workflow outputs"
+        "function outputs"
       ],
       "useCases": [
         "Storing files outside any document (avatars, generated assets)",
         "Serving public assets via signed URLs",
         "Time-boxed download links",
-        "Writing workflow outputs to storage"
+        "Writing server function outputs to storage"
       ],
       "variants": [
         {
@@ -1379,6 +1242,67 @@
         "documents",
         "deploying",
         "data-modeling"
+      ]
+    },
+    {
+      "topic": "error-handling",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_ERROR_HANDLING.ts.md",
+      "description": "The shared API error envelope: branching and localizing on a stable code, not on message text",
+      "keywords": [
+        "error",
+        "errors",
+        "error handling",
+        "code",
+        "error code",
+        "errorCode",
+        "envelope",
+        "JsBaoApiError",
+        "HttpError",
+        "serverCode",
+        "ApiError",
+        "status code",
+        "localize",
+        "NOT_FOUND",
+        "ACCESS_DENIED",
+        "UNAUTHENTICATED",
+        "STATE_CONFLICT",
+        "RATE_LIMITED",
+        "INTERNAL_ERROR"
+      ],
+      "useCases": [
+        "Branching on the cause of an API failure without parsing English",
+        "Localizing error messages by machine-readable code",
+        "Telling a permission refusal from a missing record on the same HTTP status",
+        "Distinguishing a duplicate-name 409 from an optimistic-concurrency conflict",
+        "Handling a failure that carries no code (an older server or an intermediary)",
+        "Reading the legacy bodies that use `message` instead of `error`"
+      ],
+      "concepts": [
+        "error envelope",
+        "code",
+        "errorCode",
+        "error text",
+        "status-derived default",
+        "STATE_CONFLICT vs CONFLICT",
+        "JsBaoApiError.code",
+        "HttpError.serverCode",
+        "ApiError.code",
+        "HEAD failures carry no body"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "authentication",
+        "access-control"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_ERROR_HANDLING.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_ERROR_HANDLING.swift.md"
+        }
       ]
     },
     {
