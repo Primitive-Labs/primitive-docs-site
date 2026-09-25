@@ -337,7 +337,7 @@ export default defineFunction(async (input: { databaseId: string }, ctx) => {
 access = "user.appRole == 'admin'"
 
 // GOOD — checks the caller's app role.
-access = "hasRole('editor-in-chief')"
+access = "hasRole('admin')"
 
 // BAD — isMemberOf returns bool, not the group. `==` is meaningless.
 access = "isMemberOf('team') == 'engineering'"

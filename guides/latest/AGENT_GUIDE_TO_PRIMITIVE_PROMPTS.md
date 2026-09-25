@@ -194,6 +194,7 @@ Read and written by `primitive config pull` / `primitive config push` — the on
 
 ```toml
 [prompt]
+kind = "chat"                    # optional: chat (default) | decisions — fixed at create
 key = "my-prompt"                # required, unique per app, kebab-case
 displayName = "My Prompt"        # required
 description = "What it does"     # optional
@@ -204,7 +205,9 @@ name = "default"                 # required, unique per prompt
 description = "..."              # optional
 provider = "gemini"              # required: gemini | openrouter
 model = "models/gemini-3-flash-preview"   # required
-userPromptTemplate = "Summarize: {{ input.text }}"   # required
+
+[configs.chat]                   # the block named by the prompt's kind
+userPromptTemplate = "Summarize: {{ input.text }}"   # required for kind = "chat"
 systemPrompt = "You are concise."        # optional
 temperature = 0.3                # optional, number or string ("0.3"); stored as string
 maxTokens = 1000                 # optional integer
@@ -212,6 +215,31 @@ outputFormat = "text"            # optional: text (default) | json — request/r
 reasoningEffort = "minimal"      # optional: none | minimal | low | medium | high — how much the provider may think
 # reasoningBudget = 512          # ...or a token budget instead. Never both.
 ```
+
+### Prompt kinds and the per-kind block
+
+`[prompt].kind` says what the prompt runs: `chat` (the default, and every
+prompt written before the key existed) or `decisions`, OpenRouter's decisions
+endpoint with its named typed `questions`. It is fixed at create — converting a
+prompt means a new key, and `config push` declines a changed `kind` as
+immutable before it sends anything.
+
+A `[[configs]]` entry carries the keys that are not specific to a kind
+(`name`, `status`, `description`, `provider`, `model`, `providerConfig`, plus
+the `active` marker) and then exactly ONE block, named after the prompt's kind:
+
+| `kind` | block | keys |
+| ------ | ----- | ---- |
+| `chat` | `[configs.chat]` | `systemPrompt`, `userPromptTemplate`, `temperature`, `topP`, `maxTokens`, `outputFormat`, `outputSchema`, `reasoningEffort`, `reasoningBudget` |
+| `decisions` | `[configs.decisions]` | `questions` |
+
+A `[configs.chat]` block under a decisions prompt — or a `[configs.decisions]`
+block under a chat prompt — is refused, naming the block and the kind.
+
+The nine chat keys written FLAT under `[[configs]]` are the deprecated
+pre-kind spelling. `config push` still accepts them and warns once per file;
+`config pull` writes only `[configs.chat]`, so one pull-then-push migrates a
+file. The same key set both ways is refused.
 
 ### Field reference
 
@@ -222,6 +250,7 @@ reasoningEffort = "minimal"      # optional: none | minimal | low | medium | hig
 | `key`          | Yes      | Unique per app                                                                       |
 | `displayName`  | Yes      |                                                                                      |
 | `description`  | No       |                                                                                      |
+| `kind`         | No       | `chat` (default) \| `decisions`. Fixed at create; decides which `[configs.<kind>]` block an entry may carry |
 | `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
 | `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back. **This is the one a server function reads** — see below                     |
 
@@ -231,14 +260,19 @@ reasoningEffort = "minimal"      # optional: none | minimal | low | medium | hig
 
 What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, the generated types — is under Typed output (in Running from a server function).
 
-**`[[configs]]`:**
+**`[[configs]]` — the shared keys:**
 
 | Key                  | Required | Notes                                              |
 | -------------------- | -------- | -------------------------------------------------- |
 | `name`               | Yes      | Unique per prompt                                  |
 | `description`        | No       |                                                    |
-| `provider`           | Yes      | `gemini` \| `openrouter` (CLI default: `openrouter`) |
+| `provider`           | Yes      | `gemini` \| `openrouter` (CLI default: `openrouter`). A decisions config must be `openrouter` |
 | `model`              | Yes      | Provider-specific identifier                       |
+
+**`[configs.chat]` — a `kind = "chat"` prompt's settings:**
+
+| Key                  | Required | Notes                                              |
+| -------------------- | -------- | -------------------------------------------------- |
 | `userPromptTemplate` | Yes      |                                                    |
 | `systemPrompt`       | No       |                                                    |
 | `temperature`        | No       | Stored as string; numbers in TOML are accepted     |
@@ -246,10 +280,21 @@ What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, the generat
 | `maxTokens`          | No       | Integer                                            |
 | `outputFormat`       | No       | `text` (default) \| `json`. On openrouter, `json` requests provider JSON mode (`response_format`); on gemini it only normalizes the response (fence stripping) — a gemini config constrains the request with `outputSchema` instead. `json` alone gives `ctx.prompts.run` an untyped `parsed`. |
 | `outputSchema`       | No       | Config-level JSON Schema, stored with the config. `ctx.prompts.run` validates against `[prompt.outputSchema]`, not this one |
-| `providerConfig`     | No       | Stored with the config and returned by the API, but **not applied to the provider request**. Nothing reads it at execution — to bound the model's reasoning use `reasoningEffort` / `reasoningBudget` below |
 | `reasoningEffort`    | No       | `none` \| `minimal` \| `low` \| `medium` \| `high`. How much the provider may spend on reasoning before answering. Mutually exclusive with `reasoningBudget` |
 | `reasoningBudget`    | No       | The same control as a whole number of reasoning tokens. Mutually exclusive with `reasoningEffort` |
-| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update |
+
+**`[configs.decisions]` — a `kind = "decisions"` prompt's settings:**
+
+| Key         | Required | Notes                                                        |
+| ----------- | -------- | ------------------------------------------------------------ |
+| `questions` | Yes      | The named typed questions the model answers, authored as `[configs.decisions.questions.<name>]` tables (or a JSON string). Each has a `type` (`choice` \| `score` \| `noul`) and `instructions`; a `choice` question also needs a `criteria` table of at least two option key = description pairs |
+
+**Back at the `[[configs]]` root, whatever the kind:**
+
+| Key                  | Required | Notes                                              |
+| -------------------- | -------- | -------------------------------------------------- |
+| `providerConfig`     | No       | Stored with the config and returned by the API, but **not applied to the provider request**. Keyed to the provider rather than to the kind, so it stays at the entry root. Nothing reads it at execution — to bound the model's reasoning use `[configs.chat].reasoningEffort` / `reasoningBudget` above |
+| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update. `isActive` is accepted as a legacy spelling |
 
 **Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `config pull` writes back what the server holds, and `config push` rejects a key the CLI does not recognize rather than dropping it silently.
 
@@ -264,6 +309,8 @@ displayName = "Document Summarizer"
 name = "default"
 provider = "gemini"
 model = "models/gemini-3-flash-preview"
+
+[configs.chat]
 temperature = 0.3
 userPromptTemplate = "Summarize: {{ input.text }}"
 
@@ -271,6 +318,8 @@ userPromptTemplate = "Summarize: {{ input.text }}"
 name = "creative"
 provider = "gemini"
 model = "models/gemini-3-pro-preview"
+
+[configs.chat]
 temperature = 0.8
 userPromptTemplate = "Write an engaging summary of: {{ input.text }}"
 
@@ -278,11 +327,69 @@ userPromptTemplate = "Write an engaging summary of: {{ input.text }}"
 name = "claude"
 provider = "openrouter"
 model = "anthropic/claude-3-5-sonnet"
+
+[configs.chat]
 temperature = 0.5
 userPromptTemplate = "Provide a concise summary: {{ input.text }}"
 ```
 
 Mark the live config with `active = true` on exactly one `[[configs]]` entry. `config pull` writes that marker and `config push` honors it on create AND update, so the committed file always says which config the server is actually running. Two markers is an error rather than a first-wins rule. With no marker, the first entry becomes active when the prompt is created and nothing is re-activated afterwards.
+
+### Decisions prompts
+
+`kind = "decisions"` runs OpenRouter's decisions endpoint instead of a chat
+completion: the config declares named typed `questions`, the caller supplies
+one variable `state` — the value they are asked about — and the answer is one
+typed answer per question.
+
+```toml
+[prompt]
+kind = "decisions"
+key = "transaction-categorizer"
+displayName = "Transaction categorizer"
+
+[[configs]]
+name = "jev"
+active = true
+provider = "openrouter"            # the only provider a decisions config runs on
+model = "typesafe/jev-1.13"
+
+[configs.decisions.questions.category]
+type = "choice"
+instructions = "Which household category does this bank transaction belong to?"
+
+[configs.decisions.questions.category.criteria]
+gas-and-fuel = "Gas & Fuel (Auto & Transport)"
+groceries = "Groceries (Food & Restaurants)"
+```
+
+A decisions config carries no `userPromptTemplate` and no `systemPrompt`; the
+questions are the prompt. `variables.state` is required and read by PRESENCE,
+so `null`, `0` and `""` are values and only an absent key is refused — before
+the provider call, so nothing is billed. `attachments` are refused the same
+way.
+
+The three question types, with the answer each returns:
+
+| `type` | `criteria` | Answer |
+| ------ | ---------- | ------ |
+| `choice` | a table of at least two `option key = description` pairs | `{ type, choice, probabilities, confidence }` |
+| `score` | an ARRAY of the two ends of the scale, low first (required) | `{ type, score, legend, probabilities, confidence }` |
+| `noul` | none | `{ type, noul }` |
+
+`output` is the answers object serialized, and a server function receives it as
+`parsed` with nothing declared — a decisions run always answers JSON.
+`metrics` carries the token counts and `metrics.cost`, the price of the call in
+USD as the provider reported it. To get `parsed` TYPED, declare
+`[prompt.outputSchema]` matching the answers: typed access comes only from that
+declaration, never from the questions, because any active config can be pinned
+by `configId` and only the prompt-level schema is enforced at run time.
+
+A test case carries `state` in its `inputVariables` and asserts on the answers
+with `expectedJsonSubset` (`'{"category": {"choice": "gas-and-fuel"}}'`). A
+decisions prompt may NOT be a test case's evaluator: an evaluator is handed the
+evaluated input and output as template variables, which a decisions run cannot
+read, so an evaluator must be a chat prompt.
 
 ### Evaluator prompts
 
@@ -300,6 +407,8 @@ displayName = "Haiku Evaluator"
 name = "default"
 provider = "gemini"
 model = "models/gemini-3-flash-preview"
+
+[configs.chat]
 temperature = 0
 systemPrompt = "You judge LLM outputs. Respond ONLY with valid JSON."
 userPromptTemplate = """
@@ -498,8 +607,10 @@ Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are p
 
 Pull and push share one key set, so they cannot disagree about which fields exist:
 
-- `[prompt]`: `key, displayName, description, inputSchema, outputSchema`
-- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, providerConfig, reasoningEffort, reasoningBudget`
+- `[prompt]`: `kind, key, displayName, description, inputSchema, outputSchema`
+- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, providerConfig`
+- `[configs.chat]`: `systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, reasoningEffort, reasoningBudget`
+- `[configs.decisions]`: `questions`
 
 A field the server has not set is omitted (there is no TOML `null`), and a JSON
 field TOML cannot represent faithfully — a `null` anywhere inside a schema — is
@@ -509,12 +620,11 @@ file; upgrade the CLI to manage it.
 
 ### What `config push` does
 
-- Updates existing prompts (matched by `key`) and reconciles configs (matched by `name`).
+- Updates existing prompts (matched by `key`) and updates the configs the file lists (matched by `name`). It deletes no `[[configs]]` entry the file omits and clears no activation: push warns `Prompt <key> still differs from the server after this push`, and `config diff` keeps reporting it until you `config pull` or remove the configuration server-side.
 - Creates new prompts and additional configs that don't exist on the server.
 - Activates the `[[configs]]` entry marked `active = true`, on create and on update alike. With no marker, the first entry becomes active on create.
 - Test case TOMLs in `<key>.tests/` are pushed and matched by filename slug.
-- Skips files unchanged since the last sync (use `--force` to bypass).
-- Conflict detection: if a prompt was modified on the server since the last pull, push fails — pull and re-merge.
+- Deciding what to apply, and what a prompt edited in the Admin Console since your last pull does to a push, follows the same rules as every other type — see the Configuration guide's [Previewing a push](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#previewing-a-push) and [Out-of-band changes](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#out-of-band-changes-and-stale-sync-state).
 
 ---
 
@@ -574,6 +684,8 @@ name = "default"
 active = true
 provider = "gemini"
 model = "models/gemini-3-flash-preview"
+
+[configs.chat]
 temperature = 0.7
 userPromptTemplate = "Generate a friendly greeting for {{ input.name || 'friend' }} who works as a {{ input.occupation || 'professional' }}."
 ```
@@ -612,6 +724,8 @@ primitive prompts tests run-all <prompt-id>
 name = "creative"
 provider = "gemini"
 model = "models/gemini-3-pro-preview"
+
+[configs.chat]
 temperature = 0.9
 userPromptTemplate = "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
 ```
@@ -682,7 +796,7 @@ the current one.
 A config states the budget in one of two ways, never both:
 
 ```toml novalidate
-[[configs]]
+[configs.chat]
 reasoningEffort = "minimal"   # none | minimal | low | medium | high
 # reasoningBudget = 512       # ...or a whole number of reasoning tokens
 ```

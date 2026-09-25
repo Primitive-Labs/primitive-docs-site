@@ -154,7 +154,7 @@ Behavior:
 - Any header/query whose value was substituted from a secret is automatically marked sensitive — its value is replaced with `[redacted]` in admin logs and the test-mode request preview.
 - Secret references are validated at save time: creating or updating an integration (or creating a versioned config) whose `defaultHeaders`/`staticQuery` reference a nonexistent app secret fails with a 400 naming the missing key. Whitespace inside the braces is tolerated (`{{ secrets.KEY }}` ≡ `{{secrets.KEY}}`), but not around the dot. If a referenced secret is deleted *after* the config is saved, the platform passes the literal `{{secrets.KEY}}` upstream and logs a server-side warning — re-create the secret or update the config.
 - Secret-key constraint: `^[A-Z][A-Z0-9_]{0,63}$` (uppercase letters, digits, underscores; starts with a letter; ≤64 chars).
-- Cache: app-secret reads are cached server-side (30s fresh / 60s stale). Updates invalidate the cache for that app.
+- Cache: app-secret reads are cached server-side (30s fresh / 60s stale), so a rotated value may take up to about a minute to reach every outbound call.
 
 ### Vars vs Secrets
 
@@ -170,10 +170,7 @@ primitive config push --only var/ACCOUNT_ID
 account = "{{vars.ACCOUNT_ID}}"
 ```
 
-Two behaviors deliberately diverge from secrets:
-
-- **Not redacted.** Only a value substituted from `{{secrets.*}}` is marked sensitive and replaced with `[redacted]` in admin logs and the test-mode request preview. A value substituted from `{{vars.*}}` is never redacted — vars are non-secret and stay visible in both places.
-- **Not validated at save time.** Saving/updating an integration whose `defaultHeaders`/`staticQuery` reference a nonexistent `{{secrets.KEY}}` fails with a 400 naming the missing key. The same integration referencing a nonexistent `{{vars.KEY}}` saves successfully — the reference just resolves to the literal `{{vars.KEY}}` placeholder at call time (the fallback secrets only get if the key is deleted *after* save).
+A var differs from a secret in two ways that matter here: a substituted var value is never redacted in admin logs or the test-mode preview, and a reference to a nonexistent `{{vars.KEY}}` is not rejected at save time (it resolves to the literal placeholder at call time). The App Secrets guide's [Config Vars](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md#config-vars) section is the full statement.
 
 Vars are not per-integration rows and have no cache-TTL distinction called out here beyond the shared config-vars cache; see the App Secrets guide's Config Vars section for the full CLI, the `vars.toml` sync shape, and the CEL declared-only binding path (`vars = ["KEY"]`).
 

@@ -1031,29 +1031,19 @@ export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
 ```
 
 **The signup mode has to admit the address.** The `+primitivetest` bypass
-replaces the emailed code — it does not skip the app's signup gate. The server
-runs the invite-only/domain access check first and only then applies the
-test-email whitelist, so on an app with `mode = "invite-only"` (the default for
-a freshly scaffolded app) an uninvited test address is rejected at OTP request
-with `This app is invite-only. You've been added to the waitlist.`
+replaces the emailed code, not the app's signup gate, and a freshly scaffolded
+app is `mode = "invite-only"` — an unadmitted test address is rejected at OTP
+request with `This app is invite-only. You've been added to the waitlist.`
+Either set `mode = "public"` in `app.toml` and run
+`primitive config push --only app`, or stay invite-only and admit the exact
+derived address first — the Authentication guide's "Invite-only apps:
+pre-create the member" covers how.
 
-Two ways through:
-
-- Set `mode = "public"` in `app.toml` and run `primitive config push --only app`.
-- Stay invite-only and pre-invite the test address. This genuinely works — an
-  unaccepted, unexpired invitation for the address satisfies the gate, and OTP
-  verify then consumes it. Invite the **exact** address, lowercase
-  (`you+primitivetest-smoke@example.com`), with role `member`: invitation
-  lookup matches the literal email, so an invitation for the bare base address
-  does not cover a `+primitivetest` one, and `admin`/`owner` roles are refused
-  for test addresses. With `mode = "domain"`, the address's domain must be in
-  `allowedDomains` instead.
-
-The preflight can read `mode` but not the app's invitations, so under a
+The preflight can read `mode` but not the app's members, so under a
 non-public mode it fails unless you tell it the address is already admitted:
 
 ```bash
-export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address invited
+export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address admitted
 ```
 
 To check the prerequisites without the multi-minute boot and build, run the

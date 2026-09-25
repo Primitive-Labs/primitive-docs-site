@@ -321,7 +321,7 @@ primitive analytics events-grouped --group-by feature --window-days 14
 
 # Error groups: failures grouped by fingerprint with per-day counts
 # (default --window-days 7, --limit 50). Filter: --status-class 4xx|5xx|transport,
-# --source integration
+# --source workflow_run|workflow_step|integration|function_invocation|function_run
 primitive analytics errors-groups --window-days 7 --status-class 5xx
 
 # Integration / prompt analytics (default --window-days 30)
@@ -437,7 +437,9 @@ Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upg
 
 ### Error groups
 
-`/analytics/errors/groups` groups failure events (failed integration calls) by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
+`/analytics/errors/groups` groups failure events by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
+
+Five surfaces emit failure events, and `source` says which: a failed workflow run (`workflow_run`), a failed workflow step (`workflow_step`), a failed integration call (`integration`), a failed server-function invocation (`function_invocation`) and a failed server-function task run (`function_run`). The two function sources are separate because the runner is part of the failure: a caller was answered with a terminal envelope, or a scheduled run died with nobody watching. For a function group, `scope_key` on the exemplar is the function key and `run_id` is the task run.
 
 Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span that is followed by `:` *and* sits in JSON object position — after `{` or `,`; a quoted span in prose, like `Failed to parse "x.txt": ...` or `User "alice": not found`, is templated even though it precedes a colon), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED` — but not an uppercase id such as `ABC123XYZ` or `DEADBEEFCAFE`, which are templated), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
 
@@ -445,7 +447,7 @@ Each response row is one fingerprint: `fingerprint`, a representative `normalize
 
 **The exemplar is how you identify a group.** `normalized_title` is a grouping key with the variable parts replaced by placeholders; `exemplar` is a raw sample of one real failure — `{ message, action, scope_key, step_id, run_id, at }` — so you can go from a spiking group straight to a concrete failure without paging `/analytics/events`. `step_id` and `run_id` are `null` when the failure had none. The whole object is `null` when no sampled row for that fingerprint carried a sample: a very noisy group can consume the sampling budget and leave a quieter one without one. Treat `exemplar: null` as a normal result, not an error.
 
-`status_class` is the integration failure's real HTTP status class, including `transport`, which no message text can express.
+`status_class` is the integration failure's real HTTP status class, including `transport`, which no message text can express. On every other source it is inferred from the message and is `` (empty) when the message embeds no HTTP status, so do not filter a function or workflow group by it expecting to find everything.
 
 **The `daily` series is sparse.** A day on which that fingerprint produced no events has no bucket at all, so `daily` is shorter than the window for any intermittent error. Divide by `window_days` (the response echoes it) to get a per-day baseline — dividing by `daily.length` averages over only the days the error fired, which overstates the baseline and suppresses exactly the spike an alert should catch. A window with no failures returns `rows: []`.
 
@@ -454,7 +456,7 @@ Only a bounded set of dimensions is filterable (the exact error code is inside t
 | Field | Operators | Values |
 | --- | --- | --- |
 | `fingerprint` | `is`, `contains`, `starts with` | any |
-| `source` | `is`, `is not` | `integration` |
+| `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration`, `function_invocation`, `function_run` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
 Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).

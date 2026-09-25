@@ -126,9 +126,9 @@ All of this runs inside a function. See [The typed handle](AGENT_GUIDE_TO_PRIMIT
 
 | Key | Meaning |
 |---|---|
-| `sort` | `{ field: 1 \| -1, … }` |
+| `sort` | `{ field: 1 \| -1, … }`. Records that lack the field — or hold it as `null` — sort first ascending, last descending |
 | `limit` | Page size |
-| `uniqueStartKey` | The cursor: pass the previous page's `nextCursor` |
+| `uniqueStartKey` | The cursor: pass the previous page's `nextCursor`. Opaque — never parse or build one |
 | `direction` | `1` forward (default), `-1` backward |
 | `projection` | Inclusion `{ title: 1, status: 1 }` returns just those fields; exclusion `{ internalNotes: 0 }` strips them server-side. `id` is always returned |
 | `include` | Related records: `refersTo` (FK to one record), `hasMany` (target FK to this record), `refersToMany` (StringSet to several). Loaded records land under `_related` on each row |
@@ -148,6 +148,21 @@ while (page.hasMore) {
   rows.push(...page.items);
 }
 ```
+
+`hasMore: true` always carries a `nextCursor`, so the loop above cannot stall with rows left behind.
+
+#### Sorting on a field some records don't have
+
+Records are schemaless, so the rows of one model need not all carry the field you sort on, and a row may carry it as `null`. **Absent and `null` are one value for ordering** — a record that never wrote the field sorts exactly where a record holding `null` sorts:
+
+| Sort | Where those rows land |
+|---|---|
+| `{ priority: 1 }` (ascending) | **first**, before every real value |
+| `{ priority: -1 }` (descending) | **last**, after every real value |
+
+That is SQLite's own `ORDER BY` placement for nulls, and it is identical on the server and in the JS and Swift clients, so the same records page in the same order everywhere. Paging visits every matching record exactly once in either sort direction and either paging direction; ties are broken by `id`, which every record has, so boundaries are stable when many rows share a value or share having none.
+
+Cursors are **opaque** base64 tokens — never parse or construct one. A cursor issued before this ordering was specified keeps working unchanged, so a client holding one need not restart its walk.
 
 ### Filter operators
 
