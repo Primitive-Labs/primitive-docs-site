@@ -106,7 +106,7 @@ primitive users list --search "ali"
 # them out of this app (sessions deleted, API tokens revoked, open connections
 # dropped) and is reversible: memberships and ownership are untouched, and
 # after `enable` they sign in again and their group access resumes. The app's
-# only owner cannot be disabled. `users remove` detaches the user instead.
+# only owner cannot be disabled.
 primitive users disable <user-id> [-y]
 primitive users enable <user-id>
 ```
@@ -151,7 +151,7 @@ The current authenticated user has its own namespace. Use it for "me"-scoped rea
 {{#lang swift}}
 - `ownedDocuments()` is cache-backed and offline-aware and returns `[DocumentInfo]`. Use `ownedDocumentsPage(...)` when you need a paginated `DocumentListPage`; the root document is excluded by default (`includeRoot: false`).
 {{/lang}}
-- `sharedDocuments()` returns the unified `{ items, cursor }` envelope (raw-JSON cursor, NOT base64url). Group- and collection-scoped shares do NOT appear here — those are accessed via the group or collection. Each `SharedDocument` extends `DocumentInfo`, so rows carry the base document fields plus the share extras (`permission`, `source`, `grantedBy`).
+- `sharedDocuments()` returns the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, NOT base64url — pass it back as the `cursor` option). Group- and collection-scoped shares do NOT appear here — those are accessed via the group or collection. Each `SharedDocument` extends `DocumentInfo`, so rows carry the base document fields plus the share extras (`permission`, `source`, `grantedBy`).
 
 Together, `me.ownedDocuments()` + `me.sharedDocuments()` give the two halves of "documents the user has direct access to." For group- or collection-scoped access, iterate `groups.listUserMemberships(...)` / `client.collections.list()` and call `groups.listDocuments` / `collections.listDocuments`.
 
@@ -185,7 +185,7 @@ If the group type has `autoAddCreator: true` (default), the creator is automatic
 
 `groupId` on create is optional — a supplied id keeps its existing validation (`#` banned, no `_`-prefixed reserved type, `409` on a duplicate); a non-string supplied value is rejected with `400 "groupId must be a string"`, an empty string with `400 "groupId cannot be empty"`. Omit it (or send `null`) to have the server assign a ULID, returned as `groupId` in the response — the same pattern documents, databases, and collections use for server-assigned ids.
 
-`groups.list()` returns a paginated `{ items: GroupInfo[], cursor? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
+`groups.list()` returns a paginated `{ items: GroupInfo[], nextCursor?, hasMore? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
 
 `groups.get()` returns `{ appId, groupType, groupId, name, description?, memberCount, createdAt, createdBy, modifiedAt }`. `update()` takes optional `name` and/or `description`. `delete()` cascade-deletes all memberships and group permissions.
 
@@ -264,7 +264,7 @@ categories = ["config"]        # optional — self-reads like md.self.config.* a
                                 # load a category no rule names directly
 ```
 
-A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block (collection `attrs` adds `contextId`). See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block. See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
 
 Push to the server:
 
@@ -383,7 +383,6 @@ Group management operations (create/edit/delete, member add/remove) are gated by
 |----------|-----------------|-------------|
 | `group.groupType` | yes | Target group's type |
 | `group.groupId` | yes | Target group's ID (also present at `create` time — server passes the requested ID) |
-| `group.contextId` | yes | Read-alias of `group.groupId` — the same value under the `contextId` name collection rules use, so group and collection rule sets can share expressions |
 | `group.name` | yes | Target group's display name |
 | `group.createdBy` | yes (after create) | userId of the group creator |
 | `target.userId` | only `category: "member"`, ops `create`/`edit`/`delete` | Target user being added/removed. Absent for `member.list`. |

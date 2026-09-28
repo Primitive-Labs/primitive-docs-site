@@ -38,7 +38,7 @@ The API is **flat** (`client.blobBuckets.upload(bucketIdOrKey, …)`), not a `.b
   // List blobs in the bucket
   let page = try await client.blobBuckets.list(bucketIdOrKey: "avatars", limit: 50)
   let items = page.items
-  let cursor = page.cursor
+  let nextCursor = page.nextCursor
 
   // One blob's metadata
   let meta = try await client.blobBuckets.getMetadata(bucketIdOrKey: "avatars", blobId: blobId)

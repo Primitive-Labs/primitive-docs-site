@@ -72,7 +72,7 @@ The platform emits these from the server. No client code at all.
 | `created` | `token` | API token created |
 | `revoked` | `token` | API token revoked |
 
-Function and prompt events also record `duration_ms`, and prompt events record LLM token counts (`input_tokens`, `output_tokens`, `total_tokens`) when available. A prompt run from a function emits `prompt.executed` attributed to the function's caller, and none on a trigger fire.
+Function and prompt events also record `duration_ms`, and prompt events record LLM token counts (`input_tokens`, `output_tokens`, `total_tokens`) when available. A prompt event also records `cost` — USD, as the provider reported it — when the provider reports one: today a decisions prompt does and a chat run does not. A run with no reported cost is recorded as **cost-unknown**, not as zero, which is why the aggregate carries a count of the costed executions beside the money: never divide a cost total by the execution count, or you will report a per-run price cheaper than any run cost. A prompt run from a function emits `prompt.executed` attributed to the function's caller, and none on a trigger fire.
 
 {{#lang ts}}
 ### Auto-Populated Fields
@@ -144,7 +144,6 @@ Pass a `context_json` object for per-event debug data. The serialized payload is
 | `browser_version` | `string` | No | Browser version (auto-detected) |
 | `app_version` | `string` | No | Your app's version (or set via `setAppVersionOverride`) |
 | `context_json` | `string \| Record<string, unknown> \| null` | No | Debug context (truncated to 1 KiB) |
-| `user_created_at_epoch_s` | `number` | No | **Deprecated — ignored.** The server records when the user joined the app; any value passed here is dropped before the event is sent. |
 
 ### Don't
 
@@ -385,7 +384,7 @@ Every payload also carries `_timing: { total_ms, wae_queries }` — diagnostics 
 | `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
 | `events.grouped` — `/events/grouped` | `{ group_by, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
 | `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
-| `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens }] }` |
+| `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens, executionsWithCost, totalCost, avgCost }] }` — `totalCost` / `avgCost` are `null` when no execution in the window reported a cost |
 | `integrations` — `/integrations` | `{ windowDays, integrations: [{ integrationKey, invocations, errorRate, medianDurationMs, p10DurationMs, p50DurationMs, p95DurationMs }] }` |
 
 Read these before computing anything from a payload:
@@ -395,6 +394,7 @@ Read these before computing anything from a payload:
 - **`firstSeen` is all-time; `firstSeenInWindow` is not.** On a `users.top` row, `firstSeen` is the user's first recorded event across the app's whole retained history — it does not move when you change `windowDays`, so `firstSeen` inside the last day is a genuinely new user. `firstSeenInWindow` is the first event *inside* the window, and it moves with `windowDays` by definition; the rest of the row (`eventCount`, `lastSeen`) is window-scoped too. Derive "new signups" from `firstSeen` (or from `overview.growth`'s `new_users`, which counts the same thing) — never from `firstSeenInWindow`, which over a short window marks every returning user as a new signup, day after day. Both are bounded by retention: a user whose first event has aged out reads as first seen at the oldest event still retained.
 - **`daily-active` is dense.** It returns exactly `windowDays` rows (7–90, default 28), one per UTC day, zero-filled for days with no activity. `day_ts` is the day's UTC-midnight epoch second; `day_label` is `YYYY-MM-DD`.
 - **`rolling-active` always returns 28 rows**, one per day. Its `windowDays` (1–28, default 7) is the length of the trailing window each point counts distinct users over — not the number of points.
+- **A prompt's cost is over its costed executions, not its executions.** On a `prompts.top` row, `executionsWithCost` is how many of the window's runs reported a price at all. `totalCost` sums those runs and `avgCost` divides by that same count, so neither reads cheaper than the runs it describes; both are `null` — never `0` — when the count is `0`, which is what a prompt whose provider reports no price (every chat prompt today) looks like. `executionsWithCost < executions` means the money covers part of the window, so say so when you report it, and do not recompute an average from `totalCost / executions`.
 - **Per-user surfaces count app users only.** `users.top`, `users.search`, `daily-active`, `rolling-active`, `overview.dau` / `wau` / `mau` and `overview.growth` exclude the app's synthetic system principal (`sys:<appId>`), so machine activity — a cron-fired function every night — never appears as a user and never marks anyone active. `events` still returns that principal's rows when you ask for it by id, and a trigger-fired function's own record is its run row (`primitive functions runs`).
 - **Asking for the system principal by name still works.** The exclusion is on the unfiltered listings, not on a lookup: `users.search` with a `q` of `sys:<appId>` returns it, exactly as `events` with that `userId` does. Only `users.search` *without* a `q` — which lists the app's most recently active principals — drops it.
 - **Signup means "joined this app".** Every user-attributed event the server writes carries the app-membership join time, so `users.search` can answer "who signed up on day D": pass `signupDay` (one UTC calendar day, `YYYY-MM-DD`) or `signupStartDay` + `signupEndDay` (an inclusive range of at most 90 days), and each row comes back with `signedUpAt` (ISO) and `signupDay` (UTC day). A user who belongs to two apps carries each app's own join date, so joining a second app makes them new on that app the day they joined it. Two limits worth knowing: the answer is drawn from activity, so a member who has not produced an event in the last 90 days does not appear; and `signedUpAt` is `null` for a user none of whose events carries a join time yet, which is why a range that includes `1970-01-01` returns nobody rather than everybody.

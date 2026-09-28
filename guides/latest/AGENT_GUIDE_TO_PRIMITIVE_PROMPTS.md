@@ -28,7 +28,7 @@ Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` a
 
 ## Availability
 
-A prompt's availability is one server-owned `status` — `active | inactive | archived` — and it is **not** a TOML key. Every created or pushed prompt is active; `primitive prompts disable <prompt-id>` takes one out of service and `primitive prompts enable <prompt-id>` puts it back — both take the prompt ID `primitive prompts list` prints, not its key (the console has the matching action). A file that still carries a `[prompt] status` line fails `config push` with a message naming the verb.
+A prompt's availability is one server-owned `status` — `active | inactive | archived` — and it is **not** a TOML key; see the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#toml-is-the-only-write-path) for the server-owned model and [Push pruning](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#push-pruning-deleting-server-entities) for archive vs. prune and the recovery recipe. Every created or pushed prompt is active; `primitive prompts disable <prompt-id>` takes one out of service and `primitive prompts enable <prompt-id>` puts it back — both take the prompt ID `primitive prompts list` prints, not its key (the console has the matching action).
 
 | Status     | `ctx.prompts.run`                  | `primitive prompts execute` |
 | ---------- | ---------------------------------- | --------------------------- |
@@ -36,9 +36,7 @@ A prompt's availability is one server-owned `status` — `active | inactive | ar
 | `inactive` | No (`400 PROMPT_NOT_EXECUTABLE`)   | Yes — it is the diagnostic  |
 | `archived` | No                                 | No — it has been deleted    |
 
-`primitive prompts execute` is the documented way to trial an inactive prompt before enabling it.
-
-**Archiving a prompt.** A plain admin `DELETE` (and the console's **Archive**) sets `status = "archived"` and destroys nothing: the prompt's configs and stored prompt bodies stay, so every execution and analytics row that names it keeps resolving. An archived prompt is refused everywhere — `ctx.prompts.run`, `primitive prompts execute`, test runs, and as another test case's **evaluator** — and `enable` will not bring it back. It goes on holding its `promptKey`. `DELETE ?hard=true` (the console's **Delete permanently**, and what `primitive config push --prune` sends) destroys the prompt, its configs and their stored bodies, and frees the key. To bring a key back after archiving: hard-delete the holder, then re-add the file and push — a bare re-push cannot clear a server-owned `archived`.
+`primitive prompts execute` is the documented way to trial an inactive prompt before enabling it. An archived prompt is refused everywhere — `ctx.prompts.run`, `primitive prompts execute`, test runs, and as another test case's **evaluator**. Archiving destroys nothing: the prompt's configs and stored bodies stay, so executions and analytics rows that name it keep resolving.
 
 The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` takes that named version out of service, and the resolve path refuses it (`PROMPT_CONFIG_NOT_EXECUTABLE` when a run pins it). `config pull` writes the line only for a config that IS archived, so an ordinary pulled prompt file carries no `status` at all — an omitted line means active, and deleting an `archived` line puts that config back in service on the next push.
 
@@ -164,7 +162,7 @@ Data: {{ input.config | json }}
 
 ### Direct model routes are off by default
 
-`client.llm.*` / `client.gemini.*` (the `llm/chat`, `gemini/generate`, `gemini/generate-raw`, `gemini/count-tokens` routes) call a provider directly. They spend the app's LLM credit with no versioned template, no test cases and no function gate, so the whole surface is **off by default**: while `[app] directLlmEnabled` is not `true` in `app.toml`, every one of those four routes answers `403 { code: "DIRECT_LLM_DISABLED" }` — to app admins and owners as well, since it is a spend gate, not a role gate — and the same holds for a function calling them through `ctx.api.llm` / `ctx.api.gemini`. The `llm/models` and `gemini/models` listings stay readable.
+The `llm/chat`, `gemini/generate`, `gemini/generate-raw` and `gemini/count-tokens` routes call a provider directly. They spend the app's LLM credit with no versioned template, no test cases and no function gate, so the whole surface is **off by default**: while `[app] directLlmEnabled` is not `true` in `app.toml`, every one of those four routes answers `403 { code: "DIRECT_LLM_DISABLED" }` — to app admins and owners as well, since it is a spend gate, not a role gate — and the same holds for a function calling them through `ctx.api.llm` / `ctx.api.gemini`. The `llm/models` and `gemini/models` listings stay readable.
 
 Build model calls as prompts run with `ctx.prompts.run`, which does not go through the switch.
 
@@ -230,16 +228,11 @@ the `active` marker) and then exactly ONE block, named after the prompt's kind:
 
 | `kind` | block | keys |
 | ------ | ----- | ---- |
-| `chat` | `[configs.chat]` | `systemPrompt`, `userPromptTemplate`, `temperature`, `topP`, `maxTokens`, `outputFormat`, `outputSchema`, `reasoningEffort`, `reasoningBudget` |
+| `chat` | `[configs.chat]` | `systemPrompt`, `userPromptTemplate`, `temperature`, `topP`, `maxTokens`, `outputFormat`, `outputSchema`, `reasoningEffort`, `reasoningBudget`, `strictOutput` |
 | `decisions` | `[configs.decisions]` | `questions` |
 
 A `[configs.chat]` block under a decisions prompt — or a `[configs.decisions]`
 block under a chat prompt — is refused, naming the block and the kind.
-
-The nine chat keys written FLAT under `[[configs]]` are the deprecated
-pre-kind spelling. `config push` still accepts them and warns once per file;
-`config pull` writes only `[configs.chat]`, so one pull-then-push migrates a
-file. The same key set both ways is refused.
 
 ### Field reference
 
@@ -258,7 +251,7 @@ file. The same key set both ways is refused.
 
 **`[prompt.outputSchema]` is the declaration that counts.** It is what a run sends to the provider, and it is what `ctx.prompts.run("<key>")` parses and validates the answer against, handing it back as `parsed` — typed, because `config push` renders it into `functions/primitive-prompt-types.d.ts`. A config's own `[configs.outputSchema]` is stored with that config and is **not** read by `ctx.prompts.run`.
 
-What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, the generated types — is under Typed output (in Running from a server function).
+What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, `upstreamStatus` on a provider failure, the generated types — is under Typed output (in Running from a server function).
 
 **`[[configs]]` — the shared keys:**
 
@@ -282,19 +275,20 @@ What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, the generat
 | `outputSchema`       | No       | Config-level JSON Schema, stored with the config. `ctx.prompts.run` validates against `[prompt.outputSchema]`, not this one |
 | `reasoningEffort`    | No       | `none` \| `minimal` \| `low` \| `medium` \| `high`. How much the provider may spend on reasoning before answering. Mutually exclusive with `reasoningBudget` |
 | `reasoningBudget`    | No       | The same control as a whole number of reasoning tokens. Mutually exclusive with `reasoningEffort` |
+| `strictOutput`       | No       | `true` sends `[prompt.outputSchema]` to OpenRouter as a strict `json_schema`, so the provider constrains the answer. OpenRouter only; refused beside a config-level `outputSchema`, with `outputFormat = "text"`, or when the prompt declares no `outputSchema` |
 
 **`[configs.decisions]` — a `kind = "decisions"` prompt's settings:**
 
 | Key         | Required | Notes                                                        |
 | ----------- | -------- | ------------------------------------------------------------ |
-| `questions` | Yes      | The named typed questions the model answers, authored as `[configs.decisions.questions.<name>]` tables (or a JSON string). Each has a `type` (`choice` \| `score` \| `noul`) and `instructions`; a `choice` question also needs a `criteria` table of at least two option key = description pairs |
+| `questions` | Yes      | The named typed questions the model answers, authored as `[configs.decisions.questions.<name>]` tables (or a JSON string). Each has a `type` (`choice` \| `score` \| `noul`) and `instructions`; a `choice` question also needs `criteriaSource` — `"static"` with a `criteria` table of at least two option key = description pairs, or `"dynamic"` with no table (each run supplies the options as `variables.criteria.<name>`) |
 
 **Back at the `[[configs]]` root, whatever the kind:**
 
 | Key                  | Required | Notes                                              |
 | -------------------- | -------- | -------------------------------------------------- |
 | `providerConfig`     | No       | Stored with the config and returned by the API, but **not applied to the provider request**. Keyed to the provider rather than to the kind, so it stays at the entry root. Nothing reads it at execution — to bound the model's reasoning use `[configs.chat].reasoningEffort` / `reasoningBudget` above |
-| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update. `isActive` is accepted as a legacy spelling |
+| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update |
 
 **Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `config pull` writes back what the server holds, and `config push` rejects a key the CLI does not recognize rather than dropping it silently.
 
@@ -357,6 +351,7 @@ model = "typesafe/jev-1.13"
 [configs.decisions.questions.category]
 type = "choice"
 instructions = "Which household category does this bank transaction belong to?"
+criteriaSource = "static"          # the options are the table below
 
 [configs.decisions.questions.category.criteria]
 gas-and-fuel = "Gas & Fuel (Auto & Transport)"
@@ -373,7 +368,7 @@ The three question types, with the answer each returns:
 
 | `type` | `criteria` | Answer |
 | ------ | ---------- | ------ |
-| `choice` | a table of at least two `option key = description` pairs | `{ type, choice, probabilities, confidence }` |
+| `choice` | with `criteriaSource = "static"`, a table of at least two `option key = description` pairs (each description a string or a JSON object); with `criteriaSource = "dynamic"`, none — the run supplies it | `{ type, choice, probabilities, confidence }` |
 | `score` | an ARRAY of the two ends of the scale, low first (required) | `{ type, score, legend, probabilities, confidence }` |
 | `noul` | none | `{ type, noul }` |
 
@@ -390,6 +385,57 @@ with `expectedJsonSubset` (`'{"category": {"choice": "gas-and-fuel"}}'`). A
 decisions prompt may NOT be a test case's evaluator: an evaluator is handed the
 evaluated input and output as template variables, which a decisions run cannot
 read, so an evaluator must be a chat prompt.
+
+#### Options supplied per run
+
+Every `choice` question says where its options come from with a required
+`criteriaSource`. `criteriaSource = "static"` requires the `criteria` table in
+the config, and a run may not supply one. `criteriaSource = "dynamic"` refuses a
+config table: each run supplies the options as `variables.criteria.<question>`,
+beside `state` — for options that are data, such as "which of these previous
+transactions is the same merchant". The config still owns the question's name,
+type and instructions; a run only supplies what it chooses between.
+
+```toml
+[configs.decisions.questions.precedent]
+type = "choice"
+instructions = "Which previous transaction is the same merchant as this one, if any?"
+criteriaSource = "dynamic"         # each run passes variables.criteria.precedent
+```
+
+```ts
+const answer = await ctx.prompts.run("precedent-matcher", {
+  variables: {
+    state: { transaction },
+    criteria: {
+      precedent: {
+        p1: { bank_description: "CHEVRON 00938", category: "gas-and-fuel", amount: -42.1 },
+        p2: { bank_description: "SHELL 4411", category: "gas-and-fuel", amount: -50 },
+        none: "No previous transaction is the same merchant",
+      },
+    },
+  },
+});
+```
+
+- Each option is `key = description`, the description a non-empty string or a non-empty JSON object. At least two options; keys non-empty with no leading or trailing whitespace. The same rule applies to a `"static"` table at push.
+- The run is refused BEFORE the provider call — nothing is billed — as `success: false` with `errorCode: "PROMPT_CRITERIA_INVALID"` and an `error` naming the question and the rule, when: a `"dynamic"` question has no options or a malformed table; the run supplies options for a `"static"`, `score` or `noul` question or a name the config does not declare; `variables.criteria` is not an object; or a stored `choice` question has no `criteriaSource`.
+- `criteriaSource` is the platform's key and is never sent to the provider. The answer is typed as for any `choice`; the provider's answer is passed through, so a function that acts on `choice` checks it against the keys it supplied.
+- `variables.criteria` means this only on a decisions prompt; on a chat prompt it is an ordinary variable (`{{ input.criteria }}`).
+
+A test case supplies per-run options in its `inputVariables`, beside `state`:
+
+```toml
+# prompts/precedent-matcher.tests/chevron-repeat.toml
+[test]
+name = "chevron-repeat"
+inputVariables = '{"state": {"transaction": {"bank_description": "CHEVRON 0093847", "amount": -61.2}}, "criteria": {"precedent": {"p1": {"bank_description": "CHEVRON 00938", "amount": -42.1}, "none": "No previous transaction is the same merchant"}}}'
+expectedJsonSubset = '{"precedent": {"choice": "p1"}}'
+```
+
+A case whose options are refused records a failed run whose one failed check
+names the question and the rule, on the synchronous runner and the batch
+runner alike, with no provider call.
 
 ### Evaluator prompts
 
@@ -479,8 +525,9 @@ primitive prompts configs get <prompt> <config>   # by key or id, name or id
 ```
 
 Configs are read here and written in `prompts/<key>.toml`: each is a
-`[[configs]]` entry with `name`, `provider`, `model`, `userPromptTemplate` and
-the rest of the table below. `active = true` marks the live one,
+`[[configs]]` entry with `name`, `provider` and `model`, plus a
+`[configs.chat]` block (`userPromptTemplate`, `systemPrompt`, …) or a
+`[configs.decisions]` block, per the tables above. `active = true` marks the live one,
 `status = "archived"` archives one, and duplicating is copying the block under a
 new `name`. Apply with `primitive config push --only prompt/<key>`.
 
@@ -609,7 +656,7 @@ Pull and push share one key set, so they cannot disagree about which fields exis
 
 - `[prompt]`: `kind, key, displayName, description, inputSchema, outputSchema`
 - `[[configs]]`: `active` (on the live one only), `name, description, provider, model, providerConfig`
-- `[configs.chat]`: `systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, reasoningEffort, reasoningBudget`
+- `[configs.chat]`: `systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, reasoningEffort, reasoningBudget, strictOutput`
 - `[configs.decisions]`: `questions`
 
 A field the server has not set is omitted (there is no TOML `null`), and a JSON
@@ -856,7 +903,9 @@ setting successfully declined it.
 | `success: true` | `output` is the text; `parsed` is the validated JSON value when `[prompt.outputSchema]` is declared (typed), or when the config that ran declares `outputFormat = "json"` (untyped). |
 | `success: false`, `errorCode: "PROMPT_OUTPUT_NOT_JSON"` | Declared JSON; the answer did not parse. `output` has the text. |
 | `success: false`, `errorCode: "PROMPT_OUTPUT_SCHEMA_VIOLATION"` | Parsed, and `[prompt.outputSchema]` refuses it; `error` names the failing paths. |
-| `success: false`, no `errorCode` | The provider call failed; `error` says why. |
+| `success: false`, `errorCode: "PROMPT_CRITERIA_INVALID"` | A decisions run's `variables.criteria` was refused before the provider call — nothing billed; `error` names the question and the rule. See [Options supplied per run](#options-supplied-per-run). |
+| `success: false`, `errorCode: "PROMPT_UPSTREAM_TIMEOUT"` | The provider itself ran out of time (`upstreamStatus` 504 or 408), or the invocation's deadline passed before the call could run. |
+| `success: false`, no `errorCode` | Any other provider failure; `error` says why, and `upstreamStatus` carries the provider's own HTTP status when it answered. |
 | `404 PROMPT_NOT_FOUND` | No prompt with that key. |
 | `400 PROMPT_NOT_EXECUTABLE` | The prompt is inactive or archived. |
 | `400 PROMPT_NO_CONFIG` / `PROMPT_CONFIG_NOT_EXECUTABLE` | No usable config: none active, a `configId` that is not this prompt's, or a pinned config that is archived. |
@@ -888,7 +937,9 @@ return { suggested: answer.parsed.suggested_transactions };
 
 - `parsed` is on the **success arm only**, which is what the `success` check unlocks. Reading it unguarded is a compile error, and so is a field the schema does not declare.
 - A bad answer is the envelope's failure arm, never an HTTP error. Two shape failures, both `success: false` with an `errorCode`, both keeping `output`, `metrics` and `configId` because the run happened and was billed: `PROMPT_OUTPUT_NOT_JSON` (declared JSON; the model answered text that does not parse, or that parses to a number JSON cannot represent) and `PROMPT_OUTPUT_SCHEMA_VIOLATION` (it parsed and the schema refuses it; `error` names the failing paths).
-- A **provider** failure has `error` set and **no** `errorCode`. That is how to tell a wrong shape from a failed model.
+- A **provider** failure has `error` set and **no** `errorCode`, unless the upstream itself ran out of time, when it is `PROMPT_UPSTREAM_TIMEOUT`. An `errorCode` starting `PROMPT_OUTPUT_` is always about the answer — that is how to tell a wrong shape from a failed model.
+- A provider failure carries **`upstreamStatus`**, the provider's own HTTP status, whenever the provider answered — Gemini and OpenRouter alike, so the field does not depend on which provider the config names — and `error` names that status too. It is absent when there was no provider answer to report (an unset provider key, an empty completion), so a number in it is never one this platform decided. Branch retries on it: 408, 429, 502, 503 and 504 are worth another attempt — 408 and 504 are the two upstream timeouts, the statuses `PROMPT_UPSTREAM_TIMEOUT` is answered for — and any other 4xx is not.
+- A decisions run refused for its per-run options is the same failure arm with `errorCode: "PROMPT_CRITERIA_INVALID"` and no tokens or cost in `metrics`: the provider was never called, so there is no `upstreamStatus` either.
 - A validation `error` names paths and the schema's constraints and never quotes the model's answer — `output` is where the answer is, so a diagnostic in a log carries no generated content.
 - `ctx.prompts.run` validates against `[prompt.outputSchema]`; a config's own `[configs.outputSchema]` is not read here. `outputFormat = "json"` on the config that ran gives `parsed` when the text parses, but untyped (`unknown`); declare the schema to get a type.
 - **Generated types.** `config push` renders `functions/primitive-prompt-types.d.ts`: `<Key>PromptOutput` for every `prompts/*.toml` declaring a `[prompt.outputSchema]`, and the `PromptSchemas` augmentation keyed by prompt key that types `ctx.prompts.run("<key>")`. A prompt declaring no schema gets an empty entry, so its `parsed` stays optional and `unknown` — and removing a schema and pushing makes a handler reading `parsed.field` a compile error rather than a runtime `undefined`.

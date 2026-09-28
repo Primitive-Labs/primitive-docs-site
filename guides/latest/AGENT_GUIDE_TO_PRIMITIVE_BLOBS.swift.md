@@ -90,7 +90,7 @@ Uploading the same `blobId` twice with **identical** `sha256` and `size` returns
 
 ## Listing
 
-See **List / metadata / delete** above for the basic call. Each item carries `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, and `createdAt`. `cursor` is an opaque pagination token; only present when more results exist — follow it to page through results. `limit` accepts `1`–`100`; a larger value is clamped to `100`, and a zero, negative, or non-integer `limit` is rejected with a `400`. Page through the `cursor` for more than 100 blobs rather than asking for a bigger page.
+See **List / metadata / delete** above for the basic call. Each item carries `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, and `createdAt`. `nextCursor` is an opaque pagination token, only present when more results exist — pass it back as the `cursor` option to page through results. `limit` accepts `1`–`100`; a larger value is clamped to `100`, and a zero, negative, or non-integer `limit` is rejected with a `400`. Page through `nextCursor` for more than 100 blobs rather than asking for a bigger page.
 
 ```swift
   let page1 = try await blobs.list(limit: 50)
@@ -98,8 +98,8 @@ See **List / metadata / delete** above for the basic call. Each item carries `bl
     print(b.blobId, b.filename, b.contentType, b.numBytes, b.sha256, b.createdAt)
   }
 
-  // `cursor` is an opaque token; only present when more results remain.
-  if let cursor = page1.cursor {
+  // `nextCursor` is an opaque token; only present when more results remain.
+  if let cursor = page1.nextCursor {
     let page2 = try await blobs.list(cursor: cursor)
     _ = page2.items
   }

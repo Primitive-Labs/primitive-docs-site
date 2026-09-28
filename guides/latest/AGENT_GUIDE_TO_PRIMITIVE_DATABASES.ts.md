@@ -102,7 +102,7 @@ Push writes the declarations that type `ctx.db` from the `[models.*]` blocks abo
 
 ## Reading and Writing Records
 
-All of this runs inside a function. See [The typed handle](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle) for the handle's typing, codegen and the untyped `ctx.api.databases.records.*` form.
+All of this runs inside a function. `ctx.api.databases.records.*` is the untyped form of the same operations, plus the rest of the records surface the typed handle doesn't carry — `increment`, `addToSet` / `removeFromSet`, the index and unique-constraint routes (`registerIndex`, `dropIndex`, `listIndexes`, `syncIndexes`, `registerUniqueConstraint`, `dropUniqueConstraint`, `listUniqueConstraints`), `describe` and `models`. See [The typed handle](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle) for the handle's typing and codegen.
 
 | Call | Body | Answers |
 |---|---|---|
@@ -187,7 +187,20 @@ Cursors are **opaque** base64 tokens — never parse or construct one. A cursor 
 
 `$startsWith`, `$endsWith`, and `$containsText` are mutually exclusive on the same field — only one substring operator per field per query.
 
-**List size.** A single `$in` or `$nin` list holds at most **1,000 values**; each list in a filter is counted on its own. Past the cap the call is refused with `400 QUERY_IN_LIST_TOO_LARGE`, naming the field, the count and the cap. How to split a longer list — chunk an `$in` and merge the pages; never merge chunked `$nin` queries, but put every chunk in one filter's `$and`, which intersects them — is in the [Server Functions guide](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle).
+**List size.** A single `$in` or `$nin` list holds at most **1,000 values**; each list in a filter is counted on its own — two 600-value lists in one filter are fine. Past the cap the call is refused with `400 QUERY_IN_LIST_TOO_LARGE`, naming the field, the count and the cap. The list costs the statement ONE bound parameter, so a thousand keys page and sort no more expensively than two.
+
+Past a thousand, the split depends on the operator. Chunk an `$in` and merge the pages — each chunk matches some of the rows, so the union is the answer. NEVER merge chunked `$nin` queries that way — a chunk excluding some values still returns the rows the other chunks exclude, so the union is nearly every row. Put `$nin` chunks in ONE filter instead, where `$and` intersects them:
+
+```ts
+const chunks = [];
+for (let i = 0; i < keys.length; i += 1000) chunks.push(keys.slice(i, i + 1000));
+
+const page = await tasks.query({
+  filter: { $and: chunks.map((chunk) => ({ assigneeId: { $nin: chunk } })) },
+});
+```
+
+**Filter bind cap.** One statement may bind **100 parameters** total, shared with the model name and the cursor's sort values. A list (as above) and a group of equality branches on the same fields both cost ONE parameter however big they are, so an `$or` of a hundred `{ accountId, month }` pairs binds one parameter and pages, sorts and counts like any other filter. A filter with no such group — a hundred differently-shaped `$and` branches — is refused with `400 QUERY_FILTER_TOO_MANY_BINDS` naming the bound and the count; fold repeated conditions into an `$in` or an `$or` of equality branches, or split the query.
 
 **Absent fields (#3166).** `$ne`, `$nin` and `{ field: null }` match records that never wrote the field; equality, the range operators and `$in` match only records that carry it. To keep excluding the missing case, put `null` in the `$nin` list: `{ deleted: { $nin: [null, true] } }`. Full semantics: [Documents guide, §Absent fields](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#absent-fields).
 
@@ -279,14 +292,61 @@ Operation types: `count`, `sum`, `avg`, `min`, `max` (`field` required except fo
 
 ## Registered queries
 
-`defineQuery(name, definition)` and `defineMutation(name, definition)` from `primitive-functions` are a **registration helper over the same handle**, not a separate query language. `run(db, params)` is ordinary code over a `ctx.db(...)` handle. Registration adds:
+`defineQuery(name, definition)` and `defineMutation(name, definition)` from `primitive-functions` are a **registration helper over the same handle**, not a separate query language — `run(db, params)` is ordinary code over a `ctx.db(...)` handle, called from function code with a handle, not by app code.
 
-- **A name**, unique per bundle (registering one twice throws).
-- **Declared parameters**, validated, coerced and defaulted; an undeclared parameter is refused. `run`'s `params` is typed from the declaration.
-- **The `$caller` binding** — `{ caller: true }` (or `type: "$caller"`): the platform injects the invoking user's id and refuses a call that supplies it. It throws in an invocation with no caller (webhook, cron).
-- **A verified-run cache**, for queries only: `cache: { ttlMs }` is honored only when every model the run touched is listed in `models` and nothing was written; TTL is capped at one minute (`MAX_QUERY_CACHE_TTL_MS`). A mutation is never cached.
+```ts
+import { defineQuery, defineMutation } from "primitive-functions";
 
-They are called from function code, with a handle — not by app code. Register at module scope (a registration inside the handler is invisible to push's manifest). The registration example, parameter grammar, cache keying and invalidation: [Registered queries](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#registered-queries).
+const myOrders = defineQuery("myOrders", {
+  models: ["Order"],
+  params: {
+    owner: { caller: true },                    // $caller: injected, never supplied
+    since: { type: "string", optional: true },
+    limit: { type: "number", default: 25 },
+  },
+  cache: { ttlMs: 30_000 },
+  run: async (db, params) => {
+    const answer = await db.model("Order").query({ options: { limit: params.limit } });
+    return answer.items.filter((row) => row.owner === params.owner);
+  },
+});
+
+// A list parameter — the shape behind every $in filter; params.ids is string[] in run.
+const ordersByIds = defineQuery("ordersByIds", {
+  models: ["Order"],
+  params: { ids: { type: "array", items: { type: "string" } } },
+  run: (db, params) => db.model("Order").query({ filter: { id: { $in: params.ids } } }),
+});
+
+const addOrder = defineMutation("addOrder", {
+  models: ["Order"],
+  params: { owner: { caller: true }, label: { type: "string" } },
+  run: (db, params) =>
+    db.model("Order").save({ data: { owner: params.owner, label: params.label } }),
+});
+
+export default async function (input: { databaseId: string }, ctx) {
+  const db = ctx.db(input.databaseId, "orders");
+  await addOrder(db, { label: "new" });
+  return { orders: await myOrders(db, { limit: 10 }) };
+}
+```
+
+`run`'s `params` is **typed from the declaration** (a `const` type parameter): a scalar as its scalar, `$caller` as a string, an array as `T[]`, an `optional` parameter as an optional key; an undeclared name inside `run` is a compile error, and an explicit `TParams` generic still overrides.
+
+| `params.<name>` key | Meaning |
+|---|---|
+| `type` | `"string"`, `"number"`, `"boolean"`, `"any"` (default), `"$caller"`, or `"array"` — validated and coerced |
+| `items` | For `type: "array"`: `{ type: "string" \| "number" \| "boolean" \| "any" }`, each element coerced and validated like a scalar; absent accepts any array |
+| `caller: true` | The `$caller` binding: the platform injects the invoking user; a call that supplies it is refused by name. Not combinable with `array` |
+| `optional` | May be omitted |
+| `default` | Applied when omitted — **coerced to the declared type at registration** (`"25"` → `25`, `["1"]` → `[1]` for numeric items); a default that cannot be coerced is refused at registration, which `config push` reports |
+
+- **Register at module scope.** A registration inside the handler works for direct calls but is invisible to `config push`, so it is absent from the manifest.
+- Names are unique; registering one twice throws. An undeclared parameter is refused, not dropped.
+- A `$caller` query throws in an invocation with no initiating user — a webhook or cron fire; use a query with an explicit parameter there.
+- `$caller` is a convenience for the code, not a platform guarantee: the query body is what filters by it. An unfiltered `query()` inside a `$caller` query still reads every row.
+- **Caching is off unless the run is verified.** `cache.ttlMs` is honored only when every model the run touched is listed in `models` and nothing was written; TTL is capped at one minute (`MAX_QUERY_CACHE_TTL_MS`). A cache entry belongs to one query, one `databaseId` and resolved type, and one parameter set after injection — two databases of the same type never share an answer, and two callers never see each other's rows. A write through the handle drops the entries that read the written model. The cache lives inside one warm sandbox instance: it bounds staleness, it does not replicate. A mutation is never cached.
 
 ## Realtime
 
@@ -380,8 +440,9 @@ primitive databases records aggregate <id> <model-name> --op avg --field price [
 
 # Admin record writes — both MERGE the given fields (omitted fields keep their
 # stored value). On a missing record: `save` creates it (id generated when
-# omitted), `patch` fails 404. On an explicit null: `save` removes the key,
-# `patch` stores the value null.
+# omitted), `patch` fails 404. Both store an explicit null as the value null
+# with the key present, so `$exists` still matches the record; removing a key
+# is not expressible in a write body.
 primitive databases records save <id> <model-name> [record-id] --data '{"status":"open"}'
 primitive databases records patch <id> <model-name> <record-id> --data '{"status":"closed"}'
 primitive databases records delete <id> <model-name> <record-id> [-y]

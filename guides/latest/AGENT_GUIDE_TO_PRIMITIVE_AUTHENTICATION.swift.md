@@ -52,7 +52,6 @@ In the starter template this wiring is owned for you by `PrimitiveAppState.initi
     apple: config.hasApple,
     // ONE email capability: one request sends one email carrying both a code
     // and (when a link can be issued) a link, so there is no method to offer.
-    // `magicLinkEnabled` / `otpEnabled` are still reported, both equal to this.
     email: config.emailSignInEnabled,
     passkey: config.hasPasskey
   )
@@ -264,7 +263,7 @@ allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
 link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
-`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`; Code that calls `auth.magicLinkRequest` or `auth.otpRequest` sends the same email; call `auth.emailSignInRequest`.
+`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
 
 ### Make the emailed sign-in link open your app (iOS)
 
@@ -661,12 +660,12 @@ This is the recommended sign-in for local/dev builds as well as CI: sign in thro
   // Requires the app owner to have added "alice@example.com" to the app's
   // testAccountBaseEmails whitelist. Then any `alice+primitivetest<suffix>@example.com`
   // derivative becomes a test account that accepts code "000000".
-  _ = try await client.auth.otpRequest(email: "alice+primitivetest@example.com")
+  _ = try await client.auth.emailSignInRequest(email: "alice+primitivetest@example.com")
   _ = try await client.auth.otpVerify(email: "alice+primitivetest@example.com", code: "000000")
   // client is now authenticated; the access token expires in 30 minutes
 
   // Role-distinguished derivatives (Gmail/Workspace deliver them to the same inbox):
-  _ = try await client.auth.otpRequest(email: "alice+primitivetest-teacher@example.com")
+  _ = try await client.auth.emailSignInRequest(email: "alice+primitivetest-teacher@example.com")
 ```
 
 Guardrails:

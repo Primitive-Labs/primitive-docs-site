@@ -367,7 +367,10 @@ The test endpoint is a documented diagnostic: it includes a `requestPreview` (wi
 
 ```bash
 primitive integrations logs <id> [--limit 50] [--json]
+primitive integrations logs <id> --run <run-id>   # only the calls that run made
 ```
+
+Each row names where the call came from: the WORKFLOW and RUN columns for a workflow step, and the RUN column for a server function's task run or trigger fire (`--json` adds `correlation.functionId` and `detail.functionKey`). A call made from a request invocation has no run — a request invocation writes no run row — so its RUN cell is blank and `--run` will never return it.
 
 ### App Secrets (for `{{secrets.KEY}}` resolution)
 
@@ -477,7 +480,7 @@ Integration configs live at `integrations/<key>.toml`, one file per integration.
 
 - **Redirects are re-checked before they are followed**: a hop is followed only if it stays on the integration's exact origin (same scheme, host and port), lands on an allowed path and uses an allowed method; otherwise the `3xx` comes back unfollowed. Five hops maximum.
 - The upstream request is bounded by the integration's `timeoutMs` or the invocation's remaining time, whichever is smaller — including while the response body is still arriving, not merely while it waits for a reply. Past it, `UPSTREAM_TIMEOUT`.
-- Every call is recorded on the integration's own log with the function's key: `primitive integrations logs <integration-id>`.
+- Every call is recorded on the integration's own log with the function's key, and with the RUN it was made from when the invocation has one (a task run or a trigger fire): `primitive integrations logs <integration-id>`, narrowed to one run with `--run <run-id>`.
 
 ### Error codes (`errorCode`)
 
@@ -503,15 +506,13 @@ See [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#calling-an-i
 
 ## Status Lifecycle
 
-`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow — whose CLI spelling is `primitive integrations archive <id>`. Archiving is the delete lifecycle, not availability: the row is kept and goes on holding its `integrationKey`, `enable` refuses it, and there is no un-archive (reclaim the key with a confirmed `primitive config push --prune` after removing the file, then re-add and push).
+`status` is server-owned (`active | inactive | archived`), never a TOML key, and written only by `primitive integrations disable`/`enable`, the console's matching action, and the delete flow — whose CLI spelling is `primitive integrations archive <id>`; see the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#toml-is-the-only-write-path) for the server-owned model and [Push pruning](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#push-pruning-deleting-server-entities) for archive vs. prune and the recovery recipe.
 
 | Status | `ctx.integrations.call`? | `primitive integrations test`? |
 |--------|----------------------|--------------------------------|
 | `active` | Yes | Yes |
 | `inactive` | No (404) | Yes — it is the diagnostic |
 | `archived` | No (404) | No |
-
-Deleting an integration over the API or in the console **archives** it. `primitive config push --prune` — remove the TOML file, then push — hard-deletes the row permanently.
 
 ## Files on Disk
 

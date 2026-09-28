@@ -6,7 +6,7 @@ Guidelines for AI agents inspecting a running Primitive app from the CLI — rea
 
 ```bash
 # Server functions
-primitive functions list                                  # functions + status (app-scoped)
+primitive functions list                                  # functions + status + each one's webhook and crons (app-scoped)
 primitive functions get <function-id>                     # active version, capabilities, manifest, triggers
 primitive functions configs <function-id>                 # every pushed version, newest first
 primitive functions runs <function-id>                    # run rows: task starts, cron fires, webhook deliveries
@@ -23,6 +23,7 @@ primitive functions logs <function-id> --follow           # tail new invocations
 
 # The other log views
 primitive integrations logs <integration-id>           # outbound calls: status, timing, actor
+primitive integrations logs <integration-id> --run <run-id>   # just the calls one run made
 primitive analytics events                             # app activity events
 
 # Blob storage
@@ -105,7 +106,9 @@ Activity events are `neutral` with ONE exception. They are counts, and inventing
 
 The `function-log` source is a server function's invocation records. Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind` (`http`, `webhook`, `cron`, `function`, `manual`), `runtime` (`request` or `task`), `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated`, `logsUnavailable` and `contentSuppressed`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId` (the invocation id), the `runId` of a trigger fire or task run, and the attributed `userId`. Records are kept seven days and outlive an archived function.
 
-Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
+The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test`, `workflow` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`. Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a workflow step, `functionId` for a server function, and `runId` for either one's run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
+
+Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
 
 Not in the shared shape: `functions runs --json` prints the run rows as `{ items, nextCursor }` (each row adds `runtime`), and `functions runs steps --json` prints one run's full trace under `items`, never paged.
 
@@ -119,7 +122,7 @@ Invalid filter values are rejected, not ignored: an unparseable `--from`/`--to`,
 2. `functions logs <function-id> --invocation <id>` — one record in full. A record that never existed, belongs to another function, or aged past seven days all answer the same 404.
 3. For a task run: `functions logs <function-id> --run <run-id>` prints the step trace, then each record the run wrote, oldest first, with its lines under it. A run that slept writes one record per slice that settled; output printed before a hibernation is not recoverable.
 4. `functions runs <function-id>` — the run level: `RUN ID | STATUS | FIRED BY | RUNTIME | VERSION | PARENT | REFRESHES | RESETS | STARTED | ENDED | CODE`. Every cron fire and every webhook delivery writes a run row, so this is where a schedule's or a provider's effect shows. A run that RESET (a platform deploy tore a slice down and the engine replayed the step) and then completed carries no error — the RESETS column is the only place it shows.
-5. `functions get <function-id>` — the triggers as the platform holds them: the webhook's id, URL, scheme, status and last delivery; each cron entry's name, schedule, timezone, status, next fire, fire count and last run.
+5. `functions list` — every function's triggers in one call: which carry a webhook or crons, and each one's status, schedule, next and last fire. `functions get <function-id>` remains where the receiver URL, ids and secret state are read: the webhook's id, URL, scheme, signing secret, status and last delivery; each cron entry's id, name, schedule, timezone, status, next fire, fire count and last run.
 
 `--invocation` cannot be combined with `--run`, `--follow`, `--cursor` or `--limit`. A filtered `--run` page that holds only other runs' records is followed a bounded number of times; if it is still empty the command prints the `--cursor` to continue rather than a bare "none".
 

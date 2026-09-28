@@ -107,13 +107,13 @@ There is **no single "my documents" list**. A user reaches documents through **f
 **a. Documents they own** (`ownedDocuments` — created, or ownership transferred):
 
 ```typescript
-  // Paginated page — the unified { items, cursor } envelope, same shape as
+  // Paginated page — the unified { items, nextCursor } envelope, same shape as
   // sharedDocuments():
   const page = await client.me.ownedDocuments({
     tag: "channel",
     returnPage: true,
   });
-  const { items, cursor } = page;
+  const { items, nextCursor } = page;
 
   // (Without `returnPage`, the JS client returns a flat `DocumentInfo[]` for
   // convenience: `const owned = await client.me.ownedDocuments({ tag: "channel" })`.)
@@ -122,7 +122,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
 **b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows; group/collection shares do NOT appear here):
 
 ```typescript
-  const { items, cursor } = await client.me.sharedDocuments({
+  const { items, nextCursor } = await client.me.sharedDocuments({
     tag: "channel",
     limit: 50,
   });
@@ -133,9 +133,9 @@ There is **no single "my documents" list**. A user reaches documents through **f
     console.log(doc.title, doc.permission, doc.grantedBy);
   }
 
-  // `cursor` is a raw-JSON pagination cursor — pass it back for the next page.
-  if (cursor) {
-    const next = await client.me.sharedDocuments({ cursor });
+  // `nextCursor` is an opaque pagination token — pass it back as `cursor` for the next page.
+  if (nextCursor) {
+    const next = await client.me.sharedDocuments({ cursor: nextCursor });
     return next;
   }
 ```
@@ -149,14 +149,14 @@ There is **no single "my documents" list**. A user reaches documents through **f
 **d. Documents shared via a collection** (`collections.listDocuments`):
 
 ```typescript
-  const { items, cursor } = await client.collections.listDocuments(collectionId, {
+  const { items, nextCursor } = await client.collections.listDocuments(collectionId, {
     limit: 50,
   });
 ```
 
 Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant).
 
-`ownedDocuments` and `sharedDocuments` return the unified `{ items, cursor }` envelope (raw-JSON `cursor`, NOT base64url). `ownedDocuments()` returns a flat `DocumentInfo[]` by default, or the envelope with `returnPage: true`.
+`ownedDocuments` and `sharedDocuments` return the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, NOT base64url — pass it back as the `cursor` option for the next page). `ownedDocuments()` returns a flat `DocumentInfo[]` by default, or the envelope with `returnPage: true`.
 
 For an "everything I can access" surface, combine these two calls with group and collection memberships:
 
@@ -1457,8 +1457,9 @@ For documents that should exist exactly once (default document, settings), use `
 **Alias API methods:**
 
 - `documents.openAlias(params)` - Open document by alias (throws if not found)
-- `documents.createWithAlias(options)` - Create document with alias atomically (fails if alias already exists)
-- `documents.getOrCreateWithAlias(options)` - Get existing document by alias, or create a new one if not found. Returns `{ documentId, created: boolean, ... }`. Use this for idempotent initialization.
+- `documents.createWithAlias(options)` - Create document with alias atomically (fails if alias already exists). Takes `title`, `tags`, `metadata` and `documentFormat`, each applied at creation exactly as on `documents.create`.
+- `documents.getOrCreateWithAlias(options)` - Get existing document by alias, or create a new one if not found. Returns `{ documentId, created: boolean, documentFormat?, tags?, metadata?, ... }`. Use this for idempotent initialization. Takes the same options, applied only when the call creates the document; a stated `documentFormat` that the existing document does not have is refused with `DOCUMENT_FORMAT_MISMATCH` (409) rather than handing back a document of the other kind.
+- All three create routes (`documents.create`, `createWithAlias`, `getOrCreateWithAlias`) **refuse** a top-level body key they do not read, with 400 `VALIDATION_FAILED` and `details` naming it — including `name`, `parentId` and a flat `scope`/`aliasKey` pair. The typed client methods send only keys the routes read.
 - `documents.aliases.resolve(params)` - Get alias info (returns null if not found)
 - `documents.aliases.set(params)` - Set an alias for an existing document
 - `documents.aliases.delete(params)` - Remove an alias
@@ -2028,20 +2029,19 @@ Additional collection calls:
 
 ```typescript
 // Optional, immutable-after-create — bind create() to a CollectionTypeConfig
-// rule set and an external entity (exposed to CEL as collection.contextId).
-// `initialMetadata` stamps resource-metadata categories at create time (schema-
-// validated, writeRule waived, capped at 10 categories) — see the Resource
-// Metadata guide's "Create-time initial metadata" section.
+// rule set. `initialMetadata` stamps resource-metadata categories at create
+// time (schema-validated, writeRule waived, capped at 10 categories) — link the
+// collection to an external entity here (read in CEL as md.self.classLink.classId).
+// See the Resource Metadata guide's "Create-time initial metadata" section.
 const collection = await client.collections.create({
   name: "Q1 Reports",
   collectionType: "class-reports",
-  contextId: "math-101",
-  initialMetadata: { settings: { visibility: "class-only" } },
+  initialMetadata: { classLink: { classId: "math-101" } },
 });
 
 // List
 await client.collections.listDocuments(collection.collectionId);
-// → { items: CollectionDocumentInfo[], cursor?: string }
+// → { items: CollectionDocumentInfo[], nextCursor?: string, hasMore?: boolean }
 await client.collections.listCollectionsForDocument(documentId);
 
 await client.collections.revokeGroupPermission(collection.collectionId, "team", "engineering");
@@ -2153,7 +2153,6 @@ A non-creator reader/writer removing their own membership via `member.remove` is
 |----------|-----------------|-------------|
 | `collection.collectionType` | yes | Collection's type (matches the `CollectionTypeConfig` this rule set is bound to) |
 | `collection.collectionId` | yes (after create) | Collection's ID |
-| `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Expresses "caller belongs to the group this collection represents." Prefer storing that external id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it as `md.self.<category>.<key>` — see [Keying a collection rule set on an external id](#keying-a-collection-rule-set-on-an-external-id). |
 | `collection.name` | yes | Display name |
 | `collection.createdBy` | yes (after create) | userId of the collection's creator |
 | `target.userId` | only `category: "member"`, ops `add` / `remove` | The user being added or removed. Absent for `member.list`. |
@@ -2164,7 +2163,7 @@ Plus the collection-only helper:
 
 ### Keying a Collection Rule Set on an External Id
 
-Prefer storing a collection's external-entity id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it in the rule set as `md.self.<category>.<key>`, rather than in the built-in `collection.contextId` field. The category a rule references is inferred and loaded automatically — no declaration needed — and reads `null` until a value is stored, so stamp the value when the collection is created.
+Store a collection's external-entity id (the class, team or project it represents) in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and read it in the rule set as `md.self.<category>.<key>`. The category a rule references is inferred and loaded automatically — no declaration needed — and reads `null` until a value is stored, so stamp the value when the collection is created.
 
 **1. Define a category** for the link, with separate read/write rules:
 
@@ -2181,7 +2180,7 @@ type = "string"
 required = true
 ```
 
-**2. Read `md.self.classLink.classId`** in the rule set in place of `collection.contextId`, and stamp `classId` when the collection is created (via `initialMetadata` on `collections.create()`) so the value exists when these ops evaluate:
+**2. Read `md.self.classLink.classId`** in the rule set, and stamp `classId` when the collection is created (via `initialMetadata` on `collections.create()`) so the value exists when these ops evaluate:
 
 ```toml
 [rules.collection]
@@ -2203,7 +2202,7 @@ A collection type's `collection.create` rule is evaluated against the `initialMe
 create = "isMemberOf('class-teachers', md.self.classLink.classId)"
 ```
 
-- The `md.self.attrs.*` projected columns (`collectionType`, `contextId`, `name`, `createdBy`) are also bound in the create rule; `collectionId` is `null` (unassigned).
+- The `md.self.attrs.*` projected columns (`collectionType`, `name`, `createdBy`) are also bound in the create rule; `collectionId` is `null` (unassigned).
 - **Fail-closed:** once a create rule reads `md.self.<category>`, a create omitting that category is denied (the value binds `null`), so a create that stamps the linkage in a later write is denied for that type — the linkage must be staged in the create call (atomic create-with-linkage).
 - **No traversal from the staged subject.** A create rule may read the staged value directly (`md.self.<category>.<key>`) but may not follow a declared path off it (`md.<pathName>.*`) — such a rule is rejected when the rule set is saved, since the subject does not exist yet to traverse from. (Traversal from a *persisted* subject in a non-create rule is unaffected.)
 
@@ -2273,7 +2272,7 @@ Pick the call that answers the question you're actually asking:
 | Question | Call |
 |----------|------|
 | Documents the user owns | `client.me.ownedDocuments({ tag?, limit?, cursor?, returnPage? })` |
-| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, cursor }` |
+| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, nextCursor, hasMore }` |
 | A document's outstanding deferred grants | `client.documents.listPendingInvitations(documentId)` |
 | Documents inside a collection | `client.collections.listDocuments(collectionId, { limit?, cursor? })` |
 | Documents shared with a group | `client.groups.listDocuments(groupType, groupId)` |
@@ -2344,6 +2343,29 @@ Export creates a directory per document containing `metadata.json`, `document.yj
 
 `--overwrite` merges rather than replaces, for every document: the import uploads the exported state and the server applies it with `Y.applyUpdate`, so keys only one side holds survive and a key both sides set resolves by Yjs's conflict rule — neither source-wins nor target-wins. The exception is a **large document** (`documentFormat: 2`): its export is a chain, and a chain is installed rather than merged. Installing replaces a document's entire history, so the server accepts it only into a document that holds no records yet — `--overwrite` cannot merge one into a document that already has content.
 
+#### Carrying the collections too
+
+Documents move on their own; the collections they sit in do not. `primitive collections export` / `collections import` carry each collection's name, description, type, context id, owner, group grants, direct members with their level, and which documents it holds — into `collections.json`, written into the same directory as the document bundle.
+
+```bash
+# Source app: documents and collections into ONE directory
+primitive documents export-all --user-id <user-id> --output ./primitive-export
+primitive collections export --output ./primitive-export
+
+# Target app: documents FIRST (they preserve their ids), then collections
+primitive documents import ./primitive-export --owner owner@example.com
+primitive collections import ./primitive-export --dry-run
+primitive collections import ./primitive-export
+```
+
+- **Order matters.** `collections.json` refers to documents by id, and `documents import` is what preserves them. The other order reports every document in every collection as a problem.
+- **Admin tokens only**, both verbs: the export reads the app-wide collection listing, and assigning an owner on create is admin-only.
+- **Identities travel as emails.** App users are scoped to their app, so the same person has a different user id in each one; a recorded user id with no email is used only when the file is imported back into the app it came from.
+- **Reads before writes.** The import resolves every owner, member, document and group first, decides `create`, `merge`, `skip` or `refused` per collection, and then applies grants, members and documents in that order. `--dry-run` stops after the plan and reports exactly what the real run would do.
+- **Matching is by name**, so a re-run is safe. Without `--overwrite` an existing name is skipped; with it the collection is merged, but only when its owner, collection type and context id match the file's — none of those can be changed after creation, so a mismatch is refused with the differing field named. A group grant already present at a different level is updated to the level the file records, and effective access follows it. Above 200 documents a collection-wide group change is refused whole by the server (`COLLECTION_FANOUT_LIMIT`) and reported as a `group` problem, the rest of the collection still merging. `--owner <userId-or-email>` gives every collection in the run one owner.
+- **Problems are per item** — the collection, the kind (`owner`, `collection`, `document`, `member`, `group`), the identity and the reason — on stderr and under `--json` in `problems`. The collection is still created with everything else; only a missing owner refuses one outright. Exit code 1 when any problem was reported, 0 otherwise; a skip is not a problem.
+- **Not carried:** collection ids (the server mints them; `--json` maps `sourceCollectionId` to `targetCollectionId`), the groups themselves, collection resource metadata, pending member invitations, and the `addedAt`/`grantedAt` timestamps. Create the target app's groups before importing, or their grants come back as `group` problems.
+
 #### Importing a root document
 
 A root document is the one document the server mints per user and points `AppUser.rootDocId` at. Its export is applied to the **target user's root document**, never restored under the exported id — that id is the source user's root and means nothing in another app:
@@ -2369,6 +2391,7 @@ Every export writes one subdirectory per document under `documents/<document-id>
 ```
 <output>/
   manifest.json               # export-all only
+  collections.json            # collections export only
   documents/
     <document-id>/
       metadata.json
@@ -2488,7 +2511,7 @@ A **large document** (`documentFormat: 2`) keeps records in a persisted local st
 - `new Model({ id })` returns schema defaults until its first `await` (`find()` or `save()`). It is NOT a create: its first `save()` patches only the fields you set and preserves every untouched stored field.
 - If a change cannot be folded into the local store, the document goes read-refusing: reads and writes throw `FORMAT2_FOLD_BROKEN` (`error.code`) until the document is reconnected and catches up. Handle it by reconnecting, not by retrying the read.
 
-**Creating a large document.** `await client.documents.create({ title: "Ledger", documentFormat: 2 })` on JavaScript, `CreateDocumentOptions(title: "Ledger", documentFormat: 2)` on Swift, `primitive documents create "Ledger" --large` on the CLI. On JavaScript `documents.createWithAlias` takes the same option; Swift's `CreateWithAliasOptions` does not carry it. The returned metadata reports `documentFormat: 2` before the server commit lands, and `documents.get(id).documentFormat` reports it afterwards; omitting the option creates an ordinary document and sends nothing extra. On JavaScript a value that is neither `1` nor `2` — including the string `"2"` — is refused with `INVALID_ARGUMENT` before anything is created. `localOnly: true` with `documentFormat: 2` is refused on both clients, at create and before any local state is written, with `LOCAL_ONLY_UNSUPPORTED_OPTION`, because a large document's records live in a store only the server's room opens.
+**Creating a large document.** `await client.documents.create({ title: "Ledger", documentFormat: 2 })` on JavaScript, `CreateDocumentOptions(title: "Ledger", documentFormat: 2)` on Swift, `primitive documents create "Ledger" --large` on the CLI. `createWithAlias` and `getOrCreateWithAlias` take the same option on BOTH clients, along with `tags` and `metadata`, each applied when the call creates the document — so a tagged large document behind an alias is one call, not a lookup plus a create plus a tag write. The returned metadata reports `documentFormat: 2` before the server commit lands, and `documents.get(id).documentFormat` reports it afterwards; omitting the option creates an ordinary document and sends nothing extra. On JavaScript a value that is neither `1` nor `2` — including the string `"2"` — is refused with `INVALID_ARGUMENT` before anything is created, and `localOnly: true` with `documentFormat: 2` is refused on both clients, at create and before any local state is written, with `LOCAL_ONLY_UNSUPPORTED_OPTION`, because a large document's records live in a store only the server's room opens. On `getOrCreateWithAlias` a stated format is also a statement about a document the alias already names: one that differs is refused with `DOCUMENT_FORMAT_MISMATCH` (409, naming the document and both formats) and creates nothing, one that agrees is echoed with `created: false`, and stating none leaves an existing binding answered as before. All three create routes refuse a top-level body key they do not read with 400 `VALIDATION_FAILED`, so a hand-built body must send only keys the route reads.
 
 ```typescript
   await client.documents.open(documentId);
@@ -2500,11 +2523,15 @@ A **large document** (`documentFormat: 2`) keeps records in a persisted local st
 ```
 
 
-**Which clients can open a large document.** It needs a local database that outlives the session: a **Node** client opens one with no extra configuration, a **Swift** client opens one with its default on-disk store (`storageConfig: .sqlite(directory:)`; a client built with `.memory` is refused with `FORMAT2_STORAGE_UNAVAILABLE`), and a **browser** client needs the durable engine configured — `databaseConfig: { type: "opfs", options: { workerURL } }` (desktop Chrome, Firefox, Safari). Without that configuration a browser's engine holds data only for the life of the page, so opening a large document there is refused immediately with a typed `FORMAT2_STORAGE_UNAVAILABLE` error rather than opening a copy a reload would throw away. Ordinary documents are unaffected by this option either way.
+**Which clients can open a large document.** It needs a local database that outlives the session: a **Node** client opens one with no extra configuration, a **Swift** client opens one with its default on-disk store (`storageConfig: .sqlite(directory:)`; a client built with `.memory` is refused with `FORMAT2_STORAGE_UNAVAILABLE`), and a **browser** client needs the durable engine configured — `databaseConfig: { type: "opfs", options: { workerURL } }` (desktop Chrome, Firefox, Safari). Without that configuration a browser's engine holds data only for the life of the page, so opening a large document there is refused immediately with a typed `FORMAT2_STORAGE_UNAVAILABLE` error rather than opening a copy a reload would throw away. Ordinary documents are unaffected by this option either way. Under `opfs` ONE store holds every large document a signed-in user has open on that app and server, so an unscoped `query`/`queryOne`/`count`/`aggregate` spans all of them in one call with `sort`, `limit`, cursors and `include` intact, and `documents` narrows it; two users, or two apps, get two stores that share nothing. A model holding rows in an ordinary document AND a large one at once is the one scope no single statement can serve — `FORMAT2_QUERY_SCOPE`, scope it with `documents` to one kind.
+
+**Closing a large document keeps its local data.** An ordinary close keeps everything a large document stores locally — its records, its unacknowledged writes, the marks that say its query tables are current, and the projected query rows — so the next open re-projects nothing and is as cheap as a reload. A closed document is not part of an unscoped `query()`, `count()` or `aggregate()`: those read only the documents that are open. In a browser a close does not release the browser worker that holds the store, and neither does hiding the tab. What releases it is `client.destroy()`, the page's `freeze` or `pagehide` (a real close, or the browser freezing the page), and an evict that empties the pool.
 
 **Removing a large document's local data.** `documents.evict(id)`, `closeDocument(id, { evictLocal: true })` and `logout({ wipeLocal: true })` each remove what a large document stores locally: its records, its member index, the writes the server has not acknowledged, the marks saying its query tables are current, and the projected query rows. The rules are the same on every client. An evict of a document another tab still has open is refused for that document's local data — that tab keeps reading and writing and its unacknowledged writes stay in the log, one warning names it, and a later evict or wipe removes the store once no tab holds it. An evict without `force` is refused while the store holds unacknowledged writes and throws the same `has unsynced local changes (use force to override)` error an ordinary document's does; an evicting close skips the eviction on the same grounds; `{ force: true }` drops them. A document evicted while OPEN stays editable and its store is removed when it is closed, whatever that close's own options say. `logout({ wipeLocal: true })` reaches the signing-out user's large documents whether or not this session opened them, including one open at the moment of the logout and a store left behind by a client version that could not remove one, and never touches another user's, app's or server's. In a browser the OPFS directory holding the store is removed once it holds nothing else, so opening the document again fetches it from the server.
 
-**Opening one in several tabs (browser only).** The browser store lives in one worker, which allows one connection to its database. Add `brokerURL` beside `workerURL` in `databaseConfig.options` and every tab of the same app that opens the document shares that one store: the first tab to open it becomes the leader and holds the connection, later tabs reach it through a port a small broker hands over. Saves, reads and queries behave the same in every tab — a save committed in one tab is visible to `find()`/`query()` in another as soon as it settles — and closing the leader tab hands the connection to another open tab automatically, with nothing pending lost. Without `brokerURL`, a second tab opening the same large document is refused with a typed `FORMAT2_WORKER_OPEN_FAILED` error.
+**Reopening a large document costs what changed.** Its local store remembers the overlay state it last folded, so a reopen — after a close or a reload, on the OPFS engine and on Node alike — folds and projects only the records that changed in the overlay since the last fold, and when nothing changed it folds and projects nothing at all, whatever the document's size. A record created or re-created since the last fold is rebuilt from its model's overlay in memory before it is folded. In a browser, a tab running a newer version of the app refuses to open a large document through the worker an older tab started, with a typed `FORMAT2_STORE_OUTDATED` error ("the tab leading this store runs an older version of the app; reload it or close it"); reloading or closing the older tab ends it, the local data is untouched, and an older tab joining a newer worker is unaffected.
+
+**Opening one in several tabs (browser only).** A user's large documents share one browser store, whose worker allows one connection to its database. Add `brokerURL` beside `workerURL` in `databaseConfig.options` and every tab of the same app shares that one store: the first tab to open a large document becomes the leader FOR THAT USER — one leader however many documents are open — and holds the connection, later tabs reach it through a port a small broker hands over. Saves, reads and queries behave the same in every tab — a save committed in one tab is visible to `find()`/`query()` in another as soon as it settles — and closing the leader tab hands the connection to another open tab automatically, in one handover carrying every open large document, with nothing pending lost. Without `brokerURL`, a second tab opening the same large document is refused with a typed `FORMAT2_WORKER_OPEN_FAILED` error.
 
 **Limits.** Offline writes are bounded by a window — 7 days by default, `largeDocumentWindowDays` in `app.toml`'s `[app]` section (or `PUT /settings`), 1–14 days. A client away longer than the window goes read-only (reads keep serving, local writes are refused) until it syncs and catches up; the same window bounds how long the server keeps the change archives a returning client replays. Every refused write is reported the same way on both clients: `document:write-refused` (`DocumentWriteRefusedEvent`, carrying `documentId`, `model`, `recordId`, `error`) fires for every one of them, and wherever the call can throw it also throws that same error — `DocumentOfflineWindowError` on JavaScript (`save()`, `delete()`), `JsBaoError(.documentOfflineWindowExpired)` on Swift — with code `DOCUMENT_OFFLINE_WINDOW_EXPIRED` and `error.details` carrying `documentId`, `lastSyncAt`, `windowDays`, `overdueMs`. Subscribe once and handle it in one place; nothing fires for an accepted write, an ordinary document, or a refusal of another kind. ```typescript
   client.on("document:write-refused", (event) => {
@@ -2517,6 +2544,33 @@ A **large document** (`documentFormat: 2`) keeps records in a persisted local st
     );
   });
 ``` Composite field values (rich text, nested maps and arrays) are rejected at write time — a large document's fields hold plain JSON values only.
+
+**When the platform and your client disagree about the format.** Both clients
+record a document's format on their own local row at create time and open it by
+that; the platform resolves it independently and refuses to serve a document the
+two do not agree about rather than answering in the wrong shape. Two handshake
+refusals, and they are different things: `CLIENT_UPGRADE_REQUIRED` says this
+client BUILD cannot read any large document and closes the socket (4426), while
+`DOCUMENT_FORMAT_MISMATCH` refuses ONE document and leaves the connection alone —
+every other document on it keeps syncing. An open that was waiting on the network
+rejects with the typed error (`code: "DOCUMENT_FORMAT_MISMATCH"`, `details
+{ documentId, declared, actual }`; `JsBaoError(code: .documentFormatMismatch)` on
+Swift); an open served from cache, or a document already open, is closed under
+your app and the typed `document:format-mismatch` event carries the same fields.
+Local rows and unacknowledged writes are kept, `retainLocal: false` included. The
+refusal stands for the rest of that open cycle — no handshake, no update, and a
+reopen without a close first throws the same error — and a close or an eviction
+ends it. DIAGNOSE first: `declared` is what
+your client believed, `actual` what the platform resolved, and the server logs
+`Document format disagreement` with both. If your client's row is stale (an
+export and import, an old build) evicting the document and reopening clears it;
+if the PLATFORM is wrong, eviction is not a repair — it deletes the row that
+carries the declaration, so the next open declares nothing and may be served the
+wrong format silently. A records request states the same belief with
+`?documentFormat=1|2` (CLI: `--document-format <1|2>`; a server function:
+`ctx.doc(documentId, { documentFormat })`) and a disagreement is answered `409
+DOCUMENT_FORMAT_MISMATCH` before any table is read or written; stating nothing is
+answered exactly as before.
 
 ### Snapshotting a large document on demand
 
@@ -2563,9 +2617,13 @@ primitive documents ingests list <document-id>
 primitive documents ingests get <document-id> <session-id>
 ```
 
+Two input layouts are accepted. A **plain** directory holds one `<model>.ndjson` (or `.ndjson.gz`) per model, one record per line. An **export** directory — what `primitive documents export` wrote, either at the directory itself or under `documents/<document-id>/` — is read as it stands, so a document can be re-loaded from its own export; the overlays and `current.yjs` beside the snapshot are named on stderr and skipped. A directory that is neither, that is both, or that is some other document's export is refused, naming what it held.
+
 Each line is an RFC 7396 merge patch over the record: a value replaces a field, `null` unsets it, a StringSet field takes a whole array (`[]` is an empty set, `null` removes it), and `{"_deleted": true}` alone deletes the record. Only the document's EXISTING models and fields are accepted, and every line is checked against them on your machine before a session is opened — the first failure names the file and the line. A bulk load replaces records in a live document and cannot be undone, so it confirms unless `-y`. Exit codes: **0** completed, **1** failed or refused, **124** `--timeout` elapsed OR a session read that kept failing while waiting, **130** Ctrl-C (in all three of those the session keeps running). A session read that fails while waiting — a 5xx, a request timeout, a rate limit, a dropped connection — is retried rather than ending the wait, on a backoff that doubles from 1 second to 15, reported per attempt on stderr and reset by any read that answers. Only after ten minutes of unbroken silence does it stop watching, and it then exits **124** saying the load is still running on the server and naming the session and `documents ingests get` — never **1**. A read the server refuses outright (404, 403) is still terminal at **1**.
 
 A session read that cannot be answered names its reason rather than failing generically: **`DOCUMENT_UNAVAILABLE`** (503) means the document was momentarily unreachable — its object was reset, evicted or overloaded — and the same read a moment later usually answers; **`INGEST_SESSION_READ_FAILED`** (500) means the room's own handler could not read the session ledger — whether asking again helps depends on why, and only the server log says, because the sentence deliberately carries no cause. A session that does not exist is `INGEST_SESSION_NOT_FOUND` (404). Each sentence is fixed, so the three are distinguishable from the output alone.
+
+`documents ingests get` walks a session through `uploading → committed → validating → staging → applying → finalizing → registering → complete`. On a very large document, `registering` removes the tables the swap moved aside a bounded amount at a time, over as many alarms as it needs, so it is normal for a session to sit there for a while: the **removed** figure in the progress row climbing between reads is how you tell it is advancing rather than stuck. If the bound turns out to be wrong for a document, the session stops with **`INGEST_REGISTER_STALLED`**, naming the table it could not finish — the bulk load itself has already landed and the document is correct, and the next ingest on that document clears the remains before it starts.
 
 Application code does not normally drive a bulk load — it is an operator or a server-side job. When it does, the JS client carries thin wrappers over the same eight routes, and the session view they return is the one `documents ingests get` prints:
 

@@ -259,10 +259,10 @@ link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
 {{#lang ts}}
-`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone. Code that calls `magicLinkRequest` or `otpRequest` sends the same email; call `emailSignInRequest`.
+`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
 {{/lang}}
 {{#lang swift}}
-`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`; Code that calls `auth.magicLinkRequest` or `auth.otpRequest` sends the same email; call `auth.emailSignInRequest`.
+`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
 
 ### Make the emailed sign-in link open your app (iOS)
 

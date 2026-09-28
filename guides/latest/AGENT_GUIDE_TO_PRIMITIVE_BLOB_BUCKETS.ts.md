@@ -31,7 +31,7 @@ The API is **flat** (`client.blobBuckets.upload(bucketIdOrKey, …)`), not a `.b
 
 ```typescript
   // List blobs in the bucket
-  const { items, cursor } = await client.blobBuckets.list("avatars", { limit: 50 });
+  const { items, nextCursor } = await client.blobBuckets.list("avatars", { limit: 50 });
 
   // One blob's metadata
   const meta = await client.blobBuckets.getMetadata("avatars", blobId);

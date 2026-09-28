@@ -32,7 +32,7 @@ A rule reads caller identity only (plus the resource object a rule set manages) 
 | Direct LLM/Gemini routes | `directLlmEnabled` on `[app]` (`app.toml`) | — | No per-resource rule; one app-wide switch, **off by default**. While it is off the four spend routes (`llm/chat`, `gemini/generate`, `gemini/generate-raw`, `gemini/count-tokens`) answer `403 { code: "DIRECT_LLM_DISABLED" }` to every caller, app admins and owners included; `directLlmEnabled = true` opts in. A prompt run with `ctx.prompts.run` does not go through the switch. |
 | Notification send, admin routes | route role | — | Not CEL: `notifications.send` and the administrative routes require the app admin role. A function run is readable by the member who started its tree. |
 
-Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-category reads are inferred, no declaration needed (and, where declared, `md.<path>.*` / `md.caller.*`) — see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-category reads are inferred, no declaration needed (and, where declared, `md.<path>.*` / `md.caller.*`) — see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md). `secrets.*` and `vars.*` are also readable in CEL, but declared-only — bound only to the keys the owning config's `secrets`/`vars` manifest lists, in every CEL rule, triggers and stamps included; an undeclared `secrets.KEY` is absent (the rule denies), an unbound `vars.KEY` errors the rule (access refused) — guard with `'KEY' in vars` or `vars.?KEY` — see the [App Secrets guide](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
 
 ## Rule sets (management operations)
 
