@@ -4,7 +4,7 @@ User-visible changes in each production release of the Primitive platform, newes
 
 <!-- changelog:insert — the nightly docs sweep maintains the `## Unreleased` section directly below this line; the production deploy date-stamps it. Keep this comment in place. -->
 
-## Unreleased
+## 2026-09-30
 
 ### New
 
