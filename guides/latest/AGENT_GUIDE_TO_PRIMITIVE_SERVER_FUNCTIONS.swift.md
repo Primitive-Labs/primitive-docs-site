@@ -462,7 +462,7 @@ The `function.invoke` analytics event is still attributed to the caller (see Rec
 
 ## `ctx.api` — the platform from inside a function
 
-`ctx.api` is a typed client for the platform's own API, generated from its OpenAPI document. The namespaces a function may call mirror the operation ids: `analytics`, `blobBuckets`, `channels`, `collections`, `configVars`, `connections`, `databases`, `documents`, `email`, `gemini`, `groups`, `integrations`, `llm`, `locks`, `notifications`, `prompts`, `resourceMetadata`, `secrets`, `users`. Each method takes one options object carrying the operation's path parameters, query parameters, headers (under their wire names) and `body`; a missing required parameter is a compile error.
+`ctx.api` is a typed client for the platform's own API, generated from its OpenAPI document. The namespaces a function may call mirror the operation ids: `analytics`, `blobBuckets`, `channels`, `collections`, `configVars`, `connections`, `databases`, `documents`, `email`, `groups`, `integrations`, `locks`, `notifications`, `prompts`, `resourceMetadata`, `secrets`, `users`. Each method takes one options object carrying the operation's path parameters, query parameters, headers (under their wire names) and `body`; a missing required parameter is a compile error.
 
 ```ts
 import { defineFunction } from "primitive-functions";
@@ -475,7 +475,7 @@ export default defineFunction(async (input: { documentId: string }, ctx) => {
 
 A sandbox has **no network access**. Its only route out is the platform, and every operation the gateway publishes is reachable **with no declaration**, as the app, under one of three rules:
 
-- **Admitted as the system** — the ordinary families: `documents`, `databases`, `users`, `groups`, `collections`, `notifications`, `locks`, `blobBuckets`, `resourceMetadata`, `analytics`, `channels`, `email`, `configVars`, `llm`, `gemini`. No grant, no declaration. A direct-LLM route still meets the app's `directLlmEnabled` spend gate, because that is the app's own setting.
+- **Admitted as the system** — the ordinary families: `documents`, `databases`, `users`, `groups`, `collections`, `notifications`, `locks`, `blobBuckets`, `resourceMetadata`, `analytics`, `channels`, `email`, `configVars`. No grant, no declaration.
 - **Admitted under a keyed capability** — `integration:<key>` for `ctx.integrations.call`, `secret:<NAME>` for `ctx.secret`. These are declared because each names an outside credential the reviewer should see in the file.
 - **Admitted under a high-blast capability** — eleven exact strings for the operations that destroy or re-own (see Capabilities). Declared so that "this function can delete a database" is a line in a reviewed TOML, not a surprise in a log.
 
@@ -905,6 +905,23 @@ await ctx.doc(input.documentId).model("Order").batch([
   { action: "patch", id: "o-1", data: { status: "closed" } },
   { action: "delete", id: "o-2" },
 ]);
+```
+
+### A member's root document and user-scoped aliases
+
+A function that acts on behalf of each user (a cron-fired nightly summary, a webhook for one account) has no caller, so nothing that defaults to "the caller" has anyone to default to. Name the user instead.
+
+- `ctx.api.users.getRootDocument({ userId })` answers `{ userId, rootDocId }` and creates nothing. `rootDocId: null` means a member who has never had a root document (never signed in); a user who is not a member of this app throws a `PrimitivePlatformError` with status 404. Over REST the route (`GET /users/{userId}/root-document`) needs an owner or admin; a function reaches it on the app's authority.
+- `ctx.api.documents.aliases.resolve` and `.delete` take `userId` for a user-scoped alias. Without it they act for the caller, so a function with no caller gets 404 `alias_not_found` even for a user who has the alias.
+
+```ts
+const { rootDocId } = await ctx.api.users.getRootDocument({ userId: input.userId });
+if (rootDocId) {
+  const prefs = await ctx.doc(rootDocId).model("UserPref").query({ limit: 1 });
+  const optedOut = prefs.items[0]?.emailOptOut === true;
+}
+
+const bound = await ctx.api.documents.aliases.resolve({ scope: "user", aliasKey: "user-prefs", userId: input.userId });
 ```
 
 ### A function may be a document's first writer

@@ -160,12 +160,6 @@ Use `| json` when you need to embed objects in larger strings:
 Data: {{ input.config | json }}
 ```
 
-### Direct model routes are off by default
-
-The `llm/chat`, `gemini/generate`, `gemini/generate-raw` and `gemini/count-tokens` routes call a provider directly. They spend the app's LLM credit with no versioned template, no test cases and no function gate, so the whole surface is **off by default**: while `[app] directLlmEnabled` is not `true` in `app.toml`, every one of those four routes answers `403 { code: "DIRECT_LLM_DISABLED" }` — to app admins and owners as well, since it is a spend gate, not a role gate — and the same holds for a function calling them through `ctx.api.llm` / `ctx.api.gemini`. The `llm/models` and `gemini/models` listings stay readable.
-
-Build model calls as prompts run with `ctx.prompts.run`, which does not go through the switch.
-
 ### Don't do this
 
 ```
@@ -275,7 +269,7 @@ What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, `upstreamSt
 | `outputSchema`       | No       | Config-level JSON Schema, stored with the config. `ctx.prompts.run` validates against `[prompt.outputSchema]`, not this one |
 | `reasoningEffort`    | No       | `none` \| `minimal` \| `low` \| `medium` \| `high`. How much the provider may spend on reasoning before answering. Mutually exclusive with `reasoningBudget` |
 | `reasoningBudget`    | No       | The same control as a whole number of reasoning tokens. Mutually exclusive with `reasoningEffort` |
-| `strictOutput`       | No       | `true` sends `[prompt.outputSchema]` to OpenRouter as a strict `json_schema`, so the provider constrains the answer. OpenRouter only; refused beside a config-level `outputSchema`, with `outputFormat = "text"`, or when the prompt declares no `outputSchema` |
+| `strictOutput`       | No       | `true` sends `[prompt.outputSchema]` to OpenRouter as a strict `json_schema`, so the provider constrains the answer. OpenRouter only; refused beside a config-level `outputSchema`, with `outputFormat = "text"`, or when the prompt declares no `outputSchema`. The model must support structured outputs: a write naming one that does not is refused `AGENT_MODEL_CAPABILITY_MISSING`, and a write is refused `AGENT_MODEL_CAPABILITIES_UNAVAILABLE` when the model catalog cannot be checked |
 
 **`[configs.decisions]` — a `kind = "decisions"` prompt's settings:**
 

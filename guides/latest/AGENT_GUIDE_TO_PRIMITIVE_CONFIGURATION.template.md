@@ -168,7 +168,7 @@ counters:
 
 App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
 
-- `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `directLlmEnabled` (boolean; turns on the direct model routes — `llm/chat` and the `gemini/*` routes — off by default), `allowedDomains` (string array), `testAccountBaseEmails` (string array), `largeDocumentWindowDays` (1–14, default 7)
+- `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `allowedDomains` (string array), `testAccountBaseEmails` (string array), `largeDocumentWindowDays` (1–14, default 7)
 - `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `passkeyUserVerification` (`"preferred"` | `"required"`, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
 - `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
 - `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
@@ -246,7 +246,7 @@ Enum and defaulted fields (`status`, `timeoutMs`, `state`, …) are **not** clea
 
 ## Install, login, and apps
 
-Install the CLI globally with one package manager — `pnpm add -g primitive-admin` or `npm install -g primitive-admin`, not both. `primitive login` stores its tokens in the project's `.primitive/credentials.json`, one slot per environment.
+Install the CLI globally with one package manager — `pnpm add -g primitive-admin` or `npm install -g primitive-admin`, not both. `primitive login` stores its tokens in the project's `.primitive/credentials.json`, one slot per environment. Each login is a session on the server: `primitive logout` revokes it there (and keeps the local tokens, exiting non-zero, if the server can't be reached), `primitive auth sessions list` shows your sessions, and `primitive auth sessions revoke <session-id>` ends one — its refresh fails from then on, while an access token it already issued lasts until it expires (at most an hour).
 
 `primitive apps list` lists the apps you can reach, and `primitive apps create "Name"` creates one and prints its App ID. Both run inside a project, and creating an app binds no environment to it — add one with `primitive env add <name> --api-url <url> --app-id <id>`.
 

@@ -31,12 +31,6 @@ All enabled by default. The client automatically emits these lifecycle events:
 | `blob_upload_started` | `blobs` | on | Blob upload begins |
 | `blob_upload_succeeded` | `blobs` | on | Blob upload completes |
 | `blob_upload_failed` | `blobs` | on | Blob upload fails |
-| `prompt_started` | `llm` | on | `client.llm.chat()` request begins |
-| `prompt_succeeded` | `llm` | on | `client.llm.chat()` succeeds (records `duration_ms`) |
-| `prompt_failed` | `llm` | on | `client.llm.chat()` fails |
-| `prompt_started` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` begins |
-| `prompt_succeeded` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` succeeds |
-| `prompt_failed` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` fails |
 
 ### Server-Side Events
 
@@ -262,8 +256,6 @@ Pass `analyticsAutoEvents` to the constructor. All sub-options default to enable
       sessionEnd: true,
       syncErrors: { enabled: true, minIntervalMs: 30_000 },
       blobUploads: { start: false, success: true, failure: true },
-      llm: { start: false, success: true, failure: true },
-      gemini: false,
     },
   });
 ```
@@ -273,7 +265,6 @@ Accepted shapes:
 - `minResumeMs`: `number` (ms before another `user_returned` will fire)
 - `syncErrors`: `boolean | { enabled?: boolean; minIntervalMs?: number }`
 - `blobUploads`: `{ start?: boolean; success?: boolean; failure?: boolean }`
-- `llm`, `gemini`: `boolean | { start?: boolean; success?: boolean; failure?: boolean }`
 
 ---
 
@@ -498,7 +489,6 @@ Configure auto events on the client, set the app-version override once, then log
     analyticsAutoEvents: {
       sessionEnd: true,
       blobUploads: { start: false, success: true, failure: true },
-      llm: { start: false, success: true, failure: true },
     },
   });
 

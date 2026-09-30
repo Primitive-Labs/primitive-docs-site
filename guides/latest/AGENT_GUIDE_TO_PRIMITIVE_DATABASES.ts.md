@@ -278,6 +278,8 @@ const { result } = await tasks.aggregate({
 
 Operation types: `count`, `sum`, `avg`, `min`, `max` (`field` required except for `count`). Result keys are fixed — `count`, and `<type>_<field>` for the rest — and `sort.field` names one of them or a `groupBy` field. Ungrouped (`groupBy: []`), the result is flat, keyed by operation.
 
+With **exactly one** operation there is no key to read through: each group's value is that operation's bare value (`{ open: 120 }` for a lone `sum`). Two or more keep the keys above, and an ungrouped result is keyed by operation whatever the count. This is the one rule on every surface that aggregates a database or document model server-side — here, the documents twin, the CLI, workflow pipeline steps, and the js-bao JavaScript library's model statics (`Model.aggregate` on Yjs-backed documents). The Swift client's local `aggregate` is a different API: it answers with the raw SQL rows, one per group, and does no nesting or collapsing.
+
 ## Access
 
 **The function's `access` gate is the authorization.** It is a CEL expression over the caller's identity (`user.userId`, `user.role`, `isMemberOf`, `memberGroups`, `hasRole`), evaluated on every call; app owners and admins bypass it. It does not see the function's input. See [The access gate](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-access-gate).

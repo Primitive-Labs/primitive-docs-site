@@ -32,12 +32,6 @@ All enabled by default. The client automatically emits these lifecycle events:
 | `blob_upload_started` | `blobs` | on | Blob upload begins |
 | `blob_upload_succeeded` | `blobs` | on | Blob upload completes |
 | `blob_upload_failed` | `blobs` | on | Blob upload fails |
-| `prompt_started` | `llm` | on | `client.llm.chat()` request begins |
-| `prompt_succeeded` | `llm` | on | `client.llm.chat()` succeeds (records `duration_ms`) |
-| `prompt_failed` | `llm` | on | `client.llm.chat()` fails |
-| `prompt_started` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` begins |
-| `prompt_succeeded` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` succeeds |
-| `prompt_failed` | `gemini` | on | Gemini `generate` / `countTokens` / `generateRaw` fails |
 {{/lang}}
 
 ### Server-Side Events
@@ -110,7 +104,7 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
 {{#lang swift}}
 `analytics.logEventAsync` takes an `AnalyticsEventInput`. `user_ulid` is optional on the struct: when omitted it is back-filled from the client's current user, or set to `AnalyticsEventInput.unauthenticatedUser` when no user is signed in.
 
-**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. Awaiting each call is what orders two consecutive events against each other, and what guarantees an event logged before `flushAsync()` goes out with *that* batch. `AnalyticsContext` — the logger handed to LLM calls, read from `client.llmAnalyticsContext` / `client.geminiAnalyticsContext` — follows the same shape: `await context.logEventAsync(_:)`, taking a `[String: JSONValue]`. A context you construct yourself supplies the synchronous `logEvent:` closure and, optionally, a `logEventAsync:` closure; without the latter, `logEventAsync` falls back to the synchronous one and calls it exactly once.
+**Every analytics call is `async`.** The queue is an `actor`, so `client.analytics` is used with `await`: `logEventAsync`, `logSnapshotAsync`, `flushAsync`, `setPlanOverrideAsync`, `setAppVersionOverrideAsync` — and `logAnalyticsEventAsync` / `flushAnalyticsAsync` / `setAnalyticsPlanOverrideAsync` / `setAnalyticsAppVersionOverrideAsync` on the client itself. Awaiting each call is what orders two consecutive events against each other, and what guarantees an event logged before `flushAsync()` goes out with *that* batch. `AnalyticsContext` — a logger handle you construct and hand your own feature code — follows the same shape: `await context.logEventAsync(_:)`, taking a `[String: JSONValue]`. A context you construct yourself supplies the synchronous `logEvent:` closure and, optionally, a `logEventAsync:` closure; without the latter, `logEventAsync` falls back to the synchronous one and calls it exactly once.
 {{/lang}}
 
 ### Event with Context
@@ -261,7 +255,6 @@ Accepted shapes:
 - `minResumeMs`: `number` (ms before another `user_returned` will fire)
 - `syncErrors`: `boolean | { enabled?: boolean; minIntervalMs?: number }`
 - `blobUploads`: `{ start?: boolean; success?: boolean; failure?: boolean }`
-- `llm`, `gemini`: `boolean | { start?: boolean; success?: boolean; failure?: boolean }`
 {{/lang}}
 {{#lang swift}}
 `AnalyticsAutoEventsConfig` exposes each toggle as a flat field: `dailyAuth`, `returnActive`, `minResume` (a `TimeInterval` — seconds before another `user_returned` will fire), `syncErrorsEnabled` + `syncErrorsMinInterval` (also seconds), `blobUploadsStart` / `blobUploadsSuccess` / `blobUploadsFailure`, and `sessionEnd`.

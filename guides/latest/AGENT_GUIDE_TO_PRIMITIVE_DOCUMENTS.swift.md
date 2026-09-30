@@ -673,7 +673,7 @@ CRUD through the facade is local-first (applied to the document store immediatel
 | `number`    | Numeric values               | `indexed: true`, `default: 0`  |
 | `boolean`   | True/false                   | `default: false`               |
 | `date`      | ISO-8601 strings             | `indexed: true`                |
-| `stringset` | Collection of strings (tags) | `maxCount: 20`                 |
+| `stringset` | Collection of strings (tags); never `unique` | `maxCount: 20` |
 
 ### Field Options
 
@@ -837,7 +837,22 @@ fields = ["name", "parentId"]
 # DON'T: bare array of fields. Each constraint must be a table with
 # both `name` and `fields`.
 unique_constraints = [["name", "parentId"]]
+
+# DON'T: `unique` on a stringset, or a stringset in a composite constraint.
+[models.posts.fields.tags]
+type = "stringset"
+unique = true
 ```
+
+`unique` applies to scalar fields only. No writer can build a consistent key from a set of strings, so a unique stringset — on the field, or named in a composite constraint — is refused wherever a schema is declared: `defineModelSchema`, `loadSchemaFromTomlString`, the generated model barrel and `JsBaoClient`'s `schemaToml` throw `UniqueStringsetError`, and codegen writes nothing:
+
+```
+Model "posts": field "tags" is a stringset and cannot be unique. A unique constraint applies to scalar fields only.
+```
+
+`primitive config push` refuses the tree in its preflight, before any change, when `models/models.toml` declares one; a function push and the database type routes answer **400 `UNIQUE_ON_STRINGSET`**. Swift's `TomlSchemaLoader` throws `.uniqueOnStringset`, and a `PrimitiveSchema` built in code registers but its first write throws `JsBaoError` `.invalidArgument` with the same sentence.
+
+**If your schema already declares one:** remove `unique = true` from the stringset field, or the stringset field from the constraint, and regenerate — an app whose generated models declare it throws at startup after upgrading js-bao. A constraint a document already recorded is ignored by the server (records sharing a member all save; every other field is unchanged), so nothing stored is lost.
 
 ### Working with StringSets
 
@@ -1501,6 +1516,7 @@ The permission and collection reads return the raw server rows — they do **no*
 | `collections.list(options:)` | `PaginatedResult<CollectionInfo>` |
 | `collections.listDocuments(collectionId:options:)` | `PaginatedResult<CollectionDocumentInfo>` |
 | `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId` and `email`, plus `name` when the user has one (a user provisioned by email code has none — fall back to `email` for display) |
+| `documents.validateAccess(documentId:userId:)` | `DocumentAccessResult` — what that user may do (`permission`, `accessSource`, `appRole`); omit `userId` to ask about the current user |
 | `collections.getAccess(collectionId:)` | `CollectionAccessInfo` — collection members and their permission levels |
 
 The "accessible documents" set is the **union** of `me.ownedDocuments` and `me.sharedDocuments`: call both and dedupe by document id (the same doc can surface in both).
@@ -1820,7 +1836,7 @@ answered exactly as before.
 
 ### Snapshotting a large document on demand
 
-A large document's base snapshot is built when the room seals an epoch on its own — 8 MB of overlay, or an epoch a week old. Ask for one sooner when you need a fresh base before a cold-load measurement, an audit, an export or a migration, or after a burst of writes a returning client would otherwise have to fold:
+A large document's epoch is sealed on its own at 1 MiB of overlay or 32,768 Yjs items (no sooner than 10 seconds after it opened, unless three times either limit), or a week old; a base snapshot is built every eight seals, or an hour after a seal no base covers yet. Ask for one sooner when you need a fresh base before a cold-load measurement, an audit, an export or a migration, or after a burst of writes a returning client would otherwise have to fold:
 
 ```bash
 # Seal the open epoch now and start the base build that seal arms
@@ -1835,7 +1851,7 @@ It prints the epoch it sealed and the build id, which `documents snapshots get` 
 
 ### Bulk-loading a large document
 
-A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal, an archive and a snapshot build every 8 MB, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
+A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal and an archive every 1 MiB of overlay, with a base build every eight seals, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
 
 ```bash
 # A directory of per-model line files: one record per line, either

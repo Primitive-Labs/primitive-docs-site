@@ -661,7 +661,7 @@ CRUD through the facade is local-first (applied to the document store immediatel
 | `number`    | Numeric values               | `indexed: true`, `default: 0`  |
 | `boolean`   | True/false                   | `default: false`               |
 | `date`      | ISO-8601 strings             | `indexed: true`                |
-| `stringset` | Collection of strings (tags) | `maxCount: 20`                 |
+| `stringset` | Collection of strings (tags); never `unique` | `maxCount: 20` |
 
 ### Field Options
 
@@ -831,7 +831,22 @@ fields = ["name", "parentId"]
 # DON'T: bare array of fields. Each constraint must be a table with
 # both `name` and `fields`.
 unique_constraints = [["name", "parentId"]]
+
+# DON'T: `unique` on a stringset, or a stringset in a composite constraint.
+[models.posts.fields.tags]
+type = "stringset"
+unique = true
 ```
+
+`unique` applies to scalar fields only. No writer can build a consistent key from a set of strings, so a unique stringset — on the field, or named in a composite constraint — is refused wherever a schema is declared: `defineModelSchema`, `loadSchemaFromTomlString`, the generated model barrel and `JsBaoClient`'s `schemaToml` throw `UniqueStringsetError`, and codegen writes nothing:
+
+```
+Model "posts": field "tags" is a stringset and cannot be unique. A unique constraint applies to scalar fields only.
+```
+
+`primitive config push` refuses the tree in its preflight, before any change, when `models/models.toml` declares one; a function push and the database type routes answer **400 `UNIQUE_ON_STRINGSET`**. Swift's `TomlSchemaLoader` throws `.uniqueOnStringset`, and a `PrimitiveSchema` built in code registers but its first write throws `JsBaoError` `.invalidArgument` with the same sentence.
+
+**If your schema already declares one:** remove `unique = true` from the stringset field, or the stringset field from the constraint, and regenerate — an app whose generated models declare it throws at startup after upgrading js-bao. A constraint a document already recorded is ignored by the server (records sharing a member all save; every other field is unchanged), so nothing stored is lost.
 
 ### Working with StringSets
 
@@ -997,7 +1012,7 @@ const result = await Article.query({}, {
 
 Group and calculate statistics — see [Aggregation](#aggregation) above for the compiled call. `groupBy` must name at least one field: an empty `groupBy` throws `Invalid aggregation configuration`, so reach for [`Model.count(filter)`](#counting-records) when you want a plain total. The result is therefore always a **nested object keyed by group values** (not an array), one level per `groupBy` entry, and the leaf under the last group value depends on which operations you asked for.
 
-**A lone `count`** — the leaf collapses to the bare number. This holds for **every** `groupBy` type, a plain indexed field included (not just the stringset facets below), so there is no `{ count: n }` wrapper to read through:
+**A lone operation** — the leaf collapses to that operation's bare value, for `count`, `sum`, `avg`, `min` and `max` alike, so there is no `{ count: n }` or `{ sum_estimatedHours: n }` wrapper to read through. The collapse itself holds for **every** `groupBy` type, a plain indexed field included (not just the stringset facets below) — but a stringset facet computes `count` and nothing else, so only `count` has a value to collapse there:
 
 ```typescript
 const listId = "01M12A5DJ7DW4Z1BVDVVTZ1CXN";
@@ -1013,9 +1028,9 @@ const open = counts[listId] ?? 0;   // ✅ the count itself
 // counts[listId]?.count            // ❌ always undefined — renders 0
 ```
 
-`aggregate` is typed `Record<string, any> | Record<string, any>[]`, so the scaffolded (strict) TypeScript app rejects indexing the result directly: `counts[listId]` on that union is `TS7053: Element implicitly has an 'any' type`. Assert the leaf shape on the call before you read a group out of it — `as Record<string, number>` for a lone `count`, `as Record<string, { count: number; sum_estimatedHours: number }>` for the operation-keyed leaves below.
+`aggregate` is typed `Record<string, any> | Record<string, any>[]`, so the scaffolded (strict) TypeScript app rejects indexing the result directly: `counts[listId]` on that union is `TS7053: Element implicitly has an 'any' type`. Assert the leaf shape on the call before you read a group out of it — `as Record<string, number>` for any single operation, `as Record<string, { count: number; sum_estimatedHours: number }>` for the operation-keyed leaves below.
 
-**Every other operation list** — the leaf is an object keyed by operation. Operation result keys are `count`, `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`:
+**Two or more operations** — the leaf is an object keyed by operation. Operation result keys are `count`, `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`:
 
 ```typescript
 const stats = await Task.aggregate({
@@ -1033,7 +1048,7 @@ const stats = await Task.aggregate({
 // }
 ```
 
-Only `count` collapses. A single `sum`, `avg`, `min`, or `max` keeps its operation key, so read it as `result[group].sum_estimatedHours`, not as a number:
+A lone `sum`, `avg`, `min`, or `max` collapses exactly as a lone `count` does — read it as `result[group]`, not as `result[group].sum_estimatedHours`:
 
 ```typescript
 const hours = await Task.aggregate({
@@ -1042,9 +1057,15 @@ const hours = await Task.aggregate({
 });
 // Returns:
 // {
-//   work:     { sum_estimatedHours: 40 },
-//   personal: { sum_estimatedHours: 6 },
+//   work:     40,
+//   personal: 6,
 // }
+```
+
+That rule holds on **every surface**, so an aggregation you declare once reads the same wherever you run it: these model statics, the document HTTP aggregate (`POST /app/{appId}/api/documents/{documentId}/records/{model}/aggregate`) and the `primitive documents records aggregate` CLI, database aggregates and registered `aggregate` operations, workflow pipeline steps, and `connectDoDb` model bindings. HTTP and the CLI's `--json` deliver it inside the usual `{ result }` envelope:
+
+```json
+{ "result": { "work": 40, "personal": 6 } }
 ```
 
 Multi-field `groupBy` produces deeper nesting (one level per field) and applies the same leaf rule. Group values become object keys, so a numeric field's values are stringified:
@@ -1071,7 +1092,7 @@ const tagCounts = await Task.aggregate({
 // Returns: { "work": 15, "urgent": 8, "personal": 5 }
 ```
 
-Only one stringset facet field is allowed per aggregation. To check membership of a specific value across records, use a `StringSetMembership` groupBy entry: `{ field: "tags", contains: "urgent" }`.
+Only one stringset facet field is allowed per aggregation. A facet aggregation computes `count` only — asking it for a `sum`/`avg`/`min`/`max` returns `undefined` for that operation rather than a number, so group by a plain indexed field when you need one. To check membership of a specific value across records, use a `StringSetMembership` groupBy entry: `{ field: "tags", contains: "urgent" }`.
 
 ### useJsBaoDataLoader Pattern
 
@@ -1491,6 +1512,7 @@ Build your share dialog on `client.documents.*`. Three reads fill it and three w
 | People with access | `documents.getPermissions(documentId)` → `DocumentPermissionEntry[]` (`userId`, `email`, optional `name`, `permission`) |
 | Invited, not signed up yet | `documents.listPendingInvitations(documentId)` → `PendingInvitationEntry[]` (`email`, `permission`, `invitationId`, `expiresAt`) |
 | Groups with access | `documents.listGroupPermissions(documentId)` |
+| What one user may do | `documents.validateAccess(documentId, { userId })` → `{ hasAccess, permission?, accessSource?, appRole? }` — with no options it answers the current user; decide content writes on `permission`, never `appRole` |
 | Invite / change a level | `documents.updatePermissions(documentId, { userId \| email, permission })` |
 | Remove a person, cancel an invite | `documents.removePermission(documentId, { userId })` / `{ email }` |
 | Share with a group | `documents.grantGroupPermission(documentId, { groupType, groupId, permission })` |
@@ -2163,6 +2185,7 @@ The permission and collection reads return the raw server rows — they do **no*
 | `collections.list(options:)` | `PaginatedResult<CollectionInfo>` |
 | `collections.listDocuments(collectionId:options:)` | `PaginatedResult<CollectionDocumentInfo>` |
 | `documents.getPermissions(documentId:)` | `[DocumentPermissionEntry]` — each row carries `userId` and `email`, plus `name` when the user has one (a user provisioned by email code has none — fall back to `email` for display) |
+| `documents.validateAccess(documentId:userId:)` | `DocumentAccessResult` — what that user may do (`permission`, `accessSource`, `appRole`); omit `userId` to ask about the current user |
 | `collections.getAccess(collectionId:)` | `CollectionAccessInfo` — collection members and their permission levels |
 
 The "accessible documents" set is the **union** of `me.ownedDocuments` and `me.sharedDocuments`: call both and dedupe by document id (the same doc can surface in both).
@@ -2500,7 +2523,7 @@ answered exactly as before.
 
 ### Snapshotting a large document on demand
 
-A large document's base snapshot is built when the room seals an epoch on its own — 8 MB of overlay, or an epoch a week old. Ask for one sooner when you need a fresh base before a cold-load measurement, an audit, an export or a migration, or after a burst of writes a returning client would otherwise have to fold:
+A large document's epoch is sealed on its own at 1 MiB of overlay or 32,768 Yjs items (no sooner than 10 seconds after it opened, unless three times either limit), or a week old; a base snapshot is built every eight seals, or an hour after a seal no base covers yet. Ask for one sooner when you need a fresh base before a cold-load measurement, an audit, an export or a migration, or after a burst of writes a returning client would otherwise have to fold:
 
 ```bash
 # Seal the open epoch now and start the base build that seal arms
@@ -2526,7 +2549,7 @@ if (!("sealed" in requested)) {
 
 ### Bulk-loading a large document
 
-A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal, an archive and a snapshot build every 8 MB, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
+A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal and an archive every 1 MiB of overlay, with a base build every eight seals, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
 
 ```bash
 # A directory of per-model line files: one record per line, either
