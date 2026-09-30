@@ -108,7 +108,7 @@ primitive waitlist remove <waitlist-id>                  # drop an entry
 
 ```swift
 client.invitations.create(params: CreateInvitationParams) async throws -> AppInvitationInfo   // email, role?, expiresAt?, source?, note?, sendEmail?
-client.invitations.list(limit:cursor:) async throws -> InvitationListResult                   // .items / .cursor   (admin/owner: whole app; member: own only)
+client.invitations.list(limit:cursor:) async throws -> InvitationListResult                   // .items / .nextCursor   (admin/owner: whole app; member: own only)
 client.invitations.delete(invitationId:) async throws -> InvitationDeleteResult               // CASCADES to deferred grants (admin/owner: any; member: own only, else 403)
 client.invitations.quota() async throws -> InvitationQuota                                    // .used / .limit / .remaining / .unlimited
 client.invitations.get(invitationId:) async throws -> AppInvitationInfo                       // includes inviteToken + status
@@ -258,7 +258,7 @@ Deferred grants are re-validated at resolution time. In a `domain`-restricted ap
   let result = try await client.invitations.listDeferredGrants(
     email: "alice@example.com"
   )
-  let grants = result.grants
+  let items = result.items
   let nextCursor = result.nextCursor
 ```
 
@@ -297,34 +297,13 @@ Check quota, mint the app invitation, share the project document by email, and a
 
 ---
 
-## WebSocket Events
-
-The `invitation` event is the only typed app-membership event. The lifecycle action is on `event.action` (not `event.type`, which is always `"invitation"`). Branch on `action`: `created`/`updated`/`cancelled` go to the invitee only; `declined` to both; `accepted` to the inviter only (with `event.acceptedBy` carrying the userId). Treat unknown actions as a no-op.
-
-```swift
-  for await event in client.stream(for: InvitationEvent.self) {
-    switch event.action {
-    case "created":   break  // invitee only
-    case "updated":   break  // invitee only
-    case "cancelled": break  // invitee only
-    case "declined":  break  // both invitee and inviter
-    case "accepted":  break  // inviter only — event.acceptedBy carries the userId
-    default:          break  // future-proof: no-op, don't throw
-    }
-  }
-```
-
-**Targeting is asymmetric** — most actions go to one side only. `accepted` goes to the *inviter*; `created` goes to the *invitee*. Don't expect both sides to see the same events. Polling `invitations.list()` for acceptance is an anti-pattern — subscribe and switch on the `accepted` action instead.
-
----
-
 ## Anti-Patterns
 
 - Calling a method that doesn't exist: `client.invitations.revoke`, `client.deferredGrants.list`. The correct names are `client.invitations.delete`, `client.invitations.listDeferredGrants`.
 - Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share, group add, and collection add linked to that invitation. Use the per-resource `removePermission`/`removeMember` by email.
 - Showing a member invite button without checking `client.invitations.quota()` first — a member with a 0 quota hits a 403.
 - Re-granting access after signup — email-matched deferred grants already resolved (Path A); the user has access.
-- Polling `invitations.list()` for acceptance. Subscribe to the `invitation` event and switch on the `accepted` action (delivered to the inviter).
+- Expecting a WebSocket event when an invitation is accepted — no event fires. Poll `invitations.list()` or refresh on the next user action instead.
 
 ---
 

@@ -10,7 +10,7 @@ running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
 1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds, plus server-side databases.
+   client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
 3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
@@ -25,6 +25,32 @@ carries a `Server-Timing: total;dur=<int-ms>` header attributing the request's
 server-side handler time. The header is listed in `Access-Control-Expose-Headers`,
 so any HTTP tooling — or the response object of a raw fetch — can read it when
 attributing a slow request to server work vs. transport.
+
+## Response Caching
+
+Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
+handler sets a directive of its own, so no HTTP cache keeps a copy of an
+authenticated response. One endpoint opts out deliberately:
+`GET /avatars/:userId` serves world-readable bytes with
+`public, max-age=31536000, immutable`.
+
+Blob downloads still send an `ETag` and still answer a conditional
+`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
+the body, not an app from revalidating. What it removes is a cache's ability to
+reuse a stored blob body after that 304.
+
+{{#lang swift}}
+The client enforces the same rule locally, so it holds against a server too old
+to send the header: every `URLSession` it builds sets `urlCache = nil` and
+`requestCachePolicy = .reloadIgnoringLocalCacheData`, and every request it
+builds carries that policy. `URLCache` keys entries by URL alone — it ignores
+`Authorization` — and `URLCache.shared` is disk-backed on iOS, so an
+authenticated response stored there would be readable by a request carrying a
+different token or none. Nothing the client fetches enters it, on any path
+(REST calls, blob bytes, the OAuth code exchange, token refresh). Cookie
+handling is unchanged: the sessions are built from
+`URLSessionConfiguration.default` and keep using `HTTPCookieStorage.shared`.
+{{/lang}}
 
 {{#lang ts}}
 The tools are a single browser overlay (the **DevTools** overlay) provided by the
@@ -234,7 +260,7 @@ in this panel, in the same authenticated session as the host app, and headlessly
 in Node under vitest (see "Headless runs (vitest / CI)" below). Key
 invariants (both contexts unless noted):
 
-1. **Explicit document lifecycle.** Tests that need database/model operations
+1. **Explicit document lifecycle.** Tests that need document/model operations
    call `createTestDocument()` / `destroyTestDocument()` themselves.
    `createTestDocument()` creates a local-only document titled
    `===TEST=== {timestamp}-{random}`, opens it with
@@ -434,7 +460,7 @@ run: async (log) => {
 //   src/tests/foo.test.ts          ← NOT discovered
 //   src/tests/foo.primitive-test.ts ← discovered
 
-// WRONG — using createTestDocument when no database ops are needed
+// WRONG — using createTestDocument when no document/model ops are needed
 // (wastes time creating/destroying a document for nothing)
 run: async (log) => {
   const doc = await createTestDocument();  // unnecessary
@@ -529,7 +555,7 @@ wiring; the pieces, all load-bearing:
 
 Environment selection: `vitest.config.ts` merges the app's Vite config, so the
 `primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
-does for `pnpm dev` — from `.primitive/config.json`, honoring `primitive env
+does for `pnpm dev` — from `primitive/config.json`, honoring `primitive env
 use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
 a `.env` file (no `.env` file repeats them). Point one run elsewhere:
 
@@ -824,22 +850,6 @@ any thrown `Error` marks the test failed with its description. Writing a test th
 does the minimum setup to reproduce a bug is usually the fastest way to build a
 repro and iterate.
 
-## Databases
-
-Two CRUD paths over a server-side database, in one view:
-
-1. **Models (primary)** — generic CRUD on rows, bypassing operation rules. Gated
-   server-side to app admins and database owners; a non-admin query returns
-   401/403 and the UI auto-expands the operations path with an explanation. This
-   is the admin debugging door.
-2. **Registered operations (secondary)** — the CEL-gated, app-defined named
-   operations registered via `DatabasesAPI.createOperation(databaseId:params:)`.
-   Anyone with access can run an operation within its rule; the result renders as
-   a table (array of dicts) or raw JSON.
-
-Both coexist so any user can interact with any database: admins browse raw via
-Models; everyone else uses the operations path.
-
 ## Collections
 
 Two-column CRUD for collections of documents. Left = filter + list + create.
@@ -1021,29 +1031,19 @@ export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
 ```
 
 **The signup mode has to admit the address.** The `+primitivetest` bypass
-replaces the emailed code — it does not skip the app's signup gate. The server
-runs the invite-only/domain access check first and only then applies the
-test-email whitelist, so on an app with `mode = "invite-only"` (the default for
-a freshly scaffolded app) an uninvited test address is rejected at OTP request
-with `This app is invite-only. You've been added to the waitlist.`
+replaces the emailed code, not the app's signup gate, and a freshly scaffolded
+app is `mode = "invite-only"` — an unadmitted test address is rejected at OTP
+request with `This app is invite-only. You've been added to the waitlist.`
+Either set `mode = "public"` in `app.toml` and run
+`primitive config push --only app`, or stay invite-only and admit the exact
+derived address first — the Authentication guide's "Invite-only apps:
+pre-create the member" covers how.
 
-Two ways through:
-
-- Set `mode = "public"` in `app.toml` and run `primitive config push --only app`.
-- Stay invite-only and pre-invite the test address. This genuinely works — an
-  unaccepted, unexpired invitation for the address satisfies the gate, and OTP
-  verify then consumes it. Invite the **exact** address, lowercase
-  (`you+primitivetest-smoke@example.com`), with role `member`: invitation
-  lookup matches the literal email, so an invitation for the bare base address
-  does not cover a `+primitivetest` one, and `admin`/`owner` roles are refused
-  for test addresses. With `mode = "domain"`, the address's domain must be in
-  `allowedDomains` instead.
-
-The preflight can read `mode` but not the app's invitations, so under a
+The preflight can read `mode` but not the app's members, so under a
 non-public mode it fails unless you tell it the address is already admitted:
 
 ```bash
-export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address invited
+export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address admitted
 ```
 
 To check the prerequisites without the multi-minute boot and build, run the
@@ -1107,12 +1107,35 @@ commands against it. Coordinates are in **points** — the same units
 `idb ui describe-all` reports — so there is no pixel conversion:
 
 ```bash
-idb_companion --udid <UDID> --grpc-port 10882 &        # serves on a gRPC port
+DEVELOPER_DIR="$(bash scripts/idb-developer-dir.sh)" idb_companion --udid <UDID> --grpc-port 10882 &   # serves on a gRPC port
 idb --companion localhost:10882 ui describe-all         # the accessibility tree
 idb --companion localhost:10882 ui tap <X> <Y>          # tap a point
 idb --companion localhost:10882 ui text "hello"         # type into the focused field
 idb --companion localhost:10882 ui key 40               # 40 = Return
 ```
+
+**The `DEVELOPER_DIR` is not optional on a current Xcode.** `idb_companion`
+loads SimulatorKit — the framework behind every HID call (`ui tap`, `ui text`,
+`ui key`) — from `$DEVELOPER_DIR/Library/PrivateFrameworks/SimulatorKit.framework`,
+and Xcode 27 ships it at `Xcode.app/Contents/SharedFrameworks/` with no
+`Contents/Developer/Library/PrivateFrameworks` at all. A companion started
+plainly under that Xcode serves `describe-all` happily and fails every tap with
+
+```
+SimulatorKit is required for HID interactions: Error Domain=com.facebook.FBControlCore
+Code=0 "Attempting to load a file at path '…/Developer/Library/PrivateFrameworks/
+SimulatorKit.framework', but it does not exist"
+```
+
+`scripts/idb-developer-dir.sh` prints a developer directory where the framework
+is: a symlink mirror of the Xcode bundle with SimulatorKit restored to the path
+idb looks in, built on first use and shared by every app on the machine
+(`PRIMITIVE_XCODE_SHIM_DIR`, default `~/.local/share/primitive/xcode-hid-shim`).
+Nothing inside `Xcode.app` is written and nothing needs root. On an Xcode that
+still keeps the framework where idb looks, it prints the active developer
+directory unchanged and creates nothing. `ui_signin` runs it itself — including
+in its preflight, so an Xcode it cannot work with is reported before the build
+rather than as a failed tap after it (#3487).
 
 To tap a control by identifier rather than raw coordinates, read
 `describe-all`, find the element whose `AXUniqueId` matches (this is where a

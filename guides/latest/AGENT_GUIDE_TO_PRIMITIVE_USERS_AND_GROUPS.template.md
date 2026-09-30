@@ -82,7 +82,7 @@ user.id = generateNewId()         // Use platform userId instead
 |---------|----------|
 | **Root document** | Personal settings, preferences (auto-created per user, never shared) |
 | **User's document** | App-specific profile data that follows document sharing rules |
-| **Database** | User metadata visible to other users (e.g., public profile, reputation score) accessed via operations with `$user.userId` |
+| **Database** | User metadata visible to other users (e.g., public profile, reputation score), read and written through a server function |
 
 ### Looking up users
 
@@ -101,7 +101,17 @@ primitive users list
 # --search: ULID → userId lookup; '@' → email lookup; otherwise substring
 # name search (backed by a global search index on User.name).
 primitive users list --search "ali"
+
+# Block a user from signing in to this app, and restore them. Disabling signs
+# them out of this app (sessions deleted, API tokens revoked, open connections
+# dropped) and is reversible: memberships and ownership are untouched, and
+# after `enable` they sign in again and their group access resumes. The app's
+# only owner cannot be disabled.
+primitive users disable <user-id> [-y]
+primitive users enable <user-id>
 ```
+
+Console admin accounts have their own pair, `primitive admins disable <admin-id>` / `primitive admins enable <admin-id>` — super-admin only, like every `primitive admins` verb.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -141,8 +151,7 @@ The current authenticated user has its own namespace. Use it for "me"-scoped rea
 {{#lang swift}}
 - `ownedDocuments()` is cache-backed and offline-aware and returns `[DocumentInfo]`. Use `ownedDocumentsPage(...)` when you need a paginated `DocumentListPage`; the root document is excluded by default (`includeRoot: false`).
 {{/lang}}
-- `sharedDocuments()` returns the unified `{ items, cursor }` envelope (raw-JSON cursor, NOT base64url). Group- and collection-scoped shares do NOT appear here — those are accessed via the group or collection. Each `SharedDocument` extends `DocumentInfo`, so rows carry the base document fields plus the share extras (`permission`, `source`, `grantedBy`, `invitationId`).
-- `pendingDocumentInvitations()` returns `[{ invitationId, documentId, title?, email, permission, invitedAt, invitedBy, expiresAt?, accepted, document?: {...} }, ...]`.
+- `sharedDocuments()` returns the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, NOT base64url — pass it back as the `cursor` option). Group- and collection-scoped shares do NOT appear here — those are accessed via the group or collection. Each `SharedDocument` extends `DocumentInfo`, so rows carry the base document fields plus the share extras (`permission`, `source`, `grantedBy`).
 
 Together, `me.ownedDocuments()` + `me.sharedDocuments()` give the two halves of "documents the user has direct access to." For group- or collection-scoped access, iterate `groups.listUserMemberships(...)` / `client.collections.list()` and call `groups.listDocuments` / `collections.listDocuments`.
 
@@ -162,7 +171,7 @@ Groups are identified by a `(groupType, groupId)` pair, allowing multiple taxono
 1. Create a group with `client.groups.create({ groupType, groupId, name })` — `groupId` is optional; omit it (or pass `null`) and the server assigns a ULID, returned in the response.
 2. Add members with `client.groups.addMember(...)` (by `userId` or `email`).
 3. Grant group access to a document with `client.documents.grantGroupPermission(...)`.
-4. Gate database operations in CEL: `access: "isMemberOf('team', database.metadata.teamId)"`.
+4. Check membership where database data is read: in a server function's `access` gate (`isMemberOf('team', 'engineering')`) or, when the group depends on the input, in its code.
 
 The full create/list/get/update/delete surface is in [Managing Groups](#managing-groups); membership in [Managing Members](#managing-members).
 
@@ -176,7 +185,7 @@ If the group type has `autoAddCreator: true` (default), the creator is automatic
 
 `groupId` on create is optional — a supplied id keeps its existing validation (`#` banned, no `_`-prefixed reserved type, `409` on a duplicate); a non-string supplied value is rejected with `400 "groupId must be a string"`, an empty string with `400 "groupId cannot be empty"`. Omit it (or send `null`) to have the server assign a ULID, returned as `groupId` in the response — the same pattern documents, databases, and collections use for server-assigned ids.
 
-`groups.list()` returns a paginated `{ items: GroupInfo[], cursor? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
+`groups.list()` returns a paginated `{ items: GroupInfo[], nextCursor?, hasMore? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
 
 `groups.get()` returns `{ appId, groupType, groupId, name, description?, memberCount, createdAt, createdBy, modifiedAt }`. `update()` takes optional `name` and/or `description`. `delete()` cascade-deletes all memberships and group permissions.
 
@@ -212,10 +221,10 @@ See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-gra
 {{ example: users-and-groups/list-members }}
 
 {{#lang ts}}
-Pass `{ include: "profiles" }` to join each member's profile in the same call. Without it, `GroupMemberInfo` is the sparse legacy shape: `{ userId, addedAt, addedBy, userName?, userEmail? }` — no `avatarUrl` key at all. With `include: "profiles"`, `userName`/`userEmail` become reliably populated and a new `avatarUrl?: string | null` field is always present: a resolved URL to the uploaded avatar, or `null` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go null. `include` is opt-in and purely additive: omitting it returns exactly the pre-existing response shape.
+Pass `{ include: "profiles" }` to join each member's profile in the same call. Without it, `GroupMemberInfo` is the sparse shape: `{ userId, addedAt, addedBy, userName?, userEmail? }` — no `avatarUrl` key at all. With `include: "profiles"`, `userName`/`userEmail` become reliably populated and a new `avatarUrl?: string | null` field is always present: a resolved URL to the uploaded avatar, or `null` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go null. `include` is opt-in and purely additive: omitting it returns exactly the sparse shape above.
 {{/lang}}
 {{#lang swift}}
-Pass `include: .profiles` to join each member's profile in the same call. Without it, `GroupMemberInfo.avatarUrl` is `nil` — the field is absent from the default response. With `include: .profiles`, `userName`/`userEmail` become reliably populated and `avatarUrl` is a resolved URL to the uploaded avatar, or `nil` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go nil. `include` is opt-in and purely additive: omitting it returns exactly the pre-existing response shape. The server rejects unknown `include` values with HTTP 400.
+Pass `include: .profiles` to join each member's profile in the same call. Without it, `GroupMemberInfo.avatarUrl` is `nil` — the field is absent from the default response. With `include: .profiles`, `userName`/`userEmail` become reliably populated and `avatarUrl` is a resolved URL to the uploaded avatar, or `nil` when the user has no avatar or the membership is orphaned. Orphaned memberships (the user was deleted) still appear in the list either way — only the profile fields go nil. `include` is opt-in and purely additive: omitting it returns exactly the sparse shape above. The server rejects unknown `include` values with HTTP 400.
 {{/lang}}
 
 ### Remove members
@@ -241,7 +250,7 @@ Each entry carries a `deferredId` — cancel that invitation by revoking the def
 
 Group types are configured via TOML config files and the `primitive config` command (version-controlled alongside your code).
 
-**File:** `config/group-type-configs/team.toml`
+**File:** `primitive/dev/group-type-configs/team.toml`
 
 ```toml
 [groupTypeConfig]
@@ -255,7 +264,7 @@ categories = ["config"]        # optional — self-reads like md.self.config.* a
                                 # load a category no rule names directly
 ```
 
-A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block (collection `attrs` adds `contextId`). See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block. See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
 
 Push to the server:
 
@@ -268,7 +277,7 @@ primitive config push
 - A group type with **no config** falls back to built-in default rules. Per-op fallback also applies: when a configured rule set leaves a `(category, op)` pair undefined, that op resolves against the defaults too. The defaults: `group.create = "true"` (any signed-in member); `group.edit/delete` and `member.create/edit/delete` are creator-only (`user.userId == group.createdBy`); `group.get` and `member.list` allow the creator OR any direct group member (`isMemberOf(group.groupType, group.groupId)`).
 - A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive config push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
 
-See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#configuring-with-the-cli) for the full sync workflow (`init`, `pull`, `diff`, `push`).
+See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the full sync loop (`init`, `pull`, `diff`, `push`).
 
 ## Groups and Documents
 
@@ -282,78 +291,74 @@ The grant call is shown in [Grant document access to a group](#grant-document-ac
 
 ## Groups and Databases
 
-Databases support a coarse-grained group grant that gives every member of the group `manager`-level access (the database's admin permission, the only level supported for groups):
+A database can carry a group grant that records every member of the group as a `manager` — an administrative permission record (the only level a group can hold), not a way into the data: the database routes refuse a non-admin caller, so the grant gives members nothing directly. App admins manage it, and a function reads it with `ctx.api.databases.listGroupPermissions` to make its own decisions. A function makes it, declaring `capabilities = ["databases:grantGroupPermission"]`:
 
-{{ example: databases/db-grant-group }}
+```ts
+await ctx.api.databases.grantGroupPermission({
+  databaseId: input.databaseId,
+  body: { groupType: "team", groupId: "ops", permission: "manager" },
+});
+```
 
-For everything else — gating individual queries and mutations — group memberships are checked in **CEL access expressions** on registered operations. See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for how to register operations.
+End users reach database records through **server functions**, so group membership gates data in two places — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access):
 
-The shared identity context every rule can use (`user.*`, `isMemberOf`, `memberGroups`, `hasRole`, `isAnonymous`) is documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere); the database-operation `access` context (`database.celContext`, `params.*`, `secrets.*`, `workflow`) is documented in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#cel-access-expressions). This section covers only how group membership factors into those rules.
+- **The function's `access` gate** — CEL over the caller's identity: `user.userId`, `user.role`, `isMemberOf`, `memberGroups`, `hasRole` (the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere)). The gate does not see the function's input, so it checks fixed groups and roles. App owners and admins bypass it.
+- **The function's code** — for a group that depends on the input (the team that owns `input.databaseId`, the student in `input.studentId`), read the caller's memberships and refuse before touching the rows.
 
-**Common CEL patterns for database operations:**
+**Gate patterns:**
 
 ```
-// Team members of the database's team
-access: "isMemberOf('team', database.metadata.teamId)"
+// Any member of one fixed group
+access = "isMemberOf('staff', 'all')"
 
-// Team ID passed as parameter — caller must belong to that team
-access: "isMemberOf('team', params.teamId)"
+// Either of two fixed groups
+access = "isMemberOf('staff', 'all') || isMemberOf('support', 'tier-2')"
+```
 
-// User can only query groups they belong to (containment check)
-access: "params.teamId in memberGroups('team')"
+**Code pattern — membership that depends on the input:**
 
-// Per-parameter access: parent can only view their own child's data
-params: {
-  studentId: {
-    type: "string",
-    required: true,
-    access: "value in memberGroups('parent-of')"
+```ts
+import { defineFunction } from "primitive-functions";
+
+export default defineFunction(async (input: { databaseId: string }, ctx) => {
+  // A bare array of { groupType, groupId, name, … }.
+  const teams = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "team" });
+  if (!teams.some((m: { groupId: string }) => m.groupId === input.databaseId)) {
+    throw new Error("Not a member of this team");
   }
-}
-
-// Allow only when called from a specific workflow
-access: "fromWorkflow('grade-import')"
+  return await ctx.db(input.databaseId, "team").model("tasks").query({});
+});
 ```
 
 **Don't do this — common CEL footguns:**
 
 ```
 // BAD — `user.appRole` does not exist in CEL. Use `user.role` or hasRole().
-access: "user.appRole == 'admin'"
+access = "user.appRole == 'admin'"
 
 // GOOD — checks the caller's app role.
-access: "hasRole('admin') || hasRole('owner')"
-// (Note: admins/owners bypass *rule-set* evaluation for groups/collections,
-// but database operation `access` CEL is NOT bypassed. You must allow them
-// explicitly if you want them in.)
+access = "hasRole('admin')"
 
 // BAD — isMemberOf returns bool, not the group. `==` is meaningless.
-access: "isMemberOf('team') == params.teamId"
+access = "isMemberOf('team') == 'engineering'"
 
 // GOOD
-access: "isMemberOf('team', params.teamId)"
+access = "isMemberOf('team', 'engineering')"
 
 // BAD — memberGroups returns an array, can't compare with ==.
-access: "memberGroups('team') == params.teamId"
+access = "memberGroups('team') == 'engineering'"
 
 // GOOD — use `in` for containment.
-access: "params.teamId in memberGroups('team')"
+access = "'engineering' in memberGroups('team')"
 
 // BAD — referencing fields not in the context (silently denies; runtime
 // errors are caught and turned into "deny").
-access: "user.email == 'admin@example.com'"   // user.email is not in context
-
-// BAD — assuming database.metadata.teamId exists when it doesn't.
-// Missing fields evaluate to null; `isMemberOf('team', null)` returns false.
-// Either guarantee metadata is set at create time, or guard:
-access: "has(database.metadata.teamId) && isMemberOf('team', database.metadata.teamId)"
+access = "user.email == 'admin@example.com'"   // user.email is not in context
 ```
 
-## Rule Sets for Groups and Collections
+## Rule Sets for Groups
 
-Group and collection management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `config/rule-sets/*.toml` and bound to a group or collection type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups and collections: which operations exist, the CEL context each adds, and the built-in defaults.
-
-### Group rule sets
+Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `primitive/dev/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set mechanism under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
 
 **Resource type:** `group`. **Categories and operations:**
 - `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
@@ -378,7 +383,6 @@ Group and collection management operations (create/edit/delete, member add/remov
 |----------|-----------------|-------------|
 | `group.groupType` | yes | Target group's type |
 | `group.groupId` | yes | Target group's ID (also present at `create` time — server passes the requested ID) |
-| `group.contextId` | yes | Read-alias of `group.groupId` — the same value under the `contextId` name collection rules use, so group and collection rule sets can share expressions |
 | `group.name` | yes | Target group's display name |
 | `group.createdBy` | yes (after create) | userId of the group creator |
 | `target.userId` | only `category: "member"`, ops `create`/`edit`/`delete` | Target user being added/removed. Absent for `member.list`. |
@@ -386,92 +390,6 @@ Group and collection management operations (create/edit/delete, member add/remov
 `group.description` is **NOT** in the rule context — don't reference it.
 
 {{ example: users-and-groups/rule-sets-test }}
-
-### Collection rule sets
-
-Collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collections)) use the same rule-set pipeline as groups — a `CollectionTypeConfig` row binds a `collectionType` to a rule set. The CEL namespace is `collection.*` (separate from `group.*`), and an extra helper `hasCollectionAccess(collectionId)` is available only inside collection rule sets. The SDK equivalents are `client.collectionTypeConfigs.{ list, get, create, update, delete }` (parallel to `client.groupTypeConfigs.*`).
-
-**Resource type:** `collection`. **Categories and operations:**
-
-- `category: "collection"` — `create`, `edit`, `delete`, `get` (the read op, parallel to `group.get`; use `get` in TOML configs).
-- `category: "document"` — `add`, `remove`, `delete`, `list` (controls which documents the collection can hold, plus authorization for deleting a member document outright — see [Deleting Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#deleting-documents)).
-- `category: "member"` — `add`, `remove`, `list`.
-
-**Default rule set** — applies to any collection type with no `CollectionTypeConfig` row:
-
-| Op | Default | Meaning |
-|----|---------|---------|
-| `collection.create` | `"true"` | Any signed-in member |
-| `collection.edit` / `delete` | `user.userId == collection.createdBy` | Creator only |
-| `collection.get` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member (direct or via `CollectionGroupPermission`) |
-| `document.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
-| `document.delete` | `"false"` | Denied. Unlike every other write op above, NOT creator-only — an app must explicitly configure this op to let a non-owner/non-app-owner delete a member document at all |
-| `document.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
-| `member.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
-| `member.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
-
-A non-creator reader/writer removing their own membership via `member.remove` is denied (403) unless the rule set grants it.
-
-`document.delete` is distinct from `document.remove`: `remove` only detaches a document from this collection, while `delete` authorizes destroying the whole document (`client.documents.delete`) when the caller isn't the document's owner or the app owner — the delete endpoint checks every collection containing the document and allows the delete if any one collection's `document.delete` rule passes. Because that check runs per collection, granting `document.add` on a collection can extend who is able to delete documents placed in it — configure `document.add` and `document.delete` together with that reach in mind.
-
-**CEL context**, beyond the identity context:
-
-| Variable | Always present? | Description |
-|----------|-----------------|-------------|
-| `collection.collectionType` | yes | Collection's type (matches the `CollectionTypeConfig` this rule set is bound to) |
-| `collection.collectionId` | yes (after create) | Collection's ID |
-| `collection.contextId` | yes | Per-instance identifier — parallels a group's `groupId`. Set at create time and immutable. `null` for collections with no context. Expresses "caller belongs to the group this collection represents." Prefer storing that external id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it as `md.self.<category>.<key>` — see [Migrating `contextId` to a metadata category](#migrating-contextid-to-a-metadata-category). |
-| `collection.name` | yes | Display name |
-| `collection.createdBy` | yes (after create) | userId of the collection's creator |
-| `target.userId` | only `category: "member"`, ops `add` / `remove` | The user being added or removed. Absent for `member.list`. |
-
-Plus the collection-only helper:
-
-- `hasCollectionAccess(collectionId)` — true when the caller has direct collection membership (the platform-managed `_col-reader` / `_col-writer` system groups) OR membership in a non-system user-group that holds a `CollectionGroupPermission` of `reader` or `read-write` on the collection. Resolves to `false` outside collection rule sets, and to `false` on `collection.create` (no `collectionId` in scope yet).
-
-### Migrating `contextId` to a metadata category
-
-Prefer storing a collection's external-entity id in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category and reading it in the rule set as `md.self.<category>.<key>`, rather than in the built-in `collection.contextId` field. **The move is not 1:1** — a rule can read `md.self.<category>.<key>` only for a category the collection type's manifest declares, and only after a value has been stored, so migrating means declaring a manifest and stamping the value, not just renaming a field.
-
-**1. Define a category** for the link, with separate read/write rules:
-
-```toml
-# config/metadata-category-configs/collection.classLink.toml
-[metadataCategoryConfig]
-resourceType = "collection"
-category = "classLink"
-readRule = "true"
-writeRule = "user.userId == resource.attrs.createdBy"
-
-[metadataCategoryConfig.schema.fields.classId]
-type = "string"
-required = true
-```
-
-**2. Declare the category on the collection type's manifest** — the prerequisite for the rule set to read it:
-
-```toml
-# config/collection-type-configs/class-reports.toml
-[collectionTypeConfig]
-collectionType = "class-reports"
-ruleSetName    = "class-reports-rules"
-
-[metadata.self]
-categories = ["classLink"]
-```
-
-**3. Replace `collection.contextId` with `md.self.classLink.classId`** in the rule set, and stamp `classId` when the collection is created (via `initialMetadata` on `collections.create()`) so the value exists when these ops evaluate:
-
-```toml
-[rules.collection]
-get    = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
-
-[rules.document]
-add    = "isMemberOf('class', md.self.classLink.classId)"
-list   = "isMemberOf('class', md.self.classLink.classId) || hasCollectionAccess(collection.collectionId)"
-```
-
-The `collection.create` rule is the exception: the collection and its metadata don't exist yet when it evaluates, so `md.self.classLink.classId` reads `null` there. Gate `create` on caller identity or membership another way (for example a group the caller must already belong to), and let the post-create ops above carry the `md.self` check.
 
 ## Common Patterns
 
@@ -483,7 +401,7 @@ Users create teams. Team members get access to team documents and databases.
 
 **Setup** (via CLI config):
 
-**File:** `config/group-type-configs/team.toml`
+**File:** `primitive/dev/group-type-configs/team.toml`
 
 ```toml
 [groupTypeConfig]
@@ -495,7 +413,7 @@ autoAddCreator = true
 
 {{ example: users-and-groups/team-workspace }}
 
-Gate the team's database operations on membership in CEL: `access: "isMemberOf('team', database.metadata.teamId)"`.
+When each team has its own database (the database id reused as the team's group id), the function that reads it checks the caller's `team` membership against `input.databaseId` in code — see [Groups and Databases](#groups-and-databases).
 
 ### Role-based access (reviewer, editor, viewer)
 
@@ -503,34 +421,30 @@ Use group types as roles within a context.
 
 {{ example: users-and-groups/role-groups }}
 
-Gate the operations on role membership in CEL — editors can modify (`access: "isMemberOf('editor', params.projectId)"`); viewers can read (`access: "isMemberOf('viewer', params.projectId) || isMemberOf('editor', params.projectId)"`).
+The project comes from the input, so the function checks role membership in code: a write function requires an `editor` membership whose `groupId` is `input.projectId`; a read function accepts `viewer` or `editor`.
 
 ### Relationship modeling (parent-child, mentor-mentee)
 
 Use groups to model relationships between users.
 
-**Setup** (via CLI config):
+**Server side** — the function that reads a student's grades checks the relationship before it reads:
 
-**File:** `config/database-type-configs/classroom.toml` (excerpt)
+```ts
+import { defineFunction } from "primitive-functions";
 
-```toml
-[[operations]]
-name = "viewGrades"
-type = "query"
-modelName = "grades"
-access = "true"
-[operations.definition]
-filter = { studentId = "$params.studentId" }
-sort = { date = -1 }
-
-[[operations.params]]
-name = "studentId"
-type = "string"
-required = true
-access = "value in memberGroups('parent-of')"
+export default defineFunction(async (input: { databaseId: string; studentId: string }, ctx) => {
+  const children = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "parent-of" });
+  if (!children.some((m: { groupId: string }) => m.groupId === input.studentId)) {
+    throw new Error("Not this student's parent");
+  }
+  return await ctx.db(input.databaseId, "classroom").model("grades").query({
+    filter: { studentId: input.studentId },
+    options: { sort: { date: -1 } },
+  });
+});
 ```
 
-The per-parameter `access` expression ensures parents can only view their own children's grades.
+The membership check is what ensures parents can only view their own children's grades; the caller never supplies whose relationship is checked.
 
 **Runtime** (in app code):
 
@@ -542,7 +456,7 @@ Model nested organizational structure with multiple group types.
 
 {{ example: users-and-groups/org-hierarchy }}
 
-CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMemberOf('dept', params.deptId)"`, `"isMemberOf('team', database.metadata.teamId)"`.
+A function can check any level: a fixed one in its `access` gate (`isMemberOf('org', 'acme')`), and one named by the input in its code, with `listUserMemberships({ userId, type: "dept" })`.
 
 ## Best Practices
 
@@ -550,7 +464,7 @@ CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMem
 
 - **Always use the platform user model** for identity. Reference `userId` from the platform, don't generate your own user IDs.
 - **Use `client.users.getBasic()`** to display user info (name, avatar, email). It caches results automatically.
-- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data accessible via operations).
+- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data, read through a server function).
 - **Don't duplicate platform fields.** Name, email, and avatar are managed by the platform — read them from there.
 
 ### Groups
@@ -558,14 +472,14 @@ CEL can check any level: `"isMemberOf('org', database.metadata.orgId)"`, `"isMem
 - **Choose meaningful group types.** Use types that map to your domain: `team`, `class`, `department`, `parent-of`. The `groupType` is the taxonomy, the `groupId` is the instance.
 - **Use `autoAddCreator: true`** (default) for groups where the creator should be a member (teams, clubs). Set to `false` for groups managed by admins (classes, departments).
 - **Prefer groups over per-user grants** for document access. Easier to manage and audit.
-- **Use CEL `isMemberOf()` for database access** rather than trying to grant database permissions to individual users.
+- **Check group membership in the function** that reads a database, rather than granting database permissions to individual users.
 
 ### Access control
 
 - **App owners and admins bypass all group/collection rule-set evaluation.** Design rules for regular members — don't try to restrict owners/admins there.
-- **Database operation `access` CEL is NOT bypassed for admins.** If admins should be able to call an operation, include them explicitly: `hasRole('admin') || hasRole('owner') || isMemberOf(...)`.
-- **Use per-parameter access** for sensitive relationships (parent-child, manager-report).
-- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer multiple focused operations over one operation with complex access logic.
+- **A function's `access` gate is bypassed by app owners and admins too.** A check in the function's code is not — write it to let them through if they should be.
+- **Check sensitive relationships in code** (parent-child, manager-report): read the caller's memberships and compare against the input.
+- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer several focused functions over one function with complex gate logic.
 - **Test rules** with `client.ruleSets.test()` before deploying, and use `client.ruleSets.debug()` to trace evaluation for real users.
 
 ## Common Errors

@@ -51,7 +51,7 @@ const blobs = client.document(documentId).blobs();
 ```typescript
   const blobs = client.document(documentId).blobs();
 
-  const { items, cursor } = await blobs.list({ limit: 50 });
+  const { items, nextCursor } = await blobs.list({ limit: 50 });
   const meta = await blobs.get(blobId);
   await blobs.delete(blobId);
 ```
@@ -67,7 +67,7 @@ const blobs = client.document(documentId).blobs();
 Document blobs include offline caching, an IndexedDB-backed upload queue, and a service-worker proxy for `<img>`/`<video>`.
 
 
-For general-purpose storage outside any document context — avatars, workflow outputs, public assets, anonymous reads via signed URLs — use a **blob bucket** instead (100 MB per blob). The [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) covers buckets and the full decision rule for choosing between the two.
+For general-purpose storage outside any document context — avatars, server-generated files, public assets, anonymous reads via signed URLs — use a **blob bucket** instead (100 MB per blob). The [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) covers buckets and the full decision rule for choosing between the two.
 
 ---
 
@@ -111,7 +111,7 @@ Uploading the same `blobId` twice with **identical** `sha256` and `size` returns
 
 ## Listing
 
-See **List / metadata / delete** above for the basic call. Each item carries `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, and `createdAt`. `cursor` is an opaque pagination token; only present when more results exist — follow it to page through results. `limit` accepts `1`–`100`; a larger value is clamped to `100`, and a zero, negative, or non-integer `limit` is rejected with a `400`. Page through the `cursor` for more than 100 blobs rather than asking for a bigger page.
+See **List / metadata / delete** above for the basic call. Each item carries `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, and `createdAt`. `nextCursor` is an opaque pagination token, only present when more results exist — pass it back as the `cursor` option to page through results. `limit` accepts `1`–`100`; a larger value is clamped to `100`, and a zero, negative, or non-integer `limit` is rejected with a `400`. Page through `nextCursor` for more than 100 blobs rather than asking for a bigger page.
 
 ```typescript
   // `list<T>` types each item — declare the fields your app reads.
@@ -129,9 +129,9 @@ See **List / metadata / delete** above for the basic call. Each item carries `bl
     console.log(b.blobId, b.filename, b.contentType, b.numBytes, b.sha256, b.createdAt);
   }
 
-  // `cursor` is an opaque token; only present when more results remain.
-  if (page1.cursor) {
-    const page2 = await blobs.list<BlobItem>({ cursor: page1.cursor });
+  // `nextCursor` is an opaque token; only present when more results remain.
+  if (page1.nextCursor) {
+    const page2 = await blobs.list<BlobItem>({ cursor: page1.nextCursor });
     return page2.items;
   }
 ```
@@ -301,7 +301,7 @@ if (blobs.hasServiceWorkerControl()) {
 
 | Operation                              | Required document permission     |
 |----------------------------------------|----------------------------------|
-| Upload, Delete                         | `read-write`, `admin`, or `owner` |
+| Upload, Delete                         | `read-write` or `owner`           |
 | List, Get metadata, Download, Read     | `reader` or higher                |
 
 ---

@@ -12,7 +12,7 @@ A deploy names **two independent things**, and neither is inferred from the othe
 | Flag | Selects | Which means |
 |---|---|---|
 | `--deploy-env <name>` | the **deploy environment** | the Vite mode (`.env.<name>`) and the `[env.<name>]` block in `wrangler.toml` |
-| `--primitive-env <name>` | the **Primitive environment** | the backend/app pair in `.primitive/config.json` |
+| `--primitive-env <name>` | the **Primitive environment** | the backend/app pair in `primitive/config.json` |
 
 Omitting either is an error. Always write "deploy environment" or "Primitive environment" — a bare "environment" is ambiguous here, because Wrangler and Vite each call their own half by a different name.
 
@@ -45,9 +45,9 @@ The Vite mode selects `.env.<deploy-env>`. It carries no identity:
 VITE_OAUTH_REDIRECT_URI=https://my-app-prod.your-subdomain.workers.dev/oauth/callback
 ```
 
-The app ID and backend URL live in `.primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
+The app ID and backend URL live in `primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
 
-**A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them. For an app scaffolded by an older CLI, that deletion is the entire migration.
+**A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them.
 
 ### 3. Deploy
 
@@ -131,7 +131,9 @@ The Team ID is the single setting required for device, TestFlight, and App Store
    bash scripts/regenerate-project.sh
    ```
 
-   That script is the one entry point for regeneration: it emits `Models/Generated/*.swift` from `models.toml` (gitignored build products, so a fresh clone has none — and `xcodegen` can only list files that already exist), runs `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+   That script is the one entry point for regeneration: it runs `scripts/codegen.sh` (models and the typed code generated from your server configuration — `xcodegen` can only list files that already exist, so a newly emitted one has to be on disk first), then `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+
+   The generated sources are committed, so a regeneration that changes them is a diff to review and commit — including one produced by a release build. `./archive.sh` has no codegen policy of its own: it regenerates and builds like every other path.
 
 After that, device installs and archives both work.
 
@@ -151,7 +153,7 @@ The iOS template **ships Fastlane** — a root `Gemfile`, `fastlane/Appfile`, `f
 bundle install
 ```
 
-`fastlane/Appfile` is generic: it reads the app identifier and Team ID from `project.yml` at runtime, so there's nothing to edit there — set the Team ID with `primitive apple set-team-id <id>` (it writes `DEVELOPMENT_TEAM` in `project.yml`).
+`fastlane/Appfile` is generic: it reads the app identifier and Team ID from `project.yml` at runtime, so there's nothing to edit there — set the Team ID as `DEVELOPMENT_TEAM` in `project.yml`.
 
 ### 4. App Store Connect API Key
 
@@ -188,7 +190,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors with the `primitive apple set-team-id` fix if unset) and loads the API key from `fastlane/.env`. The lanes export with `signingStyle: automatic` and `-allowProvisioningUpdates`, so Xcode requests the provisioning profiles for you. Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
+Each build lane reads the Team ID from `project.yml` (it errors if unset — set `DEVELOPMENT_TEAM` in `project.yml`) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` uses Xcode automatic signing, so it needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
 
 ### 6. Register the app on App Store Connect (one-time)
 
@@ -219,4 +221,6 @@ bundle exec fastlane ios release
 ### CI
 
 Both `./run-ios.sh` and `bundle exec fastlane ios beta` run in GitHub Actions on a macOS runner. Base64-encode `api_key.p8` into a secret and decode it before the lane runs.
+
+The API key alone suffices only on a machine that keeps its keychain. On a fresh runner the lane creates a **new** Apple Distribution certificate each run, and Apple caps them per team, so repeatable CI needs the team's existing signing certificate and private key installed on the runner (export the identity to a `.p12`, keep it as a secret, import it into a temporary keychain before the lane) rather than one minted per run.
 {{/lang}}

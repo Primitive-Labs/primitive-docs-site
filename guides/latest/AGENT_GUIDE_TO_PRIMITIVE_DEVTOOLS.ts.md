@@ -10,7 +10,7 @@ running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
 1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds, plus server-side databases.
+   client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
 3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
@@ -25,6 +25,20 @@ carries a `Server-Timing: total;dur=<int-ms>` header attributing the request's
 server-side handler time. The header is listed in `Access-Control-Expose-Headers`,
 so any HTTP tooling — or the response object of a raw fetch — can read it when
 attributing a slow request to server work vs. transport.
+
+## Response Caching
+
+Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
+handler sets a directive of its own, so no HTTP cache keeps a copy of an
+authenticated response. One endpoint opts out deliberately:
+`GET /avatars/:userId` serves world-readable bytes with
+`public, max-age=31536000, immutable`.
+
+Blob downloads still send an `ETag` and still answer a conditional
+`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
+the body, not an app from revalidating. What it removes is a cache's ability to
+reuse a stored blob body after that 304.
+
 
 The tools are a single browser overlay (the **DevTools** overlay) provided by the
 `primitiveDevTools` Vite plugin, opened from a floating button in the running app.
@@ -233,7 +247,7 @@ in this panel, in the same authenticated session as the host app, and headlessly
 in Node under vitest (see "Headless runs (vitest / CI)" below). Key
 invariants (both contexts unless noted):
 
-1. **Explicit document lifecycle.** Tests that need database/model operations
+1. **Explicit document lifecycle.** Tests that need document/model operations
    call `createTestDocument()` / `destroyTestDocument()` themselves.
    `createTestDocument()` creates a local-only document titled
    `===TEST=== {timestamp}-{random}`, opens it with
@@ -433,7 +447,7 @@ run: async (log) => {
 //   src/tests/foo.test.ts          ← NOT discovered
 //   src/tests/foo.primitive-test.ts ← discovered
 
-// WRONG — using createTestDocument when no database ops are needed
+// WRONG — using createTestDocument when no document/model ops are needed
 // (wastes time creating/destroying a document for nothing)
 run: async (log) => {
   const doc = await createTestDocument();  // unnecessary
@@ -528,7 +542,7 @@ wiring; the pieces, all load-bearing:
 
 Environment selection: `vitest.config.ts` merges the app's Vite config, so the
 `primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
-does for `pnpm dev` — from `.primitive/config.json`, honoring `primitive env
+does for `pnpm dev` — from `primitive/config.json`, honoring `primitive env
 use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
 a `.env` file (no `.env` file repeats them). Point one run elsewhere:
 

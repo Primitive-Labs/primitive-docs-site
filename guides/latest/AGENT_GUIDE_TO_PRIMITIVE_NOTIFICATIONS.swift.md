@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Notifications
 
-Multi-channel notifications: a durable in-app inbox, live WebSocket delivery while connected, and push (iOS/Android) once a device is registered. Client SDK surface is `client.notifications.*`, available on both the JS and Swift clients; a workflow can send from the server with the `notification.send` step.
+Multi-channel notifications: a durable in-app inbox, live WebSocket delivery while connected, and push (iOS/Android) once a device is registered. Client SDK surface is `client.notifications.*`, available on both the JS and Swift clients; a server function sends from the server with `ctx.api.notifications.send`.
 
 ## Client SDK Reference
 
@@ -90,50 +90,43 @@ Subscribe through `client.stream(for:)` — a `for await` loop in a `.task`, whi
 
 This is a **best-effort real-time mirror**, not the source of truth — it fires only if the recipient is connected at send time. `client.notifications.list()` (the durable inbox row) is authoritative; a client that reconnects after a missed event simply sees the notification the next time it lists or checks `unreadCount()`. Don't build read/unread state purely off this event — always reconcile against `list()`/`unreadCount()`.
 
-## The `notification.send` Workflow Step
+## Sending from a Server Function
 
-```toml
-[[steps]]
-id = "notify"
-kind = "notification.send"
-toUserId = "{{ input.userId }}"      # required
-title = "Your report is ready"       # required
-body = "Tap to view this week's summary."  # required
-channels = ["in-app", "ios"]         # optional, default ["in-app"]
-iconUrl = "https://example.com/icon.png"    # optional
-deepLink = "myapp://reports/latest"  # optional
-expiresAt = "2026-08-01T00:00:00Z"   # optional, ISO date string
-idempotencyKey = "{{ input.jobId }}" # optional — see Idempotency below
-userInfo = { jobId = "{{ input.jobId }}" }   # optional, push-only — custom data delivered with the alert
-collapseId = "report-ready"          # optional, push-only — provider collapse/coalesce id
-threadId = "reports"                 # optional, push-only, APNs — Notification Center thread grouping
+A server function sends through `ctx.api.notifications.send({ body })`, where `body` is the same object the client's `send()` takes — `title`, `body`, `target: { userId }`, and the optional `channels`, `iconUrl`, `deepLink`, `expiresAt`, `sourceRef`, `idempotencyKey`. It returns the same `{ results, deduplicated?, deduplicatedChannels? }`. Function code acts as the system, so the admin-only restriction is met by construction and there is no capability line to declare; the function's own `access` gate decides who may cause the send.
+
+```ts
+import { defineFunction } from "primitive-functions";
+
+export default defineFunction(async (input: { userId: string; jobId: string }, ctx) => {
+  const sent = await ctx.api.notifications.send({
+    body: {
+      title: "Your report is ready",
+      body: "Tap to view this week's summary.",
+      target: { userId: input.userId },
+      channels: ["in-app", "ios"],
+      idempotencyKey: `report-ready:${input.jobId}`,
+    },
+  });
+  return { results: sent.results };
+});
 ```
 
-Output: same shape as the client's `send()` — `{ results: NotificationSendResult[], deduplicated?, deduplicatedChannels? }`.
-
-**Verdict.** The step's `steps.<id>.ok` is `true` only when at least one requested channel actually delivered. A send that reaches nobody — every channel failed, was rate-limited, or the recipient had no registered device for a push channel — reports `ok: false` even though the step executed and returned a result. Branch on `steps.notify.ok`, not just the absence of a thrown error.
-
-**Retry ownership.** Like every step, `notification.send` is single-attempt at the runner level — the engine's `step.do()` owns retries. The step's own error classification then decides whether a retry is worth attempting:
-
-- A channel that failed for a transient reason — a provider 5xx/network error, or (for push) some device tokens failing retryably while others delivered — makes the step throw a **plain** error, so the engine retries the whole step.
-- A channel that failed permanently — an unrecognized channel name, an unknown recipient, or every requested channel rate-limited — makes the step throw a **non-retryable** error, so the run doesn't spin on a failure a retry can't fix.
-
-Set `idempotencyKey` so a retried step re-sends only what still needs it (see Idempotency below); without one, a retry re-sends every requested channel from scratch (at-least-once, possible duplicate in-app rows / push alerts).
+A resolved call is not full delivery: check `results[].status` per channel. Inside a task run, put the send inside a `step.do` so a replay does not repeat it, and still set `idempotencyKey` — a step retried after a partial failure then re-sends only the channels (and push tokens) that still need it.
 
 ## Idempotency and Deduplication
 
-Pass `idempotencyKey` (a plain string, caller-chosen) on `send()` / the workflow step's `idempotencyKey` field to make a repeat call safe:
+Pass `idempotencyKey` (a plain string, caller-chosen) on `send()` — from the client or from a function — to make a repeat call safe:
 
 - **Full dedupe.** If every requested channel already has a terminal outcome under that key, the call returns immediately with `deduplicated: true` and the prior `results` — nothing is re-sent.
 - **Partial dedupe.** If some channels are done and others still need a retry, the call re-sends only the channels that need it and reports `deduplicatedChannels: string[]` naming the ones served from the prior send.
 - **Per-token granularity for push.** Dedupe tracks each device token separately within a channel: retrying a push send where one token delivered and another failed transiently re-sends only to the token that still needs it — the already-reached device does not get a duplicate alert.
 - **Window.** Dedupe state is tracked for the same retention window as the audit trail (90 days) — an idempotency key reused after that window is treated as a brand-new send.
 
-Without an `idempotencyKey`, every retry re-sends every requested channel from scratch (at-least-once, not exactly-once) — always set one on a send a caller or workflow step might retry.
+Without an `idempotencyKey`, every retry re-sends every requested channel from scratch (at-least-once, not exactly-once) — always set one on a send a caller or a task step might retry.
 
 ## Rate Limiting
 
-Sends are capped **per app, per hour, per channel**: 5,000 in-app notifications and 1,000 push dispatches. Each requested channel is checked independently, so a multi-channel send only blocks the channel(s) actually over their limit — the rest deliver normally. Only when **every** requested channel is blocked does the call throw `NotificationRateLimitError` (`limit`, `resetAt`); a workflow step turns this into a non-retryable step failure (see Retry ownership above), since waiting out the window is the caller's job, not something a step retry accomplishes.
+Sends are capped **per app, per hour, per channel**: 5,000 in-app notifications and 1,000 push dispatches. Each requested channel is checked independently, so a multi-channel send only blocks the channel(s) actually over their limit — the rest deliver normally. Only when **every** requested channel is blocked does the call throw `NotificationRateLimitError` (`limit`, `resetAt`). Waiting out the window is the caller's job; retrying immediately cannot succeed.
 
 ## Errors
 
@@ -143,22 +136,20 @@ Sends are capped **per app, per hour, per channel**: 5,000 in-app notifications 
 | `NotificationTargetNotFoundError` | `target.userId` is not a member of the app | 404 |
 | `NotificationRateLimitError` | Every requested channel was blocked by its hourly quota | 429 |
 
-All three map to a non-retryable failure in the `notification.send` workflow step. A plain (retryable) error from the step means a transient per-channel/per-token delivery failure, not one of these three typed errors.
-
 ## Footguns
 
 - **`send()` needs app admin permission**, not just app membership. A member-level caller gets `403` — this is deliberate (unrestricted member-level send would let any signed-in user spam the tenant's push/in-app quota).
 - **Don't rely on the `notification` WS event as your only read path.** It's a best-effort live mirror; a disconnected recipient misses it entirely. Always back it with `list()` / `unreadCount()` for the authoritative state.
-- **Set `idempotencyKey` on any send a caller or a workflow step might retry.** Without it, retries are at-least-once — expect duplicate inbox rows and duplicate push alerts, not a clean no-op.
-- **A "delivered" push channel result can still need a retry.** When a user has multiple device tokens and only some fail retryably, the channel's overall `status` can read `"delivered"` while `tokenAttempts` shows a token that still needs a resend — the `notification.send` step accounts for this in its retry classification (see above); if you're driving `send()` directly from a client, check `tokenAttempts` yourself before treating a `"delivered"` status as fully done.
+- **Set `idempotencyKey` on any send a caller or a task step might retry.** Without it, retries are at-least-once — expect duplicate inbox rows and duplicate push alerts, not a clean no-op.
+- **A "delivered" push channel result can still need a retry.** When a user has multiple device tokens and only some fail retryably, the channel's overall `status` can read `"delivered"` while `tokenAttempts` shows a token that still needs a resend — check `tokenAttempts` yourself before treating a `"delivered"` status as fully done.
 - **`registerDevice` reassigns tokens across users.** Registering a token already owned by a different account moves it to the new caller — correct for shared-device sign-out/sign-in, but don't assume a token uniquely and permanently identifies one user.
 - **`environment` must match the build.** A production app build presenting a token issued under Apple's sandbox APNs environment (or vice versa) registers fine but silently fails to deliver — `environment` is not validated against the token itself.
 - **Channels are additive, not implicit.** Omitting `channels` sends `"in-app"` only — a push notification never goes out unless `"ios"` / `"android"` is explicitly requested (and the user has a registered device for it).
 
 ## Tips for Coding Agents
 
-1. Always set `idempotencyKey` when a send happens inside a workflow step or any other retryable call path.
+1. Always set `idempotencyKey` when a send happens inside a task step or any other retryable call path.
 2. Check `results[].status` per channel rather than assuming a resolved promise means full delivery — a partially-successful multi-channel send still resolves normally.
 3. Register a device immediately after the user grants OS-level notification permission, and unregister on logout.
 4. Treat the `notification` WS event as a UI nicety (badge/toast), never as the system of record — reconcile against `list()`/`unreadCount()`.
-5. For a `notification.send` workflow step, branch on `steps.<id>.ok`, not just on whether the step threw — a fully-skipped/failed send still "runs".
+5. From a server function, branch on `results[].status`, not just on whether the call threw — a fully-skipped/failed send still resolves.

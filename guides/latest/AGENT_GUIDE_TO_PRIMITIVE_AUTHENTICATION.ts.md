@@ -7,8 +7,7 @@ Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (p
 | Method | When to use |
 |--------|-------------|
 | OAuth (Google) | Primary auth, redirect-based |
-| Magic Link | Passwordless email link |
-| OTP | 6-digit email code (15 min expiry) |
+| Email sign-in | One email carrying a 6-digit code and, optionally, a sign-in link (15 min expiry) |
 | Passkey | WebAuthn for returning users (requires existing account) |
 
 Each method must be enabled in the Admin Console. Check availability with `getAuthConfig()` before showing UI.
@@ -53,7 +52,6 @@ In the starter template this wiring is owned for you by the template's `userStor
     google: googleWebClientAvailable(config),
     // ONE email capability: one request sends one email carrying both a code
     // and (when a link can be issued) a link, so there is no method to offer.
-    // `magicLinkEnabled` / `otpEnabled` are still reported, both equal to this.
     email: config.emailSignInEnabled,
     passkey: config.hasPasskey,
   };
@@ -82,11 +80,11 @@ Availability is the provider being enabled **and** your platform's entry being u
 
 ## Server App Settings ↔ Client Contract
 
-Server-side app settings must align with the origin the client app is served from. These settings live in `config/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
+Server-side app settings must align with the origin the client app is served from. These settings live in `primitive/dev/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
 
 | Server field | Contract | Set via |
 |---|---|---|
-| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `custom` — an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
+| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
 | `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
@@ -99,6 +97,32 @@ Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allo
 ---
 
 ## OAuth (Google)
+
+### Google Client Configuration
+
+Google registers an OAuth client **per platform**, so `app.toml` states one entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`. Each entry carries its own `clientId` and its own `redirectUris`, and — for the types Google issues one for — its own `clientSecret`:
+
+```toml
+[auth.google.clients.web]
+clientId     = "1234-web.apps.googleusercontent.com"
+clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+redirectUris = ["https://app.example.com/oauth/callback"]
+
+[auth.google.clients.ios]
+clientId     = "1234-ios.apps.googleusercontent.com"
+redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
+```
+
+| client type | `clientSecret` |
+|---|---|
+| `web`, `desktop` | **required** — a whole `{{secrets.KEY}}` reference, never the secret itself |
+| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
+
+A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
+
+The server sends every stored `clientSecret` back verbatim — a whole `{{secrets.KEY}}` reference is a pointer, not a credential, so `apps get`, `config pull` and the API all show it. An entry that holds the secret itself rather than a reference still signs users in (the stored value IS the secret), but the entry cannot be saved back until you store the value as an app secret and re-point `clientSecret` at it. Other app-settings writes are unaffected.
+
+`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a reference naming a secret that doesn't exist, or reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone — but a confidential client whose secret doesn't resolve still fails at Google, as a generic `INVALID_TOKEN`.
 
 ### Start the flow
 
@@ -195,7 +219,7 @@ correctly skipped.
 
 ---
 
-## Email Sign-In (One Email, Both Credentials)
+## Email Sign-In (One Email, One or Two Credentials)
 
 ### Request + verify
 
@@ -208,7 +232,7 @@ opens the link, and consuming either one retires both.
   // With no target at all the email carries the code alone, rendered from the
   // same template. A target that IS sent must match the app's non-empty
   // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
-  // URI` — nothing degrades to code-only on your behalf (#2967).
+  // URI` — nothing degrades to code-only on your behalf.
   await client.emailSignInRequest(email, {
     redirectUri: "https://app.example.com/auth/magic-callback",
   });
@@ -229,7 +253,7 @@ allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
 link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
-`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone. `magicLinkRequest` and `otpRequest` remain as **deprecated** aliases of the same issuance path.
+`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
 
 ### Reading the token (callback page)
 
@@ -304,11 +328,13 @@ The code half of the same email is verified with the OTP verify call, unchanged:
   }
 ```
 
+A passkey ceremony that fails because the provider did not verify the user returns `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering). It applies to any ceremony that was *started* while `passkeyUserVerification` was `"required"` — the policy is pinned when the options are issued, so an in-flight ceremony can still return this code after the app is switched to `"preferred"`. Handle it on the code, not on the app's current setting. Render it as "your passkey provider didn't verify you — try again and complete Face ID / your PIN": it is the one passkey failure the user can fix by retrying.
+
 > **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
 
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`, `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text (#3003).
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
 
 ---
 
@@ -455,7 +481,7 @@ When `status === "disabled"`:
 
 - Every auth-completion endpoint (OAuth callback, magic-link verify, OTP verify, and any other sign-in path) rejects with `AUTH_USER_DISABLED` before issuing tokens.
 - The user's open WebSocket connections are force-disconnected by the server's connection layer.
-- Existing access tokens are revoked; in-flight workflow runs the user started are terminated.
+- Existing access tokens are revoked; in-flight task runs the user started are terminated.
 
 Admin endpoints (admin token required):
 
@@ -635,7 +661,7 @@ Implications:
 
 1. **Don't re-grant after signup.** If a doc was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
 2. **Domain-mode apps re-validate at resolution.** Deferred grants for emails outside allowed domains are silently dropped.
-3. **`invitation`/`accepted` WS events fire after resolution** — subscribe to refresh the inviter's UI.
+3. **No WebSocket event announces the resolution.** Refresh the inviter's UI on their next read.
 
 See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants).
 
@@ -672,7 +698,7 @@ The token is saved to `sessionStorage` under the key `"primitive:pendingInviteTo
 
 - **Signed-in user** — prompts "Accept with this account or sign out and use a different one." Calls `client.invitations.accept(token)` on confirm.
 - **Signed-out user** — stashes the token in `sessionStorage` and redirects to login. After sign-in the pending token is consumed inside the auth method.
-- **Error states** — `INVITE_TOKEN_EXPIRED`, `INVITE_ALREADY_ACCEPTED`, `INVITE_TOKEN_INVALID`, and generic server errors.
+- **Error states** — `INVITE_TOKEN_INVALID` (the one code for an invalid, expired, or already-redeemed token) and generic server errors.
 
 If you're using the template, this route is already wired in `src/router/routes.ts`. Point your invitation emails at `${yourApp.baseUrl}/invite/accept?inviteToken=${token}`. You do **not** need to rebuild any of this.
 
@@ -690,12 +716,12 @@ This is the recommended sign-in for local/dev builds as well as CI: sign in thro
   // Requires the app owner to have added "alice@example.com" to the app's
   // testAccountBaseEmails whitelist. Then any `alice+primitivetest<suffix>@example.com`
   // derivative becomes a test account that accepts code "000000".
-  await client.otpRequest("alice+primitivetest@example.com");
+  await client.emailSignInRequest("alice+primitivetest@example.com");
   await client.otpVerify("alice+primitivetest@example.com", "000000");
   // client is now authenticated; the access token expires in 30 minutes
 
   // Role-distinguished derivatives (Gmail/Workspace deliver them to the same inbox):
-  await client.otpRequest("alice+primitivetest-teacher@example.com");
+  await client.emailSignInRequest("alice+primitivetest-teacher@example.com");
 ```
 
 Guardrails:
@@ -704,7 +730,7 @@ Guardrails:
 - Only `+primitivetest<suffix>` derivatives are eligible. The bare base is never a test account.
 - First verify provisions the derived user through the standard signup path and returns the real `isNewUser`, so first-run/new-user flows are testable through the bypass. Signup-mode gates apply as 403s exactly like a normal signup: `INVITATION_REQUIRED` (invite-only, no invitation), `ADDED_TO_WAITLIST` (invite-only with waitlist — the address is added), `DOMAIN_NOT_ALLOWED` (domain mode); an `inviteToken` is honored and provisions with the invitation's role (member-role invitations only — see the reserved-email boundary below).
 - Issued tokens are short-lived (~30 minutes) and carry a `primitiveBypass: true` claim that gets re-checked on every request, so removing the base from the whitelist revokes sessions immediately.
-- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths (e.g. starting a `runAs = "system"` workflow from the client) need a real admin sign-in.
+- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths (e.g. `client.notifications.send()`) need a real admin sign-in.
 
 The whitelist is `[app].testAccountBaseEmails` in `app.toml` (max 50 bases per app), applied with `primitive config push --only app`. The web-admin settings UI edits the same list.
 
@@ -718,7 +744,7 @@ The whitelist is `[app].testAccountBaseEmails` in `app.toml` (max 50 bases per a
 
 ## Customizing Email Templates
 
-The `email-sign-in` email is one of the transactional types Primitive sends; override it with a custom subject and branded HTML/text body — and delete the `{{#if magicLink}}` block if the app should never send a clickable link. The retired `magic-link` and `otp` types are no longer rendered by any endpoint; a stored override for either is kept and listed as retired, with migration guidance. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are triggered from `email.send` workflow steps.
+The `email-sign-in` email is one of the transactional types Primitive sends; override it with a custom subject and branded HTML/text body — and delete the `{{#if magicLink}}` block if the app should never send a clickable link. Sign-in renders only `email-sign-in`: an override stored under `magic-link` or `otp` is listed as retired and never rendered. Email templates are a cross-cutting configuration surface — the full type list, template variables, override/revert model, and CLI commands live in the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md). Custom types are sent from a server function with `ctx.api.email.send`.
 
 ---
 
