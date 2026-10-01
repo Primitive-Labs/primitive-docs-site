@@ -1,6 +1,14 @@
 # Agent Guide to Primitive Access Control
 
-Guidelines for AI agents writing access rules. Server-evaluated authorization in Primitive is expressed in **CEL** (Common Expression Language) against the authenticated caller, and CEL has two jobs: a **server function's `access` gate** (who may invoke or start the function — the whole authorization for everything the function does) and **rule sets** over the platform's own catalogues (groups, collections, blob buckets, database types, named locks). Documents are the exception — they use direct permission grants (`reader` | `read-write` | `owner` per user/email/group), not CEL.
+Use CEL rules to authorize function calls and resource operations. Rules see caller identity; each resource adds its own context. Test authorization as a regular member because app owners and admins bypass rules.
+
+## First rule
+
+```toml novalidate
+access = "isMemberOf('team', 'engineering')"
+```
+
+This function allows members of the engineering team. Inside the function, still authorize requested resources and scope records to the caller.
 
 ## Identity context (available everywhere)
 
@@ -15,23 +23,24 @@ Guidelines for AI agents writing access rules. Server-evaluated authorization in
 
 Prefer membership checks over user-ID comparisons: `isMemberOf('team', 'core')`, `size(memberGroups('team')) > 0`.
 
-A rule reads caller identity only (plus the resource object a rule set manages) — it cannot read a database record. So a server-enforced entitlement (paid feature, role gate) can't be a flag on a row (`isSubscribed = true`): no rule can check it, so it isn't enforced. Model the entitlement as group membership, which a rule can check — `access = "isMemberOf('subscription', 'active')"` on each gated function — and maintain that membership from your billing source.
+Function access rules can check roles and group membership, but cannot query database records. Store entitlements as group memberships when they must be checked by the access rule.
 
 ## Surfaces and their extra context
 
-| Surface | Field(s) | Extra context | Notes |
-|---|---|---|---|
-| Server function | `access` on `[function]` | identity context only — no input, no params | Evaluated on every HTTP invoke and start. admin/owner bypass. **No rule → denied**; push refuses code for a function with no gate. A rule that throws also denies. Denial: `403 { errorCode: "FUNCTION_ACCESS_DENIED" }`, the same body for every cause, and it is checked before any answer about the function's state. The gate IS the authorization: inside, the code acts with the app's authority, so scope reads and writes in code on `ctx.user`. Not evaluated for a trigger fire (webhook, cron) or for a callee started with `ctx.functions.start` — the root's gate was the authorization. |
-| Prompt, integration | — | — | No rule of their own and no client endpoint: only a function reaches them (`ctx.prompts.run`, `ctx.integrations.call`), so the function's `access` gate is their authorization, plus the function's `integration:<key>` capability for an integration. |
-| Rule sets | per-op rules on a named rule set | resource objects (e.g. `group.groupType`, `group.groupId`, `group.createdBy`; `collection.*`) | Governs **management operations** (create/edit/delete groups & collections, member management) — see below. |
-| Blob bucket | `preset`, or `ruleSetId` naming a rule set | per-operation blob context | Member-level reads/writes on the bucket's blobs. See the Blob Buckets guide. |
-| Database type | `ruleSetName` on the database type config | identity context | Who may edit or delete the type's configuration. No rule set → denied for non-admins. |
-| Named locks (`acquire`, `renew`) | per-op rules on a single `lock` rule set | `record.key` — the exact requested key, scopeable by prefix or `isMemberOf(...)`; `user.userId`, `user.role` | No `lock` rule set installed → open (any member, any key) — the default. Once installed, every operation it does not define is denied for members; at most one `lock` rule set per app. `release` is never rule-gated. Denial: `403 { errorCode: "LOCK_ACCESS_DENIED" }`. See the [Locks guide](AGENT_GUIDE_TO_PRIMITIVE_LOCKS.md#access-control). |
-| Metadata category | `readRule` (read API) / `writeRule` (write API) on the category config | `user.userId`, `user.role`, `resource.resourceType`/`resourceId`/`category` | Gates the metadata read/write API only — it doesn't govern a *different* rule's `md.self`/`md.caller` use (`md.self` is inferred; `md.caller`/paths are declared). App-level owner/admin bypass both rules (a resource-level permission never bypasses). See the Resource Metadata guide. |
-| Server-stamped fields / triggers | trigger `when` conditions; `autoPopulatedFields` values | `record.*`, `database.*`, `now()` | CEL produces values (`user.userId`, `now()`) as well as conditions. |
-| Notification send, admin routes | route role | — | Not CEL: `notifications.send` and the administrative routes require the app admin role. A function run is readable by the member who started its tree. |
+| Surface | Rule controls | Default for regular members |
+|---|---|---|
+| Function `access` | Who can invoke or start it | Denied without a rule |
+| Group or collection rule set | Resource and membership operations | Permissive when no type config exists |
+| Blob bucket preset or rule set | Reads, uploads, listing, deletion, sharing | A preset or rule set is required |
+| Database type rule set | Editing or deleting type configuration | Denied without a rule set |
+| Lock rule set | Acquiring and renewing keys | Open without a rule set; omitted operations deny once installed |
+| Metadata `readRule` / `writeRule` | Reading or writing category values | Denied without the rule |
 
-Any manifest-supporting eval site gains `md.self.*` in its CEL context — self-category reads are inferred, no declaration needed (and, where declared, `md.<path>.*` / `md.caller.*`) — see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md). `secrets.*` and `vars.*` are also readable in CEL, but declared-only — bound only to the keys the owning config's `secrets`/`vars` manifest lists, in every CEL rule, triggers and stamps included; an undeclared `secrets.KEY` is absent (the rule denies), an unbound `vars.KEY` errors the rule (access refused) — guard with `'KEY' in vars` or `vars.?KEY` — see the [App Secrets guide](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
+Resource rules add context such as `group.*`, `collection.*`, or `record.key`. See the feature guide for its variables. Metadata rules govern API reads and writes, not another rule’s metadata lookups.
+
+A function’s gate also authorizes its use of prompts and integrations; integrations require the declared capability. Admin routes and notification sending use app roles rather than CEL.
+
+[Metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) supplies `md.self.*` and declared related-resource paths. [Secrets and config variables](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) must be declared before a rule can read them.
 
 ## Rule sets (management operations)
 
@@ -71,7 +80,7 @@ Semantics:
 get = "memberGroupsOf(group.groupId, 'class-students').exists(c, isMemberOf('class-teachers', c))"
 ```
 
-Both arguments are validated at save time: argument 1 must be the literal path `group.groupId` (a non-literal/computed arg is rejected, same class as a dynamic `md[expr]` access), argument 2 a string literal. It is allowed only on existing-group operations (`get`/`edit`/`delete`, `member.*`) — **not** `group.create`, where `group.groupId` is caller-supplied — and `target.userId` is never a valid subject. Metadata category rules get the same function rooted at a loaded `md.self.*` value.
+`memberGroupsOf` requires the literal `group.groupId` path and a literal group type. Use it for an existing group, not `group.create`. Metadata category rules can use a loaded `md.self.*` value as the subject.
 
 ## Testing and debugging
 
@@ -85,24 +94,17 @@ primitive functions invoke <key> --user <user-id>           # exercise a functio
 
 Client equivalents: `client.ruleSets.test()`, `client.ruleSets.debug()`, `client.ruleSets.schema()`. For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass function `access` gates, rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`.
 
-## Patterns
+## Gotchas
 
-```toml novalidate
-access = "user.userId != ''"                                   # any authenticated user
-access = "hasRole('admin') || hasRole('owner')"                # app admins
-access = "isMemberOf('subscription', 'active')"                # an entitlement group
-access = "size(memberGroups('team')) > 0"                      # any of the caller's teams
-edit = "user.userId == group.createdBy"                        # rule set: the group's creator
-```
-
-- Default-deny, widen deliberately. A function with no `access` gate denies every caller; an installed `lock` rule set denies every operation it does not define.
-- One group type per concept (`team`, `org`, `team-admin`); group-level "admin" is modeled as its own group type, not a built-in.
-- Gate the function, scope in the code. The gate cannot see input, so which team, document or row a caller may touch is decided inside the function — e.g. check `ctx.user` against the team's membership (`ctx.api.groups.listUserMemberships`) or filter on `ctx.user!.userId` — never by trusting an id from the input.
-- External identifiers: never trust a client-supplied provider id (a payment `customer_id`) for a server-side action — a caller could substitute another user's id. Keep the user→external-id mapping in a database only your functions write, and resolve the id inside the function from `ctx.user` (`query({ filter: { userId: ctx.user!.userId } })`). The same rule holds for ids the app minted itself (a `householdId`, an `itemId`) once they arrive as function input rather than as something derived server-side — "external" describes where the id came from into this request, not who defined it.
+- **Test as a member.** Owners and admins bypass access rules.
+- **Scope function data in code.** The access rule cannot inspect function input. Validate requested resource IDs and check the caller’s membership or ownership before using them.
+- **Resolve provider IDs from the caller.** Read a trusted user-to-provider mapping using `ctx.user`; accepting a client’s provider ID could expose another account.
+- **Keep trigger-only functions closed to members.** Use `access = "false"` when only a verified webhook should invoke the function. Trigger fires do not evaluate the function gate.
+- **Declare optional variables.** Missing secrets or variables can deny access; guard optional variables with `'KEY' in vars` or `vars.?KEY`.
 
 ## Recipe: subscription entitlement
 
-A paid-SaaS feature gate (Stripe-style billing) ties together four pieces — the rule, the membership that backs it, the provider-id store, and the user-facing checkout. The whole shape:
+Use a group membership as the entitlement, and update it from verified billing events.
 
 **1. The entitlement is a group; the gate checks membership.** A rule can't read a row (above), so the paid-feature gate is membership in an entitlement group, never an `isSubscribed` column. Put the check on every gated function:
 
@@ -132,6 +134,4 @@ What stops a forged call is the webhook's signature verification — a delivery 
 
 **3. Provider ids live in a store only functions write.** Map the provider's `customer_id` to the user in a database the webhook function writes, and read it back inside a function by `ctx.user`, so a caller only ever reaches their own row. Never accept a client-supplied `customer_id`, and the same for any internal id a function would otherwise take from its input (see External identifiers, above).
 
-**4. Checkout and customer-portal are ordinary functions.** "Start a subscription" and "manage billing" are functions with `access = "user.userId != ''"` that resolve the caller's provider id (3) and call the provider's API through an integration (`ctx.integrations.call`, under an `integration:<key>` capability — see the [Integrations guide](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md)) to mint a Checkout or Billing-Portal session URL for the signed-in user and return it. They grant no access themselves; membership changes only when the provider's webhook (step 2) reports the subscription started or ended.
-
-Net: the gate (1) trusts only group membership; membership (2) is written only by the verified webhook; the provider id (3) is never client-trusted; the checkout/portal functions (4) never grant access directly.
+**4. Checkout and customer-portal functions return provider URLs.** Resolve the signed-in user’s provider ID, call the integration, and return the URL. These functions do not grant membership; the verified webhook does.

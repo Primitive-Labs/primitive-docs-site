@@ -1,6 +1,23 @@
 # Agent Guide to Primitive Error Handling
 
-Every 4xx/5xx response the platform produces carries a **stable, machine-readable `code`**. Branch on the code; never match on the human text. An app that localizes its interface needs the cause, and the HTTP status alone does not carry it — a 403 can be "not a member of this app" or "this document's access rule says no", and those are different sentences in every language the app ships.
+Use an error’s `code` to choose a user-facing message or recovery action. Codes distinguish failures that share an HTTP status. Human-readable messages can change; do not parse them.
+
+## Branching by Code
+
+{{ example: errors/branch-by-code }}
+
+{{#lang ts}}
+Read `JsBaoApiError.code`, including for file transfers and failed token refreshes.
+
+`JsBaoApiError` is the transport error; `isJsBaoError` deliberately excludes it, so a client-side `JsBaoError` (`LOCK_TIMEOUT`, `INVALID_ARGUMENT`, …) and a server code never get confused even when they spell a value the same way.
+
+The CLI's `ApiError` exposes the same value as `code`, with `statusCode` and `details` beside it.
+{{/lang}}
+{{#lang swift}}
+Read `HttpError.serverCode`, including for file transfers and failed token refreshes. Use `serverMessage` for diagnostics and `body` for the raw response.
+
+`HttpError.authCode` gives a typed `AuthCode` when `serverCode` matches a known case; fall back to the raw `serverCode` string for codes the SDK does not yet name. Client-side sentinels use a `CLIENT_` prefix, so they never collide with a server code.
+{{/lang}}
 
 ## The Envelope
 
@@ -22,7 +39,7 @@ Every 4xx and 5xx response with a body, on both `/app/{appId}/api/*` and `/admin
 | `error` | Human-readable text, written for a developer reading a log. **It may change without notice** — never parse it, never show it to a user. |
 | `status` | The numeric HTTP status, repeated in the body. |
 | `timestamp` | ISO 8601, when the server produced the failure. |
-| `details` | Present only when a handler attaches structured context (offending field names on a validation failure, `retryAfter` on a rate limit). |
+| `details` | Present only when a handler attaches structured context: offending field names on a validation failure, or `retryAfter` (seconds) on a `RATE_LIMITED` refusal such as a document access request or a sign-in verification. Exception: a server function's `FUNCTION_RATE_LIMITED` carries `retryAfter` at the top level of the body, plus a `Retry-After` header. |
 
 Two field rules an agent must encode:
 
@@ -56,30 +73,9 @@ Any other 4xx is `INVALID_REQUEST`; any other 5xx is `INTERNAL_ERROR`.
 
 **The 409 distinction matters.** A generic conflict — a duplicate name, a resource that already exists — is `STATE_CONFLICT`. `CONFLICT` is reserved for the optimistic-concurrency refusal, which also carries `serverModifiedAt` and `expectedModifiedAt`. Do not route a `STATE_CONFLICT` through a merge/retry-on-conflict path.
 
-## Branching by Code
+## Gotchas
 
-{{ example: errors/branch-by-code }}
-
-{{#lang ts}}
-The code is `JsBaoApiError.code` (`string | undefined`). It is populated on every failing path the client has, including `fetchBinary`'s raw-body path and the terminal error thrown after a refused token refresh — that one keeps its `HTTP 401: Invalid credentials` message and carries the original 401's `body` and `code` alongside it.
-
-`JsBaoApiError` is the transport error; `isJsBaoError` deliberately excludes it, so a client-side `JsBaoError` (`LOCK_TIMEOUT`, `INVALID_ARGUMENT`, …) and a server code never get confused even when they spell a value the same way.
-
-The **raw bytes** transfers carry it too — a blob upload or download reads the response body as bytes rather than through the typed request path, and parses the same envelope: the error keeps its message and carries the code beside it.
-
-The code on those paths is read by the client, and `js-bao-wss-client` ships pre-built files — so what an app sees is decided by the client version it installs, not by the source. Keep the dependency current.
-
-The CLI's `ApiError` exposes the same value as `code`, with `statusCode` and `details` beside it.
-{{/lang}}
-{{#lang swift}}
-The code is `HttpError.serverCode` (`String?`), with the parsed human text in `serverMessage` and the raw body in `body`. It is populated on every failing path, including the terminal error thrown after a refused token refresh — that one keeps its `Invalid credentials` message and carries the original 401's `body` and `serverCode` alongside it.
-
-The **raw bytes** transfers carry it too — a blob upload or download, a bucket transfer and an avatar upload read the response body as bytes rather than through the typed request path, and parse the same envelope: the error keeps its message and carries `serverCode` beside it.
-
-`HttpError.authCode` gives a typed `AuthCode` when `serverCode` matches a known case; fall back to the raw `serverCode` string for codes the SDK does not yet name. Client-side sentinels use a `CLIENT_` prefix, so they never collide with a server code.
-{{/lang}}
-
-## When There Is No Code
+### When There Is No Code
 
 `code` is absent when the response **did not come from the platform's error path**: an intermediary answering on its own (a CDN's HTML 502, a proxy timeout page). Treat it as an unknown failure with a generic message. Do not invent a code for it, and do not infer one from the status — the platform's own defaults are already applied server-side, so an absent code means the platform did not answer.
 

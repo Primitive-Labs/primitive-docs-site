@@ -1,0 +1,1 @@
+import{_ as a,c as t,o as r,aj as i}from"./chunks/framework.Id7s26SP.js";const u=JSON.parse('{"title":"Primitive","description":"","frontmatter":{},"headers":[],"relativePath":"index.md","filePath":"index.md"}'),s={name:"index.md"};function o(n,e,l,d,h,c){return r(),t("div",null,[...e[0]||(e[0]=[i("",33)])])}const g=a(s,[["render",o]]);export{u as __pageData,g as default};

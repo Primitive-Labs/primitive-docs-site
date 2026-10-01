@@ -1,25 +1,10 @@
 # Agent Guide to Primitive Notifications
 
-Multi-channel notifications: a durable in-app inbox, live WebSocket delivery while connected, and push (iOS/Android) once a device is registered. Client SDK surface is `client.notifications.*`, available on both the JS and Swift clients; a server function sends from the server with `ctx.api.notifications.send`.
+Notifications create a durable inbox entry and can send push alerts to registered devices. Use `client.notifications` in the app and `ctx.api.notifications.send` in a server function.
 
-## Client SDK Reference
+## Sending
 
-| Call | Returns | Notes |
-|---|---|---|
-| `client.notifications.list(options?)` | `{ items: NotificationInfo[], unreadCount, cursor? }` | `options: { limit?, cursor? }`. Newest first. |
-| `client.notifications.unreadCount()` | `{ unreadCount }` | Bounded scan (capped at 250 rows) — an approximation for very large inboxes, not a maintained counter. |
-| `client.notifications.markRead(notificationId)` | `NotificationInfo` | Idempotent — marking an already-read row again just returns it. |
-| `client.notifications.markAllRead()` | `{ updated }` | Scans up to 10 pages of 250 rows each. |
-| `client.notifications.send(params)` | `{ results: NotificationSendResult[], deduplicated?, deduplicatedChannels? }` | **Requires app admin permission** — a member-level caller gets `403`. |
-| `client.notifications.registerDevice(params)` | `PushDeviceInfo` | Upsert by token — re-registering the same token refreshes metadata instead of duplicating. |
-| `client.notifications.listDevices()` | `{ items: PushDeviceInfo[] }` | Caller's own devices only. |
-| `client.notifications.unregisterDevice(token)` | `{ deleted }` | Call on logout so a signed-out device stops receiving pushes for that account. |
-
-`NotificationInfo`: `{ notificationId, title, body, iconUrl?, deepLink?, read, readAt?, expiresAt?, sourceRef?, createdAt }`.
-
-`PushDeviceInfo`: `{ tokenId, tokenSuffix?, platform: "ios"|"macos"|"android", environment: "sandbox"|"production", bundleId?, deviceName?, appVersion?, lastSeenAt?, createdAt }` — `tokenSuffix` is the **last 8 characters only**; the full token is never echoed back once registered. A caller can hold up to 100 registered devices; the 101st registration for the same user fails.
-
-### Sending
+Sending requires app-admin permission. Use a server function for member-triggered notifications.
 
 ```swift
   let response = try await client.notifications.send(
@@ -38,9 +23,26 @@ Multi-channel notifications: a durable in-app inbox, live WebSocket delivery whi
   }
 ```
 
-`SendNotificationParams`: `{ title, body, target: { userId }, channels?: string[], iconUrl?, deepLink?, expiresAt?, sourceRef?, idempotencyKey? }`. `channels` defaults to `["in-app"]` when omitted. Valid `channels` today: `"in-app" | "ios" | "android"` — an unrecognized channel name throws (`UnsupportedChannelError`, see Errors below). `expiresAt` (ISO date) auto-deletes the inbox row after that time; it does not affect push delivery.
+Set `title`, `body`, and `target.userId`. `channels` defaults to `["in-app"]`; add `"ios"` or `"android"` for push. `expiresAt` removes the inbox entry after an ISO date without affecting push delivery.
 
-`NotificationSendResult` (one per requested channel): `{ channel, status: "delivered"|"failed"|"skipped"|"invalidated", notificationId?, delivered?, failed?, invalidated?, tokenAttempts?, skipReason?, retryable? }`. `notificationId` is the durable inbox row id (in-app only). `delivered`/`failed`/`invalidated` are per-token tallies for push — one user can hold several device tokens, so a single "ios" entry can partially succeed. `tokenAttempts` is the per-token detail: `{ tokenSuffix, status, httpStatus?, reason?, retryable? }`. `status: "invalidated"` means every token for that channel was dead (evicted) — treat it the same as a failure for delivery purposes, though it is not itself a caller error.
+Check `results` for each requested channel. A result can be delivered, failed, skipped, or invalidated. For push, inspect `tokenAttempts` when some devices need a retry.
+
+## Client SDK Reference
+
+| Call | Returns | Notes |
+|---|---|---|
+| `client.notifications.list(options?)` | `{ items: NotificationInfo[], unreadCount, cursor? }` | `options: { limit?, cursor? }`. Newest first. |
+| `client.notifications.unreadCount()` | `{ unreadCount }` | Bounded scan (capped at 250 rows) — an approximation for very large inboxes, not a maintained counter. |
+| `client.notifications.markRead(notificationId)` | `NotificationInfo` | Idempotent — marking an already-read row again just returns it. |
+| `client.notifications.markAllRead()` | `{ updated }` | Scans up to 10 pages of 250 rows each. |
+| `client.notifications.send(params)` | `{ results: NotificationSendResult[], deduplicated?, deduplicatedChannels? }` | **Requires app admin permission** — a member-level caller gets `403`. |
+| `client.notifications.registerDevice(params)` | `PushDeviceInfo` | Upsert by token — re-registering the same token refreshes metadata instead of duplicating. |
+| `client.notifications.listDevices()` | `{ items: PushDeviceInfo[] }` | Caller's own devices only. |
+| `client.notifications.unregisterDevice(token)` | `{ deleted }` | Call on logout so a signed-out device stops receiving pushes for that account. |
+
+See the generated client reference for complete response types.
+
+Device lists return only the last eight token characters. A user can register up to 100 devices.
 
 ### Reading and managing the inbox
 
@@ -72,7 +74,7 @@ Multi-channel notifications: a durable in-app inbox, live WebSocket delivery whi
   print(device.tokenSuffix ?? "")
 ```
 
-`RegisterPushDeviceParams`: `{ token, platform: "ios"|"macos"|"android", environment: "sandbox"|"production", bundleId?, deviceName?, appVersion? }`. `environment` matters for `ios`/`macos` (APNs sandbox vs production certificates); FCM (`android`) has no sandbox tier — always pass `"production"` for Android tokens. Registering a token already owned by a different user **reassigns it** to the calling user (deliberate shared-device semantics: a token identifies a device, so when a different account signs in and re-registers, delivery must follow the signed-in user).
+Register the device token with its platform and environment. Use the matching Apple sandbox or production environment; use `production` for Android. Re-registering a token transfers delivery to the currently signed-in user.
 
 ## Live WebSocket Event
 
@@ -88,11 +90,11 @@ Multi-channel notifications: a durable in-app inbox, live WebSocket delivery whi
 
 Subscribe through `client.stream(for:)` — a `for await` loop in a `.task`, which unsubscribes when the loop ends — or through `client.observeOnMainActor(_:handler:)` when you need a main-actor callback, holding the returned `EventSubscription` for as long as you want the handler live.
 
-This is a **best-effort real-time mirror**, not the source of truth — it fires only if the recipient is connected at send time. `client.notifications.list()` (the durable inbox row) is authoritative; a client that reconnects after a missed event simply sees the notification the next time it lists or checks `unreadCount()`. Don't build read/unread state purely off this event — always reconcile against `list()`/`unreadCount()`.
+Use live events for immediate UI updates. Read `list()` or `unreadCount()` after reconnecting to recover updates missed while disconnected.
 
 ## Sending from a Server Function
 
-A server function sends through `ctx.api.notifications.send({ body })`, where `body` is the same object the client's `send()` takes — `title`, `body`, `target: { userId }`, and the optional `channels`, `iconUrl`, `deepLink`, `expiresAt`, `sourceRef`, `idempotencyKey`. It returns the same `{ results, deduplicated?, deduplicatedChannels? }`. Function code acts as the system, so the admin-only restriction is met by construction and there is no capability line to declare; the function's own `access` gate decides who may cause the send.
+Call `ctx.api.notifications.send({ body })` with the same send fields. The function’s access rule controls who may trigger the send.
 
 ```ts
 import { defineFunction } from "primitive-functions";
@@ -136,7 +138,7 @@ Sends are capped **per app, per hour, per channel**: 5,000 in-app notifications 
 | `NotificationTargetNotFoundError` | `target.userId` is not a member of the app | 404 |
 | `NotificationRateLimitError` | Every requested channel was blocked by its hourly quota | 429 |
 
-## Footguns
+## Gotchas {#footguns}
 
 - **`send()` needs app admin permission**, not just app membership. A member-level caller gets `403` — this is deliberate (unrestricted member-level send would let any signed-in user spam the tenant's push/in-app quota).
 - **Don't rely on the `notification` WS event as your only read path.** It's a best-effort live mirror; a disconnected recipient misses it entirely. Always back it with `list()` / `unreadCount()` for the authoritative state.
@@ -145,11 +147,3 @@ Sends are capped **per app, per hour, per channel**: 5,000 in-app notifications 
 - **`registerDevice` reassigns tokens across users.** Registering a token already owned by a different account moves it to the new caller — correct for shared-device sign-out/sign-in, but don't assume a token uniquely and permanently identifies one user.
 - **`environment` must match the build.** A production app build presenting a token issued under Apple's sandbox APNs environment (or vice versa) registers fine but silently fails to deliver — `environment` is not validated against the token itself.
 - **Channels are additive, not implicit.** Omitting `channels` sends `"in-app"` only — a push notification never goes out unless `"ios"` / `"android"` is explicitly requested (and the user has a registered device for it).
-
-## Tips for Coding Agents
-
-1. Always set `idempotencyKey` when a send happens inside a task step or any other retryable call path.
-2. Check `results[].status` per channel rather than assuming a resolved promise means full delivery — a partially-successful multi-channel send still resolves normally.
-3. Register a device immediately after the user grants OS-level notification permission, and unregister on logout.
-4. Treat the `notification` WS event as a UI nicety (badge/toast), never as the system of record — reconcile against `list()`/`unreadCount()`.
-5. From a server function, branch on `results[].status`, not just on whether the call threw — a fully-skipped/failed send still resolves.

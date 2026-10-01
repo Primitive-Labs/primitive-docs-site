@@ -1,8 +1,10 @@
 # Agent Guide to Primitive Locks
 
-A **named lock** is a mutual-exclusion primitive keyed by an app-scoped, caller-chosen string. Every acquirer of a key — client code and server functions — is serialized against every other acquirer of that same key in the app. Each lock is a **lease**: acquire it for a bounded TTL; if the holder crashes it never releases, the lease expires and the next acquirer takes over. Locks are cooperative — they coordinate willing participants, and holding one grants no rights over data. *Who* may take which key is a separate, opt-in question, answered by [Access Control](#access-control) below. The client surface is `client.locks.*`; a server function uses `ctx.api.locks.*`. Keys are tenant-isolated — the same string in two apps is two independent locks.
+A **named lock** coordinates callers using the same key within an app. Each lock is a lease that expires unless renewed. Use `client.locks` in client code and `ctx.locks` (or the one-shot `ctx.api.locks`) in server functions.
 
-## When to Reach for a Lock
+All participating operations must acquire the lock. Holding it does not grant data access; configure [access rules](#access-control) separately.
+
+## Choosing a lock
 
 A lock is a last resort. Rule out cheaper serialization before acquiring one:
 
@@ -11,34 +13,7 @@ A lock is a last resort. Rule out cheaper serialization before acquiring one:
 - **Guard the write with a conditional write** instead of locking around it — a `condition` on the record write (a field-equality precondition, commonly a `version` field; in a server function, `ctx.db(id, "<type>").model("<Model>").patch(recordId, { data, condition })`) checked in the same transaction as the write. This is the actual integrity boundary in most "concurrent workers hit the same record" cases: the database, not a held lock, guarantees exactly one writer succeeds. See [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md).
 - **For scheduled work, use a cron trigger's `overlapPolicy`** instead of locking inside the job body — `"skip"` (the default) already refuses to start a firing while the previous one is still running. A server function's cron trigger carries it: see [Server Functions — Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers).
 
-Reach for a lock only when none of these fit: a critical section spanning multiple independent writes, or non-database work (an external API call, a multi-step task) that must run exclusively. Even then, a held lease is not a correctness guarantee for a long-running critical section — see [Sizing the Lease](#sizing-the-lease): a lease that expires mid-operation lets a second run in.
-
-## Client SDK Reference
-
-{{#lang ts}}
-| Call | Returns | Notes |
-|---|---|---|
-| `client.locks.acquire(key, { ttlMs, timeoutMs })` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `LockTimeoutError` when `timeoutMs` elapses first. |
-| `client.locks.tryAcquire(key, { ttlMs })` | `LockHandle \| null` | Single non-blocking attempt; `null` when the key is held by another caller. |
-| `client.locks.release(handle)` | `{ released: boolean, reason? }` | `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
-| `client.locks.renew(handle, { ttlMs })` | `{ renewed: boolean, leaseExpiresAt?, reason? }` | `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
-| `client.locks.status(key)` | `LockStatus` | `{ held: false }`, or `{ held: true, heldBy, holderKind, holderRunId, owner, acquiredAt, leaseExpiresAt }`. Reports `held: false` once the lease has expired. |
-| `client.locks.list()` | `{ locks: LockListEntry[] }` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
-
-`LockHandle`: `{ key, handleId, leaseExpiresAt }`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttlMs` is required on every acquire and is capped at 24h server-side.
-{{/lang}}
-{{#lang swift}}
-| Call | Returns | Notes |
-|---|---|---|
-| `client.locks.acquire(key:ttl:timeout:)` | `LockHandle` | Blocks (client-side poll loop) until acquired; throws `JsBaoError` with `code == .lockTimeout` when `timeout` elapses first. |
-| `client.locks.tryAcquire(key:ttl:)` | `LockHandle?` | Single non-blocking attempt; `nil` when the key is held by another caller. |
-| `client.locks.release(_ handle:)` | `LockReleaseResult` | `released`, plus `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
-| `client.locks.renew(_ handle:ttl:)` | `LockRenewResult` | `renewed`, `leaseExpiresAt`, and `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
-| `client.locks.status(key:)` | `LockStatus` | `held`, plus `heldBy`, `holderKind`, `holderRunId`, `owner`, `acquiredAt`, `leaseExpiresAt` while held. Reports `held == false` once the lease has expired. |
-| `client.locks.list()` | `LockListResult` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
-
-`LockHandle`: `key`, `handleId`, `leaseExpiresAt`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttl` and `timeout` are `TimeInterval`s in **seconds**. `ttl` is required on every acquire and is capped at 24h server-side.
-{{/lang}}
+Reach for a lock only when none of these fit: a critical section spanning multiple independent writes, or non-database work (an external API call, a multi-step task) that must run exclusively. Even then, a held lease is not a correctness guarantee for a long-running critical section — see [lease expiry](#gotchas-lease-expiry): a lease that expires mid-operation lets a second run in.
 
 ### Acquire and release
 
@@ -63,40 +38,36 @@ Reach for a lock only when none of these fit: a critical section spanning multip
 `JsBaoError` with `code == .lockTimeout` is thrown only by the blocking `acquire(key:ttl:timeout:)` when it reaches `timeout` without winning the key. Its `details` carry `key` and `timeoutMs` (the elapsed wait in milliseconds, as the server reports it). Branch on it to skip or reschedule rather than treating contention as a hard failure. `tryAcquire` never throws it — it returns `nil`.
 {{/lang}}
 
-## Sizing the Lease
-
-**The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
-
-## Re-taking Your Own Lease
-
-A handle is the only thing that frees a lock, so a caller that loses its handle — a task run the platform resets, a process that restarts — can neither release its key nor acquire it. Name an `owner` on acquire and it can take its own lease back.
+## Client SDK Reference
 
 {{#lang ts}}
-```ts
-const handle = await client.locks.tryAcquire(key, { ttlMs: 60_000, owner: myRunId });
-```
+| Call | Returns | Notes |
+|---|---|---|
+| `client.locks.acquire(key, { ttlMs, timeoutMs })` | `LockHandle` | Blocks until acquired — each attempt asks the server to wait up to 30 seconds for the key; throws `LockTimeoutError` when `timeoutMs` elapses first. |
+| `client.locks.tryAcquire(key, { ttlMs })` | `LockHandle \| null` | Single non-blocking attempt; `null` when the key is held by another caller. |
+| `client.locks.release(handle)` | `{ released: boolean, reason? }` | `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
+| `client.locks.renew(handle, { ttlMs })` | `{ renewed: boolean, leaseExpiresAt?, reason? }` | `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
+| `client.locks.status(key)` | `LockStatus` | `{ held: false }`, or `{ held: true, heldBy, holderKind, holderRunId, owner, acquiredAt, leaseExpiresAt }`. Reports `held: false` once the lease has expired. |
+| `client.locks.list()` | `{ locks: LockListEntry[] }` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
+
+`LockHandle`: `{ key, handleId, leaseExpiresAt }`. `release` and `renew` require the `handleId`, so a caller can't free or extend a lock it no longer holds. `ttlMs` is required on every acquire and is capped at 24h server-side.
 {{/lang}}
 {{#lang swift}}
-```swift
-let handle = try await client.locks.tryAcquire(key: key, ttl: 60, owner: myRunId)
-```
+| Call | Returns | Notes |
+|---|---|---|
+| `client.locks.acquire(key:ttl:timeout:)` | `LockHandle` | Blocks until acquired — each attempt asks the server to wait up to 30 seconds for the key; throws `JsBaoError` with `code == .lockTimeout` when `timeout` elapses first. |
+| `client.locks.tryAcquire(key:ttl:)` | `LockHandle?` | Single non-blocking attempt; `nil` when the key is held by another caller. |
+| `client.locks.release(_ handle:)` | `LockReleaseResult` | `released`, plus `reason`: `"not_holder"` (stale/wrong handle) or `"not_held"` (already free). The handle carries its own key. |
+| `client.locks.renew(_ handle:ttl:)` | `LockRenewResult` | `renewed`, `leaseExpiresAt`, and `reason: "lease_lost"` when the handle no longer matches — the lease already lapsed and the key was taken over. |
+| `client.locks.status(key:)` | `LockStatus` | `held`, plus `heldBy`, `holderKind`, `holderRunId`, `owner`, `acquiredAt`, `leaseExpiresAt` while held. Reports `held == false` once the lease has expired. |
+| `client.locks.list()` | `LockListResult` | Every currently-held lock in the app. **Requires app admin permission** — a member-level caller gets `403`. |
+
+`LockHandle` contains `key`, `handleId`, and `leaseExpiresAt`. Pass the handle to release or renew. Durations are in seconds; a lease is capped at 24 hours.
 {{/lang}}
 
-Presenting the owner that already holds the key succeeds with a **fresh handle** and a fresh lease; the handle the previous acquire minted is fenced — `release` on it answers `not_holder` and `renew` answers `lease_lost`. The guarantee is one current handle at every instant, with every replaced handle fenced, so the acquire that lost the key can neither release it nor renew it.
+## Gotchas: lease expiry
 
-It is **not** a way to interrupt the previous holder. Nothing stops code that is already running; it runs on until it next talks to the lock and is told it is not the holder. Re-take when the earlier attempt is known to be gone — a run that was reset, naming itself with `owner: ctx.runId`.
-
-Three things must match, not just the owner:
-
-- **the same principal** — the same signed-in user, or the same function;
-- **the same kind of caller** — a function's hold is re-taken by that function's run, a member's own hold by that member. The owner is readable off `status`, so without this anyone who could read it could take the hold over; a member who starts a task cannot rotate or release the lease their function holds;
-- **the same owner string**, exactly.
-
-Everything else is refused with the ordinary contention shape, and a hold made with **no** owner is never re-entered — omit `owner` and the lock is strictly non-reentrant.
-
-**Choosing an owner.** Name the run (`ctx.runId` inside a server function), or the work a run key coalesces. Never a static string: two unrelated callers presenting one would re-enter each other's hold, which is the opposite of a lock.
-
-`status` reports the owner, so a refused caller can tell its own hold from another's.
+**The lease does not renew itself.** Size the TTL to comfortably cover the work done while holding the lock. If the lease expires mid-operation, another acquirer can take the key and run concurrently — the exact overlap the lock exists to prevent. For long or variable-duration work, either set a generous TTL or call `renew` with a fresh one before the current lease expires. A `renew` that comes back not renewed, with `reason: "lease_lost"`, means the lease already lapsed and the key changed hands — stop and re-acquire.
 
 ## Access Control
 
@@ -126,6 +97,30 @@ primitive config push --only rule-set/lock-policy
 - **`release` is never rule-gated.** The handle minted at acquire is itself proof of holding the key, so a caller can always free a key it holds — even if a policy change mid-hold has already revoked its `renew`. If it never releases, the lease reclaims the key on its own.
 - **Server functions are unaffected**: a function's `ctx.api.locks.*` calls carry the app's authority and never pass through this rule — the function's own `access` gate governs who may run it. `locks/status` stays readable by any member; `locks list` remains admin-only.
 
+## Re-taking Your Own Lease
+
+A handle is the only thing that frees a lock, so a caller that loses its handle — a task run the platform resets, a process that restarts — can neither release its key nor acquire it. Name an `owner` on acquire and it can take its own lease back.
+
+{{ example: locks/try-acquire-owner }}
+
+Presenting the owner that already holds the key succeeds with a **fresh handle** and a fresh lease; the handle the previous acquire minted is fenced — `release` on it answers `not_holder` and `renew` answers `lease_lost`. The guarantee is one current handle at every instant, with every replaced handle fenced, so the acquire that lost the key can neither release it nor renew it.
+
+It is **not** a way to interrupt the previous holder. Nothing stops code that is already running; it runs on until it next talks to the lock and is told it is not the holder. Re-take when the earlier attempt is known to be gone — a run that was reset, naming itself with `owner: ctx.runId`.
+
+Three things must match, not just the owner:
+
+- **the same principal** — the same signed-in user, or the same function;
+- **the same kind of caller** — a function's hold is re-taken by that function's run, a member's own hold by that member. The owner is readable off `status`, so without this anyone who could read it could take the hold over; a member who starts a task cannot rotate or release the lease their function holds;
+- **the same owner string**, exactly.
+
+Everything else is refused with the ordinary contention shape, and a hold made with **no** owner is never re-entered — omit `owner` and the lock is strictly non-reentrant.
+
+**Choosing an owner.** Name the run (`ctx.runId` inside a server function), or the work a run key coalesces. Never a static string: two unrelated callers presenting one would re-enter each other's hold, which is the opposite of a lock.
+
+`status` reports the owner, so a refused caller can tell its own hold from another's.
+
+{{ example: locks/status-owner }}
+
 ## CLI
 
 `primitive locks` inspects and scripts the same namespace.
@@ -147,8 +142,8 @@ primitive locks release portfolio-import:user-123 --handle 01HXY...
 
 ## From a server function
 
-A server function takes a lock through `ctx.api.locks.tryAcquire` / `renew` / `release` / `status` — the same routes, with the same bodies (`{ key, ttlMs, owner }` to acquire, `{ key, handle: { handleId } }` to release). There is no blocking acquire and no declarative lock on the function side: the pattern is a single `tryAcquire` and a branch on `acquired`. A function's lock calls carry the app's authority, so a `lock` rule set never refuses them. Under the task runtime, acquire and release **live on every slice, outside `step.do`**, with `owner: ctx.runId` (or `ctx.trigger.runKey ?? ctx.runId` when a run key coalesces triggers) — see [Server Functions — Locks](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#locks) for the full pattern and Re-taking Your Own Lease above for the owner rule.
+A server function waits for a lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs }, fn)` — acquire, run `fn`, release in `finally`; throws `LOCK_TIMEOUT` without running `fn` when the key is not acquired within `timeoutMs` — or with `ctx.locks.acquire(key, { ttlMs, timeoutMs, owner? })`, which answers `{ acquired: true, handle }` or `{ acquired: false, timedOut: true, … }`, and `ctx.locks.release(handle)`. The wait is the same server-side wait, up to 30 seconds per attempt. The owner defaults to `ctx.runId`, so a run never waits on its own hold. A request invocation must fit the whole wait in its remaining budget or the call fails `FUNCTION_RUNTIME_REFUSED`; a task's wait is durable across resets. The one-shot calls are `ctx.api.locks.tryAcquire` / `renew` / `release` / `status` — the same routes, with the same bodies (`{ key, ttlMs, owner, waitMs }` to acquire, `{ key, handle: { handleId } }` to release). A function's lock calls carry the app's authority, so a `lock` rule set never refuses them. See [Server Functions — Locks](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#locks) for the full pattern and Re-taking Your Own Lease above for the owner rule.
 
 ## Rate Limiting
 
-Acquire attempts are capped at **600 per user per hour**. A blocking `acquire()` counts each poll against this limit and handles a rate-limit response internally — it keeps waiting within the acquire timeout and raises the acquire-timeout error if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.
+Acquire attempts are capped at **600 per user per hour**. Each attempt counts once however long the server waited on it, so a blocking `acquire()` spends one per half-minute of waiting plus one per early answer it retries, and handles a rate-limit response internally — it keeps waiting within the acquire timeout and raises the acquire-timeout error if it never wins, rather than surfacing the limit. A single `tryAcquire()` that trips the limit surfaces the rate-limit error (`429`) to the caller.

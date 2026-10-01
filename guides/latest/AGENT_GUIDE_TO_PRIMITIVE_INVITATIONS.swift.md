@@ -30,12 +30,9 @@ Guidelines for AI agents implementing app membership: access modes, invitations 
 
 ## Mental Model
 
-App membership in Primitive is built from a small set of primitives the client cares about, plus several internal primitives the platform manages on your behalf.
+Invitations grant app membership. Sharing with a new user by email also creates pending access, which takes effect when the recipient signs up. Use the document, group, or collection API to grant access; the platform manages pending state.
 
-**Client-facing primitives:**
-
-| Primitive | Grants | Scope |
-|-----------|--------|-------|
+-----------|--------|-------|
 | `AppInvitation` | Right to join the app | App |
 | `AppMembership` | Membership in an app | App |
 
@@ -53,18 +50,6 @@ The deferred types make email-based sharing work — the platform remembers the 
 1. If you have a `userId` → write the direct membership/grant record.
 2. If you only have an email → write the same record by email; the platform handles everything else. No manual "accept" call is needed for the standard email-match path — deferred grants resolve automatically when the recipient signs in with a matching email.
 3. Use `client.invitations.accept(inviteToken)` only for cross-identity acceptance (invited at one email, signed in as another) or an existing signed-in user binding a fresh grant.
-
----
-
-## Critical Rules
-
-1. **Always accept email in user-facing flows.** Users know each other's emails, not userIds. The server resolves the userId or creates a deferred grant.
-
-2. **Never assume a deferred grant is immediate.** Email-based grants resolve at signup, not at write time. Don't show "Alice is a member" until she actually has an `AppMembership` row (i.e. her `addMember`/share response had a direct `status`, not `"pending_signup"`).
-
-3. **Check member-invitation quota before showing invite UI.** A member with a 0 quota will hit a 403; hide the button instead.
-
-4. **Cancel pending shares with the right call.** Email-based shares/group-adds attached to an `AppInvitation` do *not* auto-cancel when you remove a single share. Cancel one pending share by email on the per-resource endpoint (`documents.removePermission(docId, { email })`, `groups.removeMember(type, id, { email })`, `collections.removeMember(collectionId, ...)`), or cancel everything (the invite + all pending shares/group/collection adds linked to it) with `client.invitations.delete(invitationId)`. There is **no `client.invitations.revoke()`**.
 
 ---
 
@@ -106,20 +91,7 @@ primitive waitlist remove <waitlist-id>                  # drop an entry
 
 ### API surface
 
-```swift
-client.invitations.create(params: CreateInvitationParams) async throws -> AppInvitationInfo   // email, role?, expiresAt?, source?, note?, sendEmail?
-client.invitations.list(limit:cursor:) async throws -> InvitationListResult                   // .items / .nextCursor   (admin/owner: whole app; member: own only)
-client.invitations.delete(invitationId:) async throws -> InvitationDeleteResult               // CASCADES to deferred grants (admin/owner: any; member: own only, else 403)
-client.invitations.quota() async throws -> InvitationQuota                                    // .used / .limit / .remaining / .unlimited
-client.invitations.get(invitationId:) async throws -> AppInvitationInfo                       // includes inviteToken + status
-client.invitations.accept(inviteToken:) async throws -> AcceptInviteResult                    // authenticated cross-identity acceptance
-client.invitations.listDeferredGrants(type:email:limit:) async throws -> DeferredGrantListResult  // admin debug only
-client.invitations.revokeDeferredGrant(deferredId:type:) async throws -> DeferredGrantRevokeResult  // type: .document | .group
-```
-
-`AppInvitationInfo` rows returned by `list()` carry: `invitationId`, `email`, `role`, `invitedBy`, `invitedAt`, `expiresAt`, `accepted`, `acceptedAt`, `source`, `note`, `inviteToken`. The `status` field (`.pending | .expired | .accepted`) is computed server-side and only returned by `get(invitationId:)`, not by `list()` — derive it on the client from `accepted` + `expiresAt` if you need it on a list row.
-
-The cascading delete is `client.invitations.delete(id)` — there is **no `client.invitations.revoke()`**.
+Use `create`, `list`, `get`, `delete`, `quota`, and `accept` to manage invitations. Admins and owners manage all invitations; members manage their own. See the examples below and the generated client reference for signatures.
 
 ### Admin / member create
 
@@ -172,19 +144,7 @@ Set both in the `[invitations]` table of `app.toml` — `enabled` and `limit` (`
 
 ### Server error codes (in the HTTP error body)
 
-The server returns these on `invitations.create`:
-
-| Body shape | When |
-|------------|------|
-| `{ error: "INVITATION_LIMIT_REACHED", used, limit }` | Member at quota |
-| `{ error: "MEMBER_INVITATIONS_DISABLED" }` | App has `memberInvitationsEnabled: false` and caller is a member |
-| Plain text `"Members can only invite with role 'member'"` | Member tried `role: "admin"` |
-| Plain text `"User already has a pending invitation"` | Duplicate create for the same email |
-| Plain text `"User already exists in this app"` | Email is already an `AppUser` |
-
-Gate the invite UI on `client.invitations.quota()` up front (a member with member-invites off comes back `remaining: 0`, `unlimited: false` — hide the button) so most of these never fire.
-
-When a send fails, the client throws an `HttpError` carrying a typed `serverCode` + `serverMessage`. Switch on `serverCode == "MEMBER_INVITATIONS_DISABLED"` and surface product copy rather than the raw 403.
+Check `quota()` before showing the invitation form. Handle server codes using the client’s structured error fields; see [Error Handling](AGENT_GUIDE_TO_PRIMITIVE_ERROR_HANDLING.md).
 
 ### Custom invitation emails (`inviteToken`)
 
@@ -199,7 +159,7 @@ When a send fails, the client throws an `HttpError` carrying a typed `serverCode
 
 Capture the `inviteToken` from the mint response if you need to build accept URLs later — the deferred-result fields above carry it on the same call that creates the grant.
 
-For resend / lookup after the initial response is gone, fetch the invitation by id and rebuild the accept URL from its `inviteToken`. The returned record carries `invitationId`, `email`, `role`, `invitedBy`, `invitedAt`, `expiresAt`, `accepted`, `acceptedAt`, `source`, `note`, `inviteToken`, and a computed `status` (`"pending" | "expired" | "accepted"`).
+To resend an invitation, fetch it with `get()` and build a URL from its `inviteToken`. Only an app admin, owner, or the original inviter can read it.
 
 ```swift
   let inv = try await client.invitations.get(invitationId: invitationId)
@@ -208,7 +168,7 @@ For resend / lookup after the initial response is gone, fetch the invitation by 
   // Send `acceptUrl` to `inv.email` from your own email provider.
 ```
 
-Permissions for `invitations.get`: app admin/owner, OR the invitation's original inviter. Members who did not create the invitation receive 403 — `inviteToken` is a bearer credential, so read access is intentionally narrow.
+Treat `inviteToken` as a bearer credential: anyone holding it can redeem the invitation.
 
 ### Token-based acceptance (authenticated caller)
 
@@ -221,19 +181,19 @@ Email-matched signup resolves deferred grants automatically — your app does NO
 
 The accept call (shown in [Accept an invite token](#accept-an-invite-token) above) returns `{ status: "accepted", invitationId, grantsResolved: { groups, documents } }`, and throws `401 INVITE_TOKEN_INVALID` for any bad token (invalid, expired, or already redeemed — the server returns one code to avoid leaking invitation existence).
 
-**Wiring the acceptance flow:** Resolve the incoming invite URL (universal link / custom scheme) with `client.links` — `resolve(userActivity:)` / `resolve(url:)` returns a `.invitation(token:)` target carrying the `inviteToken` (see the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#deep-links-and-universal-links)). When the user is signed in, call `client.invitations.accept(inviteToken)`. When they're signed out, hold the token and pass it to the sign-in method that carries it: `auth.magicLinkVerify(token:inviteToken:)`, `auth.otpVerify(email:code:inviteToken:)`, `auth.passkeyRegisterFinish(..., inviteToken:)`, `signInWithGoogle(..., inviteToken:)`, or `signInWithApple(..., inviteToken:)` — deferred grants then resolve atomically to the signing-in user on a first sign-in, no follow-up `accept` call needed. A repeat sign-in from an existing Apple identity takes a different internal path and does not resolve `inviteToken` this way — call the authenticated `client.invitations.accept(inviteToken:)` immediately after signing in for that case (or for any other post-hoc acceptance). Cover the error state (`INVITE_TOKEN_INVALID` — one code for all bad tokens). See the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) for token persistence across the sign-in round-trip.
+Resolve the URL with `client.links`. Accept immediately when signed in; otherwise retain `inviteToken` and pass it through sign-in. For a returning Apple identity, call `invitations.accept` after sign-in. Handle `INVITE_TOKEN_INVALID` by offering to request another invitation.
 
 ---
 
 ## Deferred Grants
 
-Deferred grants bridge "I have an email" and "they're in the app." When you share a document, add someone to a group, or add them to a collection **by email** and that email isn't yet a user, the platform mints (or reuses) an `AppInvitation` and records the pending grant. The grant-side mechanics live with each resource (documents in the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#sharing-documents), groups in the [Users and Groups guide](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#managing-members)); the resolution lifecycle is below.
+Email-based shares remain pending until the recipient joins. The document, group, and collection APIs manage these grants.
 
 ### Lifecycle
 
 1. Agent writes a grant by email for `alice@outside.com`.
-2. Server creates (or reuses) an `AppInvitation` plus a `DeferredDocumentPermission` / `DeferredGroupAdd`.
-3. Alice receives an invitation email (default flow) or a custom one you sent using `inviteToken`.
+2. The server creates or reuses an invitation and records the pending access.
+3. Send the invitation email with `sendEmail: true`, or deliver a custom link using `inviteToken`.
 4. Alice becomes a user — via one of two paths the **recipient** chooses, not the app.
 
 ### Path A — automatic email-match (the common case)
@@ -297,13 +257,17 @@ Check quota, mint the app invitation, share the project document by email, and a
 
 ---
 
-## Anti-Patterns
+<a id="anti-patterns"></a>
 
-- Calling a method that doesn't exist: `client.invitations.revoke`, `client.deferredGrants.list`. The correct names are `client.invitations.delete`, `client.invitations.listDeferredGrants`.
-- Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share, group add, and collection add linked to that invitation. Use the per-resource `removePermission`/`removeMember` by email.
-- Showing a member invite button without checking `client.invitations.quota()` first — a member with a 0 quota hits a 403.
-- Re-granting access after signup — email-matched deferred grants already resolved (Path A); the user has access.
-- Expecting a WebSocket event when an invitation is accepted — no event fires. Poll `invitations.list()` or refresh on the next user action instead.
+## Gotchas {#critical-rules}
+
+1. **Always accept email in user-facing flows.** Users know each other's emails, not userIds. The server resolves the userId or creates a deferred grant.
+
+2. **Never assume a deferred grant is immediate.** Email-based grants resolve at signup, not at write time. Don't show "Alice is a member" until she actually has an `AppMembership` row (i.e. her `addMember`/share response had a direct `status`, not `"pending_signup"`).
+
+3. **Check member-invitation quota before showing invite UI.** Hide the button when `remaining` is zero and `unlimited` is false.
+
+4. **Choose the cancellation scope.** Use the resource’s `removePermission` or `removeMember` operation to cancel one pending share. `invitations.delete` cancels the invitation and every pending grant attached to it.
 
 ---
 

@@ -18,10 +18,10 @@
     "stampedAt": "2026-09-30",
     "channel": "alpha",
     "packages": {
-      "js-bao-wss-client": "3.4.0",
-      "js-bao": "0.11.0",
-      "primitive-admin": "1.0.62",
-      "primitive-app": "3.1.0"
+      "js-bao-wss-client": "3.4.1",
+      "js-bao": "0.11.1",
+      "primitive-admin": "1.1.0",
+      "primitive-app": "3.1.3"
     }
   },
   "guides": [

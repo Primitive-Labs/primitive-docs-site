@@ -51,7 +51,9 @@ The API is **flat** (`client.blobBuckets.upload(bucketIdOrKey, …)`), not a `.b
   // batchResult: BatchBlobDeleteResult { deleted, blobIds, bucketId }
 ```
 
-`delete` is overloaded: a single id deletes one blob (`{ deleted: boolean }`); an array of up to 500 ids deletes a batch in one call, returning `{ deleted, blobIds, bucketId }` where `deleted` counts the ids processed (duplicates included). The batch is all-or-nothing: every id — including ids that no longer exist — is screened against the bucket's `delete` policy before anything is removed; one denial → 403 naming the blob, nothing deleted. An empty array is a valid no-op (`deleted: 0`). Footgun: a missing id screens with `record.blobCreatedBy == null`, so under an uploader-scoped policy (e.g. `personal-uploads`) retrying a batch whose ids are already gone is **denied** — idempotent cleanup needs a rule that also permits gone blobs (`record.blobCreatedBy == null || record.blobCreatedBy == user.userId`).
+`delete(id)` removes one blob. `delete(ids)` removes up to 500 blobs and returns `{ deleted, blobIds, bucketId }`; an empty array does nothing. The batch checks every ID before deleting anything.
+
+**Gotcha when retrying deletion:** missing blobs still undergo access checks with `record.blobCreatedBy == null`. An uploader-only policy can therefore reject a retry. For idempotent cleanup, allow missing blobs as well: `record.blobCreatedBy == null || record.blobCreatedBy == user.userId`.
 
 From the CLI, `primitive blob-buckets head <bucket-id-or-key> <blob-id>` prints one blob's metadata (size, content type, sha256, tags, uploader, uploaded time) without downloading the bytes — the `getMetadata` call as a command; add `--json` for the raw `BlobInfo`. `primitive blob-buckets delete-blob <bucket-id-or-key> <blob-id...>` deletes one or many — multiple ids go through the batch endpoint as one all-or-nothing call, and `--batch` forces the batch endpoint even for a single id.
 
@@ -75,21 +77,7 @@ Admin/owner only. Deleting a bucket cascades to every blob inside it.
 
 ## Overview
 
-**Blob buckets** — general-purpose storage outside any document context. Each bucket has its own access preset, TTL tier, and supports time-limited signed URLs. **Cap: 100 MB per blob.**
-
-```swift
-  // The bucket key/ID is a positional arg — there is no bucket() context object.
-  try await client.blobBuckets.upload(
-    bucketIdOrKey: "avatars", data: data, filename: filename, contentType: contentType
-  )
-  try await client.blobBuckets.getSignedUrl(
-    bucketIdOrKey: "avatars", blobId: blobId, expiresInSeconds: 3600
-  )
-```
-
-**Decision rule:** use document-scoped blobs when the file's lifetime and access naturally match a document's. Use a bucket for avatars, server-generated files, public assets, anonymous reads via signed URLs, or anything that should live outside any specific document. Document-scoped blobs (10 MB cap, permission inheritance, offline caching) are covered in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
-
----
+Buckets hold files independently of documents. Configure an access preset and a retention tier, then upload and read blobs. A blob can hold up to 100 MB.
 
 ## Bucket configuration
 
@@ -199,7 +187,7 @@ A server function reaches buckets through `ctx.api.blobBuckets` — `upload`, `d
 
 A blob a task run reads as input must outlive the run: a retried or replayed step re-reads the same `blobId`, and deleting the blob between attempts fails the step — and the run — with a not-found error. Don't delete such blobs from outside the run (a cancel path, another function) — put them in a bucket whose TTL tier matches their lifespan and let expiry clean them up.
 
-## Anti-patterns
+## Gotchas
 
 - Storing user-uploaded documents in a bucket when they should be document-scoped blobs with permission inheritance.
 - Leaving a bucket on `permanent` when blobs are only needed briefly. Object storage is billed; pick the shortest tier.

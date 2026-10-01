@@ -18,38 +18,6 @@ capabilities:
 
 The tools are active only in development builds and never ship to production.
 
-## Server Timing
-
-Every REST response from the platform (`/app/{appId}/api/*` and `/admin/api/*`)
-carries a `Server-Timing: total;dur=<int-ms>` header attributing the request's
-server-side handler time. The header is listed in `Access-Control-Expose-Headers`,
-so any HTTP tooling — or the response object of a raw fetch — can read it when
-attributing a slow request to server work vs. transport.
-
-## Response Caching
-
-Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
-handler sets a directive of its own, so no HTTP cache keeps a copy of an
-authenticated response. One endpoint opts out deliberately:
-`GET /avatars/:userId` serves world-readable bytes with
-`public, max-age=31536000, immutable`.
-
-Blob downloads still send an `ETag` and still answer a conditional
-`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
-the body, not an app from revalidating. What it removes is a cache's ability to
-reuse a stored blob body after that 304.
-
-The client enforces the same rule locally, so it holds against a server too old
-to send the header: every `URLSession` it builds sets `urlCache = nil` and
-`requestCachePolicy = .reloadIgnoringLocalCacheData`, and every request it
-builds carries that policy. `URLCache` keys entries by URL alone — it ignores
-`Authorization` — and `URLCache.shared` is disk-backed on iOS, so an
-authenticated response stored there would be readable by a request carrying a
-different token or none. Nothing the client fetches enters it, on any path
-(REST calls, blob bytes, the OAuth code exchange, token refresh). Cookie
-handling is unchanged: the sessions are built from
-`URLSessionConfiguration.default` and keep using `HTTPCookieStorage.shared`.
-
 
 The tools are the **Debug Inspector**: a dev-only panel served by the running app
 and opened in a web browser. The inspector compiles to zero code in release builds
@@ -119,12 +87,7 @@ Create a record by hand:
 
 ### Surfacing your models
 
-Models appear in the Records table automatically — the base `PrimitiveAppState`
-conforms to `InspectableModelHost`, and its default `inspectableModels` reads the
-client's shared cross-document store (one entry per model per open document). A
-model is listed as soon as it's registered (`client.registerModels([...])`) or
-read/written once through its codegen'd facade. The standard path needs no
-inspector glue.
+Registered models appear automatically for each open document. Register a model with `client.registerModels([...])` or use it through its generated model API.
 
 For a hand-built runtime-schema `DynamicModel` that doesn't go through the
 facade, `override` the `open var inspectableModels` and append:
@@ -199,65 +162,19 @@ tab.
 
 ## Performance
 
-A live chronological timeline of every document-level phase event the inspector
-has seen — `loadedFromSqlite`, `loadedFromServer`, `synced`, `syncStateChanged`,
-`closed` — with plain-English labels. Summary cards totalize on-disk vs server
-volume and timing. The whole view derives from the continuous event stream, so new
-events appear the instant they arrive; a filter-by-doc dropdown isolates one
-document's trace when several are syncing at once. Read the timeline to answer
-"what data loaded, from where, in how long?" — each `synced` event is annotated
-with the models that became available on that document.
+Use the timeline to see when documents load and sync. Filter by document to inspect one operation's duration and data source.
 
-## Memory SQL
+## Storage inspection
 
-A live browser and ad-hoc query runner over the in-memory SQLite that backs
-`model.query()` / `count` / `aggregate` / `queryPaged` / `findByUnique`. The engine
-is per-(model, document) and lives entirely in RAM, kept in sync with the
-document's data via an update observer.
-
-- **Model picker + context strip** — the model name and the `documentId` the
-  projection is bound to.
-- **Schema strip** — `PRAGMA table_info` for the active table (name, type, PK, NOT
-  NULL), so you can see what an indexed query actually hits.
-- **Table view** — a true SQL table; each row has a `del` button that routes through
-  the model's delete (document-store → engine projection), not a raw SQL DELETE.
-- **Create row** — a `+ new row` modal, inputs dispatched by field `kind`.
-- **Custom query box** — a SQL textarea (Cmd/Ctrl+Enter to run). Accepts only
-  `SELECT`, `PRAGMA`, and `WITH` (CTE) statements; direct DML is rejected because
-  it would desync the projection from its document-store source of truth.
-- **Polling** — while the tab is active, the catalog + active table refresh every
-  ~2s; a button pauses/resumes (useful for a stable result set).
-
-Useful for: which columns the engine projects for a model, whether stringset
-junction tables populate on writes, whether SQL rows match the records on the
-Documents tab, and how a filter/index translates to SQL.
-
-## SQLite (disk)
-
-Read-only browser over the client's on-disk durability store — the file at
-`<Documents>/JsBaoClient/<appId>:<userId>/jsbao_storage.sqlite`. This is the
-durability layer (encoded document blobs, `meta`, `kv`, `auth`), not the query layer;
-for per-model SQL tables use Memory SQL. Table tabs along the top show each store
-with its row count; clicking loads rows (key, value, metadata, updatedAt),
-most-recently-updated first.
-
-The **diag** toggle opens a resolution trace: the `appId` being scanned, the
-filesystem roots checked, every `appId:*` subdir found (with mtime), the resolved
-storage path, and a file probe (open status, size, journal mode, listed tables,
-row counts pre/post checkpoint). If the tab looks blank, diag says why — typically
-"no logged-in namespace dir yet".
+The inspector includes views for query results and locally stored data. Use them to compare stored values with the records shown under **Documents**. Ad-hoc queries are read-only; use model operations to change records.
 
 ## Events
 
-The full live client event stream as a filterable log: pause,
-auto-scroll, filter-by-type, text filter. The stream is captured continuously (not
-tab-gated), so switching back to this tab shows you didn't miss anything.
+Filter the live client event log by type or text. Pause scrolling while inspecting a sequence.
 
 ## Logs
 
-Inspector-internal log tail — failed actions, internal errors and warnings. It
-self-refreshes while active so failures surface immediately, and an action failure
-re-loads logs so the same error has richer context next time you look.
+Read inspector errors here when an action fails.
 
 ## Validation workflow
 
@@ -269,30 +186,15 @@ re-loads logs so the same error has richer context next time you look.
 5. To cross-check query behavior: Memory SQL → run the same SELECT and compare
 ```
 
-## Security + limits
+## Gotchas when using the inspector
 
-- The whole inspector is behind `#if DEBUG`; release builds open no port, capture
-  no events, and read no UI resources.
-- No authentication — any client on the same network can hit the endpoints. Fine
-  on a personal dev network; don't run DEBUG builds on public Wi-Fi, and don't
-  ship a DEBUG build to external testers.
-- Every action is a round trip over the network (~5–20ms on a good LAN), so it's
-  visibly not real-time; the event stream is push-based, so observation lag stays
-  low even when action lag doesn't.
+- Use a trusted development network. The inspector has no authentication, so other clients on the network can reach it.
+- Release builds exclude the inspector. Distribute release builds to external users.
+- Inspection actions change the running app's data; use a test account and test data when exercising writes.
 
 ## Driving the UI with idb
 
-The Debug Inspector asserts **state** — what the client holds and what tests
-return. It cannot drive the **UI**: tapping a button or typing in a field. For
-that, use **idb** (Facebook's iOS Debug Bridge), the one tool that reaches a
-running SwiftUI app headlessly. `xcrun simctl` has no tap or text input, and
-macOS accessibility can't see inside a SwiftUI surface, so idb is the way to
-tap, type, and read the on-screen accessibility tree.
-
-The two are complements, not alternatives: **idb drives the UI, the Inspector
-asserts the resulting state.** A typical check taps through a flow with idb,
-then switches to the Inspector to confirm the records or connection state that
-resulted.
+Use idb to tap controls and type into the simulator. Use the inspector to check the resulting data and connection state.
 
 ### The `ui_signin` smoke scenario
 
@@ -310,84 +212,22 @@ bash scripts/smoke-test.sh             # default run — launch_survive only, no
 `scripts/smoke-test.sh` (and `pnpm swift:smoke` in the monorepo) stays
 zero-dependency. Run `ui_signin` explicitly to opt into idb.
 
-Every run targets a simulator dedicated to the app under test — named
-`Smoke — <bundle id>` and created on first use — never whichever device happens
-to be booted. That is what lets two apps built from the template smoke-test side
-by side on one machine without app B installing onto app A's simulator and
-asserting against app A's UI. Override the device name with
-`PRIMITIVE_SMOKE_SIM` (e.g. to share one device between two checkouts of the
-same app on purpose) and the device type it is created from with
-`PRIMITIVE_SMOKE_SIM_BASE` (default `iPhone 17 Pro`).
+The test uses an app-specific simulator. Set `PRIMITIVE_SMOKE_SIM` to choose its name or `PRIMITIVE_SMOKE_SIM_BASE` to choose a device type. Interactive runs use a separate simulator selected with `PRIMITIVE_RUN_SIM` or `--sim`.
 
-`./run-ios.sh` follows the same rule with a device of its own,
-`Run — <bundle id>` — renamed with `PRIMITIVE_RUN_SIM`, created from
-`PRIMITIVE_RUN_SIM_BASE` (default `iPhone 17 Pro`) — so a smoke run never
-reinstalls the app out from under the session you are driving by hand, and
-neither run lands on another app's simulator (#2999). Pass
-`--sim <name-or-udid>` to target some other device for one run.
-
-The scenario locates login controls by stable `.accessibilityIdentifier`
-(`primitive.login.emailField`, `primitive.login.emailSubmit`,
-`primitive.login.otpField`, `primitive.login.otpVerify`), so it survives
-copy changes to the login form. It asserts the identifier in
-`PRIMITIVE_SMOKE_SUCCESS_ID` renders after sign-in (default
-`primitive.template.home`, the unmodified template's Home screen); point it at
-your own screen's identifier when you replace the post-login UI.
+If you replace the home screen, set `PRIMITIVE_SMOKE_SUCCESS_ID` to your screen's accessibility identifier. The default is `primitive.template.home`.
 
 ### Prerequisite: a test account
 
-`ui_signin` signs in through the `+primitivetest` OTP bypass — no mailbox, no
-real code. Whitelist a base email on the app, then hand the scenario a derived
-address. The full contract (address shape,
-the fixed `000000` code, the per-app whitelist, TTL, and member-only roles) is
-in the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) under
-"Test User Sign-In" — don't re-derive it here.
-
-The scenario's preflight checks all three prerequisites through the CLI's
-effective-settings view before it builds:
-
-```bash
-primitive apps get --json   # must list your base under testAccountBaseEmails,
-                                 # report emailSignInEnabled: true, and have a
-                                 # signup mode that admits the test address
-```
-
-Email sign-in always offers the code — one email carries it — so
-`emailSignInEnabled: true` is the hard requirement. Set these in `app.toml` and
-apply with `primitive config push --only app`. Then:
+Configure a derived test email using the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md). Email sign-in must be enabled, the base email must be allowed, and the app must admit the derived address.
 
 ```bash
 export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
-```
-
-**The signup mode has to admit the address.** The `+primitivetest` bypass
-replaces the emailed code, not the app's signup gate, and a freshly scaffolded
-app is `mode = "invite-only"` — an unadmitted test address is rejected at OTP
-request with `This app is invite-only. You've been added to the waitlist.`
-Either set `mode = "public"` in `app.toml` and run
-`primitive config push --only app`, or stay invite-only and admit the exact
-derived address first — the Authentication guide's "Invite-only apps:
-pre-create the member" covers how.
-
-The preflight can read `mode` but not the app's members, so under a
-non-public mode it fails unless you tell it the address is already admitted:
-
-```bash
-export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address admitted
-```
-
-To check the prerequisites without the multi-minute boot and build, run the
-preflight on its own:
-
-```bash
+# For an invite-only app, after admitting the derived address:
+export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1
 PRIMITIVE_SMOKE_PREFLIGHT_ONLY=1 scripts/smoke-test.sh ui_signin
 ```
 
-It exits 0 when everything is in place and otherwise names the exact setting to
-fix. That includes the case where `primitive apps get` itself fails (CLI
-not logged in, app id unresolvable, API error): the preflight reports
-`could not read settings (is the CLI logged in and pointed at this app?)`
-instead of failing with no explanation.
+The preflight checks setup without booting or building. Resolve any reported settings or CLI authentication error before running the full scenario.
 
 ### Installing idb
 
@@ -397,38 +237,7 @@ In an app scaffolded from the Swift template, this is one command:
 bash scripts/setup-idb.sh
 ```
 
-It is idempotent — on a machine that already has idb it installs nothing — and
-it fails loudly if it can't finish, rather than letting the problem resurface
-later as an unexplained "cannot run accessibility commands".
-
-What it does, and what to run by hand without the template: idb is two pieces, a
-native companion (Homebrew) and the `idb` Python client.
-
-```bash
-brew install facebook/fb/idb-companion
-python3.12 -m venv ~/.local/share/primitive/idb-venv
-~/.local/share/primitive/idb-venv/bin/pip install fb-idb
-mkdir -p ~/.local/bin                                              # may not exist yet
-ln -s ~/.local/share/primitive/idb-venv/bin/idb ~/.local/bin/idb   # put `idb` on PATH
-```
-
-The link step is deliberately not `ln -sf`: if you already manage an `idb` at
-`~/.local/bin/idb`, it errors instead of replacing it (which is what the script
-does too). Remove yours first if you want the venv's client there.
-
-**Pin Python 3.12.** `fb-idb` calls `asyncio.get_event_loop`, which was removed
-in Python 3.14, so it fails to run under 3.14 — and Homebrew's Python is PEP 668
-externally-managed, so a plain `pip install fb-idb` is refused outright. A 3.12
-venv answers both, which is why the script builds one (at
-`PRIMITIVE_IDB_VENV`, default `~/.local/share/primitive/idb-venv`, so every app
-on the machine shares one install).
-
-`scripts/smoke-test.sh` finds that venv's client itself — including when a
-broken 3.13/3.14 `idb` shadows it on PATH — so `ui_signin` needs no PATH export.
-For ad-hoc `idb` commands, add `export PATH="$HOME/.local/bin:$PATH"` to your
-shell (the script prints the line when it's needed). `ui_signin`'s preflight
-detects a missing or unrunnable idb and points at `bash scripts/setup-idb.sh`
-rather than printing a raw stack trace.
+The script installs the companion and a Python 3.12 client in a shared virtual environment. It reuses a working installation. Smoke tests find the client automatically; add `~/.local/bin` to PATH for manual commands.
 
 ### Driving idb by hand
 
@@ -444,28 +253,7 @@ idb --companion localhost:10882 ui text "hello"         # type into the focused 
 idb --companion localhost:10882 ui key 40               # 40 = Return
 ```
 
-**The `DEVELOPER_DIR` is not optional on a current Xcode.** `idb_companion`
-loads SimulatorKit — the framework behind every HID call (`ui tap`, `ui text`,
-`ui key`) — from `$DEVELOPER_DIR/Library/PrivateFrameworks/SimulatorKit.framework`,
-and Xcode 27 ships it at `Xcode.app/Contents/SharedFrameworks/` with no
-`Contents/Developer/Library/PrivateFrameworks` at all. A companion started
-plainly under that Xcode serves `describe-all` happily and fails every tap with
-
-```
-SimulatorKit is required for HID interactions: Error Domain=com.facebook.FBControlCore
-Code=0 "Attempting to load a file at path '…/Developer/Library/PrivateFrameworks/
-SimulatorKit.framework', but it does not exist"
-```
-
-`scripts/idb-developer-dir.sh` prints a developer directory where the framework
-is: a symlink mirror of the Xcode bundle with SimulatorKit restored to the path
-idb looks in, built on first use and shared by every app on the machine
-(`PRIMITIVE_XCODE_SHIM_DIR`, default `~/.local/share/primitive/xcode-hid-shim`).
-Nothing inside `Xcode.app` is written and nothing needs root. On an Xcode that
-still keeps the framework where idb looks, it prints the active developer
-directory unchanged and creates nothing. `ui_signin` runs it itself — including
-in its preflight, so an Xcode it cannot work with is reported before the build
-rather than as a failed tap after it (#3487).
+Use `scripts/idb-developer-dir.sh` as shown so the companion can locate Xcode's input frameworks. The sign-in scenario does this automatically.
 
 To tap a control by identifier rather than raw coordinates, read
 `describe-all`, find the element whose `AXUniqueId` matches (this is where a
@@ -485,3 +273,9 @@ permission alert that would otherwise cover the form on a clean simulator.
 Like `launch_survive`, this is macOS-only (a booted simulator plus idb) and is
 **not** part of the Linux `pnpm test` suite. It's a developer- and
 agent-invoked check, not a gate the Linux CI enforces.
+
+## HTTP diagnostics
+
+- `Server-Timing: total;dur=<milliseconds>` reports server-side request duration.
+- Authenticated app responses use `Cache-Control: no-store`; avatar responses are publicly cacheable.
+- Blob downloads support `ETag` and conditional `If-None-Match` requests. Keep the original body yourself if reusing it after a `304`.

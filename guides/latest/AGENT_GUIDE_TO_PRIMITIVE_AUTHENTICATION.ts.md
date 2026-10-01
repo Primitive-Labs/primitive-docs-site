@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Authentication
 
-Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (package: `js-bao-wss-client`).
+Use the client’s authentication APIs to sign users in, restore sessions, and sign out. Starter templates provide the UI and session handling.
 
 ## Auth Methods
 
@@ -57,12 +57,12 @@ In the starter template this wiring is owned for you by the template's `userStor
   };
 ```
 
-Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded.
 
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 `checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.
 
-`emailSignInEnabled` reports whether email sign-in is available at all — ONE flag, because one request sends one email carrying both a code and (when a link can be issued) a link. It defaults to `true` unless explicitly disabled. `magicLinkEnabled` and `otpEnabled` are still reported for already-published clients and always equal it; new code reads `emailSignInEnabled`.
+Use `emailSignInEnabled` to control email sign-in UI. It defaults to `true`.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)
@@ -77,147 +77,6 @@ Availability is the provider being enabled **and** your platform's entry being u
 ```
 
 `getAuthConfig()` returns the effective map. Configure passkeys via `passkeyRpConfig`.
-
-## Server App Settings ↔ Client Contract
-
-Server-side app settings must align with the origin the client app is served from. These settings live in `primitive/dev/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
-
-| Server field | Contract | Set via |
-|---|---|---|
-| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
-| `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
-| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
-| `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
-| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
-
-**CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin to `[cors].allowedOrigins` and running `primitive config push --only app`; inspect with `primitive apps get`. Common triggers: serving on a non-default port, or a newly deployed domain.
-
-Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production sign-in-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
-
----
-
-## OAuth (Google)
-
-### Google Client Configuration
-
-Google registers an OAuth client **per platform**, so `app.toml` states one entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`. Each entry carries its own `clientId` and its own `redirectUris`, and — for the types Google issues one for — its own `clientSecret`:
-
-```toml
-[auth.google.clients.web]
-clientId     = "1234-web.apps.googleusercontent.com"
-clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
-redirectUris = ["https://app.example.com/oauth/callback"]
-
-[auth.google.clients.ios]
-clientId     = "1234-ios.apps.googleusercontent.com"
-redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
-```
-
-| client type | `clientSecret` |
-|---|---|
-| `web`, `desktop` | **required** — a whole `{{secrets.KEY}}` reference, never the secret itself |
-| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
-
-A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
-
-The server sends every stored `clientSecret` back verbatim — a whole `{{secrets.KEY}}` reference is a pointer, not a credential, so `apps get`, `config pull` and the API all show it. An entry that holds the secret itself rather than a reference still signs users in (the stored value IS the secret), but the entry cannot be saved back until you store the value as an app secret and re-point `clientSecret` at it. Other app-settings writes are unaffected.
-
-`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a reference naming a secret that doesn't exist, or reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone — but a confidential client whose secret doesn't resolve still fails at Google, as a generic `INVALID_TOKEN`.
-
-### Start the flow
-
-```typescript
-  // True when Google OAuth is enabled AND the `web` client entry is usable.
-  const googleAvailable = await client.checkOAuthAvailable();
-  if (googleAvailable) {
-    // Redirects the browser to Google. Code after this does not run on success.
-    await client.startOAuthFlow(continueUrl);
-  }
-
-  // On the callback route (?code=&state=): token is stored, WS reconnects.
-  await client.handleOAuthCallback(code, state);
-```
-
-`startOAuthFlow` throws `Error("OAuth not configured")` if `oauthRedirectUri` was not passed to `initializeClient`. The browser navigates away — code after the call doesn't run on success.
-
-**`autoOAuth` client option.** Pass `autoOAuth: true` (with `oauthRedirectUri`) to `initializeClient` and the client will auto-redirect to OAuth whenever it comes back online without a valid token (e.g. a refresh failed, or there was no persisted token). For apps where OAuth is the only sign-in path this avoids hand-rolling the "no token, send to login" branch. Leave it off if you have multiple sign-in methods or want to render your own login screen first.
-
-Optional second argument supports waitlist enrollment and invite-token acceptance:
-
-```typescript
-await client.startOAuthFlow(continueUrl, {
-  waitlist: { source: "landing-page", note: "interested in beta" },
-  inviteToken: tokenFromEmail,
-});
-```
-
-### Handle the callback (instance method — preferred)
-
-When the callback page can construct a client (you already have the JWT or are happy to re-init), extract `code`/`state` from the callback and pass them to `handleOAuthCallback`:
-
-```typescript
-  const params = new URLSearchParams(window.location.search);
-  const code = params.get("code");
-  const state = params.get("state");
-
-  if (code && state) {
-    await client.handleOAuthCallback(code, state);
-    // Token now stored, WebSocket reconnected. Navigate.
-    window.location.href = "/";
-  }
-```
-
-### Handle the callback (static method — when no client yet)
-
-```typescript
-  const token = await JsBaoClient.exchangeOAuthCode({
-    apiUrl,
-    appId,
-    code,
-    state,
-  });
-  // Persist however your app does (storage / cookie / pass to initializeClient)
-```
-
-If your app uses a refresh proxy, also pass `refreshProxyBaseUrl` (e.g. `` `${window.location.origin}/proxy` ``) and `refreshProxyCookieMaxAgeSeconds` to `exchangeOAuthCode`.
-
-**Don't:**
-
-```typescript
-// WRONG — startOAuthFlow does not return a token. It redirects.
-const token = await client.startOAuthFlow();
-
-// WRONG — handleOAuthCallback does not return the token either; it stores it.
-const { token } = await client.handleOAuthCallback(code, state);
-```
-
-
----
-
-## One Account Across Providers
-
-Google and Apple identities are linked to an account, not stored as a single
-current provider. Consequences to code against:
-
-- **Same email, second provider → same account.** A user who signed in with
-  Google and later signs in with Apple under the same email resolves to the
-  existing account. `isNewUser` is `false` on that second sign-in; documents,
-  memberships, and permissions carry over. Don't build "merge my accounts" UI.
-- **A linked identity survives an email change.** The identity is matched
-  before the email is, so a provider-side email change still resolves to the
-  original account rather than provisioning a new one.
-- **Links never move.** A provider identity already linked to one account is
-  never re-pointed at another by a later sign-in — the original owner keeps it.
-- **Only Google and Apple link this way.** Magic link and OTP resolve by the
-  submitted email; passkeys are registered against an already-signed-in
-  account.
-
-Practical effect on sign-in handling: treat `isNewUser` as "first time in this
-app", not "first time with this provider" — a first-ever Apple sign-in by an
-existing Google user reports `isNewUser == false`, so onboarding gated on it is
-correctly skipped.
-
----
 
 ## Email Sign-In (One Email, One or Two Credentials)
 
@@ -328,13 +187,137 @@ The code half of the same email is verified with the OTP verify call, unchanged:
   }
 ```
 
-A passkey ceremony that fails because the provider did not verify the user returns `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering). It applies to any ceremony that was *started* while `passkeyUserVerification` was `"required"` — the policy is pinned when the options are issued, so an in-flight ceremony can still return this code after the app is switched to `"preferred"`. Handle it on the code, not on the app's current setting. Render it as "your passkey provider didn't verify you — try again and complete Face ID / your PIN": it is the one passkey failure the user can fix by retrying.
+Handle `PASSKEY_USER_VERIFICATION_FAILED` by asking the user to retry and complete biometric or PIN verification. Branch on the returned code, not the app’s current verification policy.
 
-> **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
+Gate email sign-in UI on `emailSignInEnabled` from `getAuthConfig()`.
 
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_RP_NOT_CONFIGURED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
 
 The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
+
+---
+
+## Server App Settings ↔ Client Contract
+
+Set authentication fields in the environment’s `app.toml`, then run `primitive config push --only app`. Inspect live values with `primitive apps get`.
+
+| Server field | Contract | Set via |
+|---|---|---|
+| `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
+| `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
+| Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
+
+**CORS misconfiguration blocks bootstrap.** When the serving origin is missing from `corsAllowedOrigins`, the browser blocks the client's bootstrap refresh (`POST …/api/auth/refresh` → 403, no `access-control-allow-origin`): `initializeClient` throws `initializeClient refresh failed (network)` before `getAuthConfig()` is reached, and the template app's login surfaces the error. Fix by adding the serving origin to `[cors].allowedOrigins` and running `primitive config push --only app`; inspect with `primitive apps get`. Common triggers: serving on a non-default port, or a newly deployed domain.
+
+Dev → prod checklist: in `app.toml`, add the production origin to `[cors].allowedOrigins`, set `[app].baseUrl`, add the production OAuth callback to the `redirectUris` of the Google client that will redirect there (`[auth.google.clients.web]` for a browser), and add the production sign-in-link callback to `[auth].emailRedirectUris`; run `primitive config push`; then re-check `getAuthConfig()` reports the expected methods.
+
+---
+
+## OAuth (Google)
+
+### Google Client Configuration
+
+Google registers an OAuth client **per platform**, so `app.toml` states one entry per client type: `web`, `ios`, `android`, `desktop`, `chrome-extension`. Each entry carries its own `clientId` and its own `redirectUris`, and — for the types Google issues one for — its own `clientSecret`:
+
+```toml
+[auth.google.clients.web]
+clientId     = "1234-web.apps.googleusercontent.com"
+clientSecret = "{{secrets.GOOGLE_CLIENT_SECRET}}"
+redirectUris = ["https://app.example.com/oauth/callback"]
+
+[auth.google.clients.ios]
+clientId     = "1234-ios.apps.googleusercontent.com"
+redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
+```
+
+| client type | `clientSecret` |
+|---|---|
+| `web`, `desktop` | **required** — a whole `{{secrets.KEY}}` reference, never the secret itself |
+| `ios`, `android`, `chrome-extension` | **rejected** — Google issues none, and the exchange proves possession with PKCE |
+
+A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
+
+Configuration reads return secret references, not secret values.
+
+If web sign-in returns `GOOGLE_OAUTH_MISCONFIGURED`, check that the selected Google client references an existing app secret.
+
+### Start the flow
+
+```typescript
+  // True when Google OAuth is enabled AND the `web` client entry is usable.
+  const googleAvailable = await client.checkOAuthAvailable();
+  if (googleAvailable) {
+    // Redirects the browser to Google. Code after this does not run on success.
+    await client.startOAuthFlow(continueUrl);
+  }
+
+  // On the callback route (?code=&state=): token is stored, WS reconnects.
+  await client.handleOAuthCallback(code, state);
+```
+
+`startOAuthFlow` throws `Error("OAuth not configured")` if `oauthRedirectUri` was not passed to `initializeClient`. The browser navigates away — code after the call doesn't run on success.
+
+**`autoOAuth` client option.** Pass `autoOAuth: true` (with `oauthRedirectUri`) to `initializeClient` and the client will auto-redirect to OAuth whenever it comes back online without a valid token (e.g. a refresh failed, or there was no persisted token). For apps where OAuth is the only sign-in path this avoids hand-rolling the "no token, send to login" branch. Leave it off if you have multiple sign-in methods or want to render your own login screen first.
+
+Optional second argument supports waitlist enrollment and invite-token acceptance:
+
+```typescript
+await client.startOAuthFlow(continueUrl, {
+  waitlist: { source: "landing-page", note: "interested in beta" },
+  inviteToken: tokenFromEmail,
+});
+```
+
+### Handle the callback (instance method — preferred)
+
+When the callback page can construct a client (you already have the JWT or are happy to re-init), extract `code`/`state` from the callback and pass them to `handleOAuthCallback`:
+
+```typescript
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  const state = params.get("state");
+
+  if (code && state) {
+    await client.handleOAuthCallback(code, state);
+    // Token now stored, WebSocket reconnected. Navigate.
+    window.location.href = "/";
+  }
+```
+
+### Handle the callback (static method — when no client yet)
+
+```typescript
+  const token = await JsBaoClient.exchangeOAuthCode({
+    apiUrl,
+    appId,
+    code,
+    state,
+  });
+  // Persist however your app does (storage / cookie / pass to initializeClient)
+```
+
+If your app uses a refresh proxy, also pass `refreshProxyBaseUrl` (e.g. `` `${window.location.origin}/proxy` ``) and `refreshProxyCookieMaxAgeSeconds` to `exchangeOAuthCode`.
+
+**Don't:**
+
+```typescript
+// WRONG — startOAuthFlow does not return a token. It redirects.
+const token = await client.startOAuthFlow();
+
+// WRONG — handleOAuthCallback does not return the token either; it stores it.
+const { token } = await client.handleOAuthCallback(code, state);
+```
+
+
+---
+
+## One Account Across Providers
+
+Google and Apple sign-ins with the same email use the same account. Linked provider identities remain attached to that account even if their email changes. Use `isNewUser` to decide whether onboarding is needed.
+
+Email sign-in resolves by the submitted email. Passkeys belong to the account that registered them.
 
 ---
 
@@ -343,6 +326,8 @@ The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the 
 WebAuthn passkeys for returning users, built on the browser's `@simplewebauthn/browser` helpers.
 
 `passkeyAuthStart` works without an existing session (used to sign in). `passkeyRegisterStart` and management methods require an authenticated client.
+
+Both start calls take an optional `{ rpId }`. Omit it in a browser — the server derives the relying party from the request's `Origin`. A named `rpId` must be a key of the app's `passkeyRpConfig`, or the call fails with `PASSKEY_RP_NOT_CONFIGURED`.
 
 ### Sign in
 
@@ -748,15 +733,13 @@ The `email-sign-in` email is one of the transactional types Primitive sends; ove
 
 ---
 
-## Implementation Checklist
+## Gotchas {#implementation-checklist}
 
-1. Call `getAuthConfig()` to discover enabled methods before rendering UI.
-2. Implement at least one primary method (OAuth or Magic Link).
-3. Handle the OAuth callback (`code` + `state`) and the Magic Link `magic_token`.
-4. Listen to `auth-failed` and `auth:onlineAuthRequired` (minimum) to prompt re-login.
-5. Catch `AuthError` and switch on `err.code` (use `AUTH_CODES` constants).
-6. Gate your app layout on `isAuthenticated` so child components can assume `currentUser`.
-7. Watch `isAuthenticated` reactively in downstream stores (it changes both directions).
-8. Sequence: auth ready → open documents → query data.
-9. The template's `/onboarding` route owns the post-sign-in passkey prompt and profile completion for every method; a hand-rolled auth UI should offer passkey registration when `promptAddPasskey` is true after verify.
-10. Customize email templates via CLI if you need branded auth emails.
+- **Check method availability before rendering sign-in controls.** Use `getAuthConfig()` so disabled providers are not offered.
+- **Wait for authentication before loading app data.** Initialize auth, open documents, then run queries. React to later sign-out as well as sign-in.
+- **Preserve invitation tokens through redirects.** Pass the token into sign-in verification; use explicit acceptance for an already signed-in user.
+- **Keep email code entry available.** A sign-in link may be opened on a device without the app.
+- **Use error codes for recovery.** Show your own message and retain a generic fallback for unknown errors.
+
+- **A network interruption is not proof of sign-out.** Use `auth-failed` and `auth:onlineAuthRequired` to decide when to request sign-in again.
+- **Offer passkey registration after sign-in.** The template’s onboarding route handles this; custom UI should check `promptAddPasskey`.

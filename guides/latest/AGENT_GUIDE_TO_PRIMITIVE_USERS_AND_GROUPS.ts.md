@@ -1,10 +1,10 @@
 # Users, Groups, and Access Control in Primitive
 
-Guidelines for modeling user relationships and managing access control with Primitive's built-in user system and groups.
+Primitive manages user identity and profiles. Use groups to model teams, roles, and relationships, then check membership in access rules.
 
 ## Core operations
 
-The key client calls, compiled against the real clients as part of the docs build. The dense reference below adds the result shapes, result-status branching, and CEL access-control detail.
+Start with these client operations.
 
 ### Look up users
 
@@ -54,7 +54,7 @@ Per-user lookups use `client.users.getBasic(id)`, `client.users.getProfiles([ids
 
 ## Core Concept: Built-in User Model
 
-Primitive provides a built-in user model that every app should leverage. **Do not reinvent user identity.** The platform manages user accounts, authentication, and basic profile information — your app builds on top of this.
+Use the platform user as the source of truth for identity. Store app-specific fields separately and reference `userId`.
 
 ### What the platform provides
 
@@ -140,8 +140,6 @@ primitive users list --search "ali"
 primitive users disable <user-id> [-y]
 primitive users enable <user-id>
 ```
-
-Console admin accounts have their own pair, `primitive admins disable <admin-id>` / `primitive admins enable <admin-id>` — super-admin only, like every `primitive admins` verb.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -275,6 +273,18 @@ If the group type has `autoAddCreator: true` (default), the creator is automatic
 
 `groupId` on create is optional — a supplied id keeps its existing validation (`#` banned, no `_`-prefixed reserved type, `409` on a duplicate); a non-string supplied value is rejected with `400 "groupId must be a string"`, an empty string with `400 "groupId cannot be empty"`. Omit it (or send `null`) to have the server assign a ULID, returned as `groupId` in the response — the same pattern documents, databases, and collections use for server-assigned ids.
 
+`groups.create()` also takes an optional `initialMetadata` — category name → that category's values — stamped on the group in the same call, with the same rules as a collection create: each category is schema-validated before the group is created, the category's `writeRule` is waived for this stamp, at most 10 categories, and an invalid entry fails the whole create (neither the group nor any metadata is left). The group type's `group.create` rule can gate on the staged values — see [Gating group creation on staged metadata](#gating-group-creation-on-staged-metadata).
+
+```typescript
+  const group = await client.groups.create({
+    groupType: "class-reading-group",
+    name: "Reading group",
+    initialMetadata: {
+      classLink: { classId: "class-A" },
+    },
+  });
+```
+
 `groups.list()` returns a paginated `{ items: GroupInfo[], nextCursor?, hasMore? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
 
 `groups.get()` returns `{ appId, groupType, groupId, name, description?, memberCount, createdAt, createdBy, modifiedAt }`. `update()` takes optional `name` and/or `description`. `delete()` cascade-deletes all memberships and group permissions.
@@ -367,8 +377,9 @@ The email form is the right call when you don't know — and don't want to branc
 
 Use this to render the "pending members" section of a group sharing UI without having to filter the lower-level `client.invitations.listDeferredGrants()` surface.
 
-Authorization is the same gate as `listMembers`: the group's `member.list` rule, with app admins/owners always allowed and direct members of the group allowed as a fallback even under a stricter custom rule. A cross-group manager whose rules let them list a group's members can therefore also see its pending invitations — being a member of the group is not required.
-Each entry carries a `deferredId` — cancel that invitation by revoking the deferred grant: `client.invitations.revokeDeferredGrant(deferredId, "group")`. Cancelling an invitation another caller created is allowed for app admins/owners, the invitation's creator, or a caller who passes the group's `member.delete` rule (evaluated with `target.email` set to the invitee's email, so email-scoped rules work on the pending path).
+Pending invitations use the same `member.list` rule as current members. App admins, app owners, and direct group members can also list them.
+
+Each result includes a `deferredId`. Cancel it with`client.invitations.revokeDeferredGrant(deferredId, "group")`. Cancellation requires app-admin authority, invitation ownership, or the group’s `member.delete` permission; that rule receives the invitee’s `target.email`.
 
 ### List a user's memberships
 
@@ -497,7 +508,9 @@ access = "user.email == 'admin@example.com'"   // user.email is not in context
 
 ## Rule Sets for Groups
 
-Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `primitive/dev/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set mechanism under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
+A group type’s rule set controls group and membership operations. Bind it with `ruleSetName` in the type configuration; see [Group Type Configuration](#group-type-configuration) for defaults.
+
+[Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations) explains authoring and testing rule sets. Collections use separate `collection.*` rules, described in [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets).
 
 **Resource type:** `group`. **Categories and operations:**
 - `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
@@ -525,8 +538,22 @@ Group management operations (create/edit/delete, member add/remove) are gated by
 | `group.name` | yes | Target group's display name |
 | `group.createdBy` | yes (after create) | userId of the group creator |
 | `target.userId` | only `category: "member"`, ops `create`/`edit`/`delete` | Target user being added/removed. Absent for `member.list`. |
+| `md.self.<category>.<key>` | when the rule reads it | The group's metadata. In `group.create` it binds the `initialMetadata` staged in the same call, never a stored value. |
 
 `group.description` is **NOT** in the rule context — don't reference it.
+
+### Gating group creation on staged metadata
+
+A group type's `group.create` rule is evaluated against the `initialMetadata` staged in the same `groups.create()` call — **before** the group is persisted. The staged values bind to `md.self.<category>.<key>`, so a create rule can gate creation on the exact linkage the create is about to stamp:
+
+```toml
+# the group type's create rule
+create = "isMemberOf('class-teachers', md.self.classLink.classId)"
+```
+
+- The `md.self.attrs.*` projected columns (`groupType`, `groupId`, `name`, `createdBy`) are also bound in the create rule.
+- **Fail-closed:** once a create rule reads `md.self.<category>`, a create omitting that category is denied (the value binds `null`). Metadata already stored under the requested `groupId` is never read by a create rule, so the linkage must be staged in the create call.
+- **No traversal from the staged subject.** A create rule may read the staged value directly (`md.self.<category>.<key>`) but may not follow a declared path off it (`md.<pathName>.*`) — such a rule is rejected when the rule set is saved, since the subject does not exist yet to traverse from. (Traversal in a non-create rule is unaffected.)
 
 ```typescript
   // Simulated request — no live data needed.
@@ -682,37 +709,22 @@ Model nested organizational structure with multiple group types.
 
 A function can check any level: a fixed one in its `access` gate (`isMemberOf('org', 'acme')`), and one named by the input in its code, with `listUserMemberships({ userId, type: "dept" })`.
 
-## Best Practices
+## Gotchas
 
-### Users
+- Keep one group type per concept, such as teams or roles.
+- Do not duplicate platform identity fields in an app model.
+- Check `addMember.status`: an email may create a pending invitation rather than an immediate membership.
+- App owners and admins bypass access rules. Test denials as a regular member.
 
-- **Always use the platform user model** for identity. Reference `userId` from the platform, don't generate your own user IDs.
-- **Use `client.users.getBasic()`** to display user info (name, avatar, email). It caches results automatically.
-- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data, read through a server function).
-- **Don't duplicate platform fields.** Name, email, and avatar are managed by the platform — read them from there.
-
-### Groups
-
-- **Choose meaningful group types.** Use types that map to your domain: `team`, `class`, `department`, `parent-of`. The `groupType` is the taxonomy, the `groupId` is the instance.
-- **Use `autoAddCreator: true`** (default) for groups where the creator should be a member (teams, clubs). Set to `false` for groups managed by admins (classes, departments).
-- **Prefer groups over per-user grants** for document access. Easier to manage and audit.
-- **Check group membership in the function** that reads a database, rather than granting database permissions to individual users.
-
-### Access control
-
-- **App owners and admins bypass all group/collection rule-set evaluation.** Design rules for regular members — don't try to restrict owners/admins there.
-- **A function's `access` gate is bypassed by app owners and admins too.** A check in the function's code is not — write it to let them through if they should be.
-- **Check sensitive relationships in code** (parent-child, manager-report): read the caller's memberships and compare against the input.
-- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer several focused functions over one function with complex gate logic.
-- **Test rules** with `client.ruleSets.test()` before deploying, and use `client.ruleSets.debug()` to trace evaluation for real users.
-
-## Common Errors
+## Error handling
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMember({ email })` or `invitations.revokeDeferredGrant(deferredId, "group")`. |
 | `addMember` returns `status: "already_member"` | User already in the group | Idempotent — no error. |
 | 409 on `groups.create` | A group with that `(groupType, groupId)` already exists | Use a different `groupId` or call `groups.get` first. |
+| 400 on `groups.create` with `initialMetadata` | A staged category is unknown, reserved (`attrs`), fails its schema, or there are more than 10 | Fix the payload; nothing was created. |
+| 409 `METADATA_EXISTS` on `groups.create` | Metadata for a staged category is already stored under that `groupId` — group metadata is keyed by `groupId` alone, so it may belong to a group of another type or to a deleted group | Use a different `groupId`, or delete the stored category first (`resourceMetadata.delete`, gated by the category's `writeRule`). Nothing was created. |
 | 403 on `groups.create` (member role) | The group type has a config with no rule set attached (explicit opt-out), OR a configured `group.create` rule denied the caller | Either delete the group type config to fall back to the permissive default (`group.create = "true"`), attach a rule set with a permissive `group.create`, or call as an owner/admin. |
 | 403 on `groups.create` with `groupType` starting with `_` | Reserved system group type | Pick a different prefix. |
 | Group permission not taking effect on document | User hasn't reopened the document | Close and reopen the document to pick up new group permissions. |

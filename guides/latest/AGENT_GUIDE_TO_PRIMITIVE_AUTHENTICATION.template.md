@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Authentication
 
-Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (package: `js-bao-wss-client`).
+Use the client’s authentication APIs to sign users in, restore sessions, and sign out. Starter templates provide the UI and session handling.
 
 ## Auth Methods
 
@@ -35,7 +35,7 @@ In the starter template this wiring is owned for you by `PrimitiveAppState.initi
 
 {{ example: auth/get-auth-config }}
 
-Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded.
 
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 {{#lang ts}}
@@ -45,7 +45,7 @@ Availability is the provider being enabled **and** your platform's entry being u
 `AuthConfigInfo.googleSignInAvailable` computes exactly that against the `ios` entry, and `AppConfigInfo.googleAvailable` is projected from it — the launch UI and the flow cannot disagree.
 {{/lang}}
 
-`emailSignInEnabled` reports whether email sign-in is available at all — ONE flag, because one request sends one email carrying both a code and (when a link can be issued) a link. It defaults to `true` unless explicitly disabled. `magicLinkEnabled` and `otpEnabled` are still reported for already-published clients and always equal it; new code reads `emailSignInEnabled`.
+Use `emailSignInEnabled` to control email sign-in UI. It defaults to `true`.
 {{#lang swift}}
 `hasApple` reports Sign in with Apple availability (`appleSignInEnabled` plus configured Apple audiences); gate the native `signInWithApple` button on it.
 {{/lang}}
@@ -66,9 +66,96 @@ Availability is the provider being enabled **and** your platform's entry being u
 `getAuthConfig()` returns the effective map. Configure passkeys via `passkeyRpConfig`.
 {{/lang}}
 
+## Email Sign-In (One Email, One or Two Credentials)
+
+### Request + verify
+
+One request sends ONE email carrying a 6-digit code and — when a link can be
+issued — a sign-in link. Nothing chooses a method: the user types the code or
+opens the link, and consuming either one retires both.
+
+{{ example: auth/email-sign-in }}
+
+Link issuance is **fail-closed**. The email carries a link only when the request
+names a redirect target AND that target matches the app's non-empty
+`emailRedirectUris`. With no target, or an empty allow-list, the same
+`email-sign-in` template renders code-only; a target that misses a non-empty
+allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
+link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
+no endpoint renders any other sign-in template, so that removal holds.
+
+{{#lang ts}}
+`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
+{{/lang}}
+{{#lang swift}}
+`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
+
+### Make the emailed sign-in link open your app (iOS)
+
+The iOS template sends code-only emails by default. To add a link:
+
+- **With a web app:** set the environment’s `webUrl`, allow-list its `/oauth/callback` URL, and set `iosAppId`. Deploy the association document before enabling the `applinks:` entitlement. The template receives universal links through `.onContinueUserActivity` and custom schemes through `.onOpenURL`.
+- **Without a web app:** add `<scheme>://auth/magic-link` to `[auth].emailRedirectUris`, then set `authManager.sendsEmailSignInLink = true`. Init supplies the scheme registration and URL routing.
+
+Merge redirect URLs into the existing allow-list; pushing only the new URL removes existing entries. Keep URLs used by installed app builds. Custom-scheme links require the app to be installed; retain code entry as an alternative.
+
+{{/lang}}
+
+### Reading the token (callback page)
+
+The callback delivers the token as a `magic_token` value — **not** `token`, `magicToken`, or `code`:
+
+{{ example: auth/magic-link-callback }}
+
+{{#lang ts}}
+The callback URL may also carry `?purpose=login-add-passkey`. The server appends this when the link was sent for an existing user the platform thinks should add a passkey (e.g. they signed in via OTP/magic-link but have no passkey on file). The `magicLinkVerify` call itself is unchanged — apps that read `purpose` from the URL can use it as a hint to route the user to passkey registration after sign-in instead of straight to the home screen.
+{{/lang}}
+
+To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
+
+{{ example: auth/magic-link-invite }}
+
+---
+
+## Finishing With the Code
+
+The code half of the same email is verified with the OTP verify call, unchanged:
+
+{{#lang ts}}
+`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
+{{/lang}}
+{{#lang swift}}
+`auth.otpVerify(email:code:)` returns an `OtpVerifyResult` (`.user`, `.isNewUser?`). To accept an invitation at verify time, pass the `inviteToken` parameter: `auth.otpVerify(email:code:inviteToken:)`.
+{{/lang}}
+
+### Error handling
+
+`AuthError` is thrown for non-2xx responses with a machine-readable code:
+
+{{ example: auth/auth-error-handling }}
+
+Handle `PASSKEY_USER_VERIFICATION_FAILED` by asking the user to retry and complete biometric or PIN verification. Branch on the returned code, not the app’s current verification policy.
+
+Gate email sign-in UI on `emailSignInEnabled` from `getAuthConfig()`.
+
+{{#lang ts}}
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_RP_NOT_CONFIGURED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
+
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
+{{/lang}}
+{{#lang swift}}
+`AuthCode` also carries the SDK-generated cases `.tokenInvalid`, `.refreshFailed`, `.networkError`, and `.unauthorized`, plus `.passkeyNotEnabled`, `.passkeyRpNotConfigured`, `.passkeyUserVerificationFailed` and `.memberInvitationsDisabled` from the server. Server codes outside the enum (e.g. rate limiting) arrive with `code == nil` — fall back to `error.message`.
+
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`.
+
+**Don't sign the user out on every failed call.** When a request gets a 401 the client refreshes the token and retries. If the refresh itself can't reach the server, the call does not fail as an HTTP 401 — it fails as a transport error carrying no HTTP status, because that is a transient outage rather than a rejected credential. Retry it instead of clearing the session. Only a refresh the server actually rejects surfaces as `HttpError(status: 401, message: "Invalid credentials")`, and that is the one to sign out on.
+{{/lang}}
+
+---
+
 ## Server App Settings ↔ Client Contract
 
-Server-side app settings must align with the origin the client app is served from. These settings live in `primitive/dev/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
+Set authentication fields in the environment’s `app.toml`, then run `primitive config push --only app`. Inspect live values with `primitive apps get`.
 
 | Server field | Contract | Set via |
 |---|---|---|
@@ -115,9 +202,9 @@ redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
 
 A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
 
-The server sends every stored `clientSecret` back verbatim — a whole `{{secrets.KEY}}` reference is a pointer, not a credential, so `apps get`, `config pull` and the API all show it. An entry that holds the secret itself rather than a reference still signs users in (the stored value IS the secret), but the entry cannot be saved back until you store the value as an app secret and re-point `clientSecret` at it. Other app-settings writes are unaffected.
+Configuration reads return secret references, not secret values.
 
-`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a reference naming a secret that doesn't exist, or reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone — but a confidential client whose secret doesn't resolve still fails at Google, as a generic `INVALID_TOKEN`.
+If web sign-in returns `GOOGLE_OAUTH_MISCONFIGURED`, check that the selected Google client references an existing app secret.
 
 ### Start the flow
 
@@ -150,7 +237,7 @@ let authUrl = try await client.startOAuthFlow(
 )
 ```
 
-Both are threaded through `signInWithGoogle(...)` as well — `signInWithApple(...)` has no `startOAuthFlow` building block (native Sign in with Apple never redirects), but it takes its own `inviteToken` parameter directly; see [Native one-call sign-in](#native-one-call-sign-in-google-apple) below.
+Both are threaded through `signInWithGoogle(...)` as well — `signInWithApple(...)` has no `startOAuthFlow` building block (native Sign in with Apple never redirects), but it takes its own `inviteToken` parameter directly; see [Native one-call sign-in](#native-one-call-sign-in-google--apple) below.
 {{/lang}}
 
 ### Handle the callback (instance method — preferred)
@@ -217,132 +304,9 @@ Gate the buttons on the auth config: `googleSignInAvailable` for Google — the 
 
 ## One Account Across Providers
 
-Google and Apple identities are linked to an account, not stored as a single
-current provider. Consequences to code against:
+Google and Apple sign-ins with the same email use the same account. Linked provider identities remain attached to that account even if their email changes. Use `isNewUser` to decide whether onboarding is needed.
 
-- **Same email, second provider → same account.** A user who signed in with
-  Google and later signs in with Apple under the same email resolves to the
-  existing account. `isNewUser` is `false` on that second sign-in; documents,
-  memberships, and permissions carry over. Don't build "merge my accounts" UI.
-- **A linked identity survives an email change.** The identity is matched
-  before the email is, so a provider-side email change still resolves to the
-  original account rather than provisioning a new one.
-- **Links never move.** A provider identity already linked to one account is
-  never re-pointed at another by a later sign-in — the original owner keeps it.
-- **Only Google and Apple link this way.** Magic link and OTP resolve by the
-  submitted email; passkeys are registered against an already-signed-in
-  account.
-
-Practical effect on sign-in handling: treat `isNewUser` as "first time in this
-app", not "first time with this provider" — a first-ever Apple sign-in by an
-existing Google user reports `isNewUser == false`, so onboarding gated on it is
-correctly skipped.
-
----
-
-## Email Sign-In (One Email, One or Two Credentials)
-
-### Request + verify
-
-One request sends ONE email carrying a 6-digit code and — when a link can be
-issued — a sign-in link. Nothing chooses a method: the user types the code or
-opens the link, and consuming either one retires both.
-
-{{ example: auth/email-sign-in }}
-
-Link issuance is **fail-closed**. The email carries a link only when the request
-names a redirect target AND that target matches the app's non-empty
-`emailRedirectUris`. With no target, or an empty allow-list, the same
-`email-sign-in` template renders code-only; a target that misses a non-empty
-allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
-link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
-no endpoint renders any other sign-in template, so that removal holds.
-
-{{#lang ts}}
-`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
-{{/lang}}
-{{#lang swift}}
-`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
-
-### Make the emailed sign-in link open your app (iOS)
-
-**With nothing configured the iOS default is code-only, and it is a working configuration.** `PrimitiveAuthManager.requestEmailSignIn(email:)` supplies NO redirect target, so a scaffolded app's sign-in email carries the 6-digit code alone, works from the moment the app is created, and needs no `emailRedirectUris` entry. Don't "fix" a code-only email — check what the app configured.
-
-**If the app also has a web client, the link is an https URL, not the custom scheme.** Set the Primitive environment's `webUrl` to the web app's BARE ORIGIN — https (or `http` on `localhost`/`127.0.0.1`), no credentials, path, query or fragment; anything else is refused by the CLI and read as "no web counterpart" by the resolvers that build the app. Add `"webUrl": "https://app.example.com"` to that environment in `primitive/config.json` (`primitive env add <name> --api-url … --app-id … --web-url …` sets it on an environment you are CREATING; `env add` cannot edit an existing one). Then:
-
-- the resolve script carries it into `primitive.json`, `PrimitiveAppState.initialize()` sets it as `client.links.appBaseURL`, and `requestEmailSignIn` sends `https://app.example.com/oauth/callback` as the redirect target — no app-code change, and the same value is what an incoming universal link is trusted from;
-- the https target WINS over the custom scheme, including for a manager constructed with an explicit `callbackScheme:`, so an app cannot accidentally send a scheme target that is no longer allow-listed;
-- `sendsEmailSignInLink` still overrides in both directions — set it `false` for code-only even with `webUrl` set;
-- allow-list that https URL in `[auth].emailRedirectUris` exactly like any other target, then declare the iOS app id on the SAME environment: `"iosAppId": "ABCDE12345.com.example.app"` beside `webUrl` (`primitive env add … --app-id … --ios-app-id` on an environment you are creating). It is Apple's `<Application Identifier Prefix>.<bundle id>` — the prefix is 10 characters and usually the Team ID, but verify it against the signed app's `application-identifier` entitlement, since some apps' differ. The Vue template's `pnpm cf-deploy` generates `apple-app-site-association` from it before each build, with the component `{ "/": "/oauth/callback", "?": { "magic_token": "*" } }` (query-scoped so the Google OAuth `?code=` redirect on the same path stays a web page), so each environment serves its own bundle id and an environment with no `iosAppId` serves no association document at all. Never hand-edit the served document: it is gitignored and regenerated per deploy, and a file the deploy did not write stops the deploy unless an `apple-app-site-association.hand-authored` sentinel claims it — and taking that route means untracking the generated path in `.gitignore` and committing the document AND the sentinel, since a sentinel that reaches a fresh clone alone deploys no association document at all. Verify the deployed document with `curl`, and only THEN enable the `applinks:<domain>` entitlement — that entitlement is what makes Apple fetch, and its CDN caches what it gets;
-- receive the link with `.onContinueUserActivity(NSUserActivityTypeBrowsingWeb)` as well as `.onOpenURL` — a universal link is delivered as an `NSUserActivity`, which is the only delivery on macOS. The template does both.
-
-Each `emailRedirectUris` entry stands on its own: a build without a `webUrl` that turned the link on sends `<scheme>://auth/magic-link`, so keep that entry allow-listed alongside the https one for as long as such builds are installed — once it is gone their requests fail 400 `Invalid redirect URI`. The web domain is compiled into the build, so changing it later means an app release.
-
-For an app with NO web client, four pieces make the custom-scheme LINK work, and `primitive init` ships two of them:
-
-| Piece | Who does it | Symptom when it is missing |
-|---|---|---|
-| `<scheme>://auth/magic-link` in `[auth].emailRedirectUris` | you (see below) | with the flag on, **every** email request fails 400 `Invalid redirect URI` — no fallback to a code-only email |
-| `authManager.sendsEmailSignInLink = true` | you (one line) | sign-in works, email carries the code only, no error |
-| The scheme registered in `CFBundleURLTypes` under the `PrimitiveAuth` URL name | `primitive init` stamps an app-unique scheme into `Info-Partial.plist` | the emailed link is a **dead tap** — nothing launches, nothing logs |
-| `.onOpenURL` → `routePlatformLink(url)` | the template's `ContentView` | the app opens and nobody signs in |
-
-The allow-list step is a MERGE into the existing array — `app.toml` is the whole truth about app settings on push, so a file listing only the new entry deletes the rest. If `primitive/dev/app.toml` isn't in the repo yet, run `primitive config pull --only app` first; after editing, `primitive config push --only app`. A custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link`.
-
-`PrimitiveAuthManager(callbackScheme:)` resolves its scheme from that same `PrimitiveAuth` URL type when no argument is passed (falling back to `primitiveapp`), and an explicit argument also starts `sendsEmailSignInLink` at `true` — an app that named its own scheme allow-listed it deliberately.
-
-Reach, before you promise a user a link: a custom-scheme link only opens on a device that has the app installed. It is dead in the Simulator, dead when the mail is read on another device, and many webmail clients will not render a non-`http(s)` href as clickable. The code is the credential that always works. The https link above is what reaches everywhere — and it needs a web domain you control, since the association document is served from the domain the link names. The same scheme carries `<scheme>://oauth/callback` for `startOAuth()`, which is what `[auth.google.clients.ios].redirectUris` needs.
-{{/lang}}
-
-### Reading the token (callback page)
-
-The callback delivers the token as a `magic_token` value — **not** `token`, `magicToken`, or `code`:
-
-{{ example: auth/magic-link-callback }}
-
-{{#lang ts}}
-The callback URL may also carry `?purpose=login-add-passkey`. The server appends this when the link was sent for an existing user the platform thinks should add a passkey (e.g. they signed in via OTP/magic-link but have no passkey on file). The `magicLinkVerify` call itself is unchanged — apps that read `purpose` from the URL can use it as a hint to route the user to passkey registration after sign-in instead of straight to the home screen.
-{{/lang}}
-
-To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
-
-{{ example: auth/magic-link-invite }}
-
----
-
-## Finishing With the Code
-
-The code half of the same email is verified with the OTP verify call, unchanged:
-
-{{#lang ts}}
-`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
-{{/lang}}
-{{#lang swift}}
-`auth.otpVerify(email:code:)` returns an `OtpVerifyResult` (`.user`, `.isNewUser?`). To accept an invitation at verify time, pass the `inviteToken` parameter: `auth.otpVerify(email:code:inviteToken:)`.
-{{/lang}}
-
-### Error handling
-
-`AuthError` is thrown for non-2xx responses with a machine-readable code:
-
-{{ example: auth/auth-error-handling }}
-
-A passkey ceremony that fails because the provider did not verify the user returns `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering). It applies to any ceremony that was *started* while `passkeyUserVerification` was `"required"` — the policy is pinned when the options are issued, so an in-flight ceremony can still return this code after the app is switched to `"preferred"`. Handle it on the code, not on the app's current setting. Render it as "your passkey provider didn't verify you — try again and complete Face ID / your PIN": it is the one passkey failure the user can fix by retrying.
-
-> **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
-
-{{#lang ts}}
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
-
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
-{{/lang}}
-{{#lang swift}}
-`AuthCode` also carries the SDK-generated cases `.tokenInvalid`, `.refreshFailed`, `.networkError`, and `.unauthorized`, plus `.passkeyNotEnabled`, `.passkeyUserVerificationFailed` and `.memberInvitationsDisabled` from the server. Server codes outside the enum (e.g. rate limiting) arrive with `code == nil` — fall back to `error.message`.
-
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`.
-
-**Don't sign the user out on every failed call.** When a request gets a 401 the client refreshes the token and retries. If the refresh itself can't reach the server, the call does not fail as an HTTP 401 — it fails as a transport error carrying no HTTP status, because that is a transient outage rather than a rejected credential. Retry it instead of clearing the session. Only a refresh the server actually rejects surfaces as `HttpError(status: 401, message: "Invalid credentials")`, and that is the one to sign out on.
-{{/lang}}
+Email sign-in resolves by the submitted email. Passkeys belong to the account that registered them.
 
 ---
 
@@ -352,6 +316,8 @@ The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`.
 WebAuthn passkeys for returning users, built on the browser's `@simplewebauthn/browser` helpers.
 
 `passkeyAuthStart` works without an existing session (used to sign in). `passkeyRegisterStart` and management methods require an authenticated client.
+
+Both start calls take an optional `{ rpId }`. Omit it in a browser — the server derives the relying party from the request's `Origin`. A named `rpId` must be a key of the app's `passkeyRpConfig`, or the call fails with `PASSKEY_RP_NOT_CONFIGURED`.
 
 ### Sign in
 
@@ -423,7 +389,7 @@ The client wraps Apple's `AuthenticationServices` in two one-call helpers on `cl
 let result = try await client.auth.signInWithPasskey()   // PasskeySignInResult(user, isNewUser)
 ```
 
-- `signInWithPasskey(presentationAnchor:preferImmediatelyAvailableCredentials:)` — pass `preferImmediatelyAvailableCredentials: true` to restrict the prompt to passkeys already on the device and fail fast (no QR/cross-device fallback). Throws `PasskeyError.canceled` when the user dismisses the sheet; server-side failures surface as `HttpError`.
+- `signInWithPasskey(presentationAnchor:preferImmediatelyAvailableCredentials:rpId:)` — pass `preferImmediatelyAvailableCredentials: true` to restrict the prompt to passkeys already on the device and fail fast (no QR/cross-device fallback). Throws `PasskeyError.canceled` when the user dismisses the sheet; server-side failures surface as `HttpError`.
 
 ### Register (must be authenticated)
 
@@ -433,7 +399,15 @@ let result = try await client.auth.signInWithPasskey()   // PasskeySignInResult(
 let reg = try await client.auth.registerPasskey(deviceName: "My iPhone")
 ```
 
-- `registerPasskey(deviceName:inviteToken:presentationAnchor:)` — `deviceName` labels the credential (server default `"Unknown device"` when omitted). Pass `inviteToken` to fold invitation acceptance into registration. Throws `PasskeyError.canceled` on dismissal.
+- `registerPasskey(deviceName:inviteToken:presentationAnchor:rpId:)` — `deviceName` labels the credential (server default `"Unknown device"` when omitted). Pass `inviteToken` to fold invitation acceptance into registration. Throws `PasskeyError.canceled` on dismissal.
+
+### Relying party
+
+A native request sends no `Origin`, so name the relying party (RP ID) for every ceremony; with none, the server picks among the app's configured relying parties and a multi-RP app can get the wrong one. The RP ID must be a key of `passkeyRpConfig` and appear in the app's `webcredentials:` entitlement; an unconfigured one fails with `PASSKEY_RP_NOT_CONFIGURED`.
+
+- Client-wide: `AuthConfig(passkeyRpId:)`. Per call: the `rpId:` argument on `signInWithPasskey` / `registerPasskey`, which wins over the config value.
+- `PrimitiveAppState.initialize()` sets `passkeyRpId` from the selected environment's `webUrl` host. When the configured relying party is another host (e.g. `passkeyRpConfig` names `example.com`, `webUrl` is `https://app.example.com`), every ceremony fails with `PASSKEY_RP_NOT_CONFIGURED` — override `passkeyRpId(for:)` on your `PrimitiveAppState` subclass to return the configured host (or `nil` to let the server pick), or add the `webUrl` host to `passkeyRpConfig`.
+- One ceremony in a `PrimitiveApp` app: `authManager.signInWithPasskey(rpId:)` / `authManager.enrollPasskey(deviceName:rpId:)`.
 
 ### Manage
 
@@ -611,7 +585,13 @@ const client = await initializeClient({
 `baseUrl` must be a same-origin worker that forwards `/auth/*` and `/oauth/callback` to `/app/:appId/api/auth/*`. When configured, `magicLinkVerify`, `otpVerify`, `handleOAuthCallback`, `logout`, and the OAuth-code static helper all route through the proxy.
 {{/lang}}
 {{#lang swift}}
-The token is persisted through the client's storage provider (SQLite by default); `storageKeyPrefix` namespaces it. The Keychain holds offline-access grants, not the JWT session. `waitForAuthBootstrap()` restores any persisted session, so an authenticated user stays signed in on relaunch. `client.authPersistenceInfo` is a `[String: JSONValue]` of `["mode": "persisted" | "memory", "prefix": <storageKeyPrefix>]`. Tokens within ~2 min of expiry are not reused, and one with no readable expiry is treated as unusable. Startup does not depend on persistence being on: whenever the client launches without a usable token it tries a cookie-based refresh, so a user whose `rt-{appId}` cookie is still alive is signed back in either way. A refresh that the server rejects at startup just leaves the client signed out — it clears any persisted token and emits no `authFailed`. Any `logout()` clears the persisted JWT — `wipeLocal` is not required — and outside startup, a refresh the server rejects with 401 ends the session: the token is cleared, the persisted JWT is deleted, and `auth:state` reports `authenticated: false`.
+Call `waitForAuthBootstrap()` before checking sign-in state. It restores a usable persisted session or attempts a cookie-based refresh. `storageKeyPrefix` separates stored sessions; `authPersistenceInfo` reports the persistence mode and prefix.
+
+### Gotchas when restoring a session
+
+- A rejected startup refresh leaves the client signed out without emitting `authFailed`. Check the resulting authentication state.
+- `logout()` clears the persisted session even without `wipeLocal`.
+- After startup, a refresh rejected with 401 clears the session and emits `auth:state` with `authenticated: false`.
 {{/lang}}
 
 ---
@@ -811,25 +791,19 @@ The `email-sign-in` email is one of the transactional types Primitive sends; ove
 
 ---
 
-## Implementation Checklist
+## Gotchas {#implementation-checklist}
 
-1. Call `getAuthConfig()` to discover enabled methods before rendering UI.
-2. Implement at least one primary method (OAuth or Magic Link).
-3. Handle the OAuth callback (`code` + `state`) and the Magic Link `magic_token`.
+- **Check method availability before rendering sign-in controls.** Use `getAuthConfig()` so disabled providers are not offered.
+- **Wait for authentication before loading app data.** Initialize auth, open documents, then run queries. React to later sign-out as well as sign-in.
+- **Preserve invitation tokens through redirects.** Pass the token into sign-in verification; use explicit acceptance for an already signed-in user.
+- **Keep email code entry available.** A sign-in link may be opened on a device without the app.
+- **Use error codes for recovery.** Show your own message and retain a generic fallback for unknown errors.
+
 {{#lang ts}}
-4. Listen to `auth-failed` and `auth:onlineAuthRequired` (minimum) to prompt re-login.
-5. Catch `AuthError` and switch on `err.code` (use `AUTH_CODES` constants).
-6. Gate your app layout on `isAuthenticated` so child components can assume `currentUser`.
-7. Watch `isAuthenticated` reactively in downstream stores (it changes both directions).
-8. Sequence: auth ready → open documents → query data.
-9. The template's `/onboarding` route owns the post-sign-in passkey prompt and profile completion for every method; a hand-rolled auth UI should offer passkey registration when `promptAddPasskey` is true after verify.
-10. Customize email templates via CLI if you need branded auth emails.
+- **A network interruption is not proof of sign-out.** Use `auth-failed` and `auth:onlineAuthRequired` to decide when to request sign-in again.
+- **Offer passkey registration after sign-in.** The template’s onboarding route handles this; custom UI should check `promptAddPasskey`.
 {{/lang}}
 {{#lang swift}}
-4. Listen to `.authFailed` and `.authOnlineRequired` (minimum) to prompt re-login.
-5. Catch `AuthError` and switch on `error.code`.
-6. Gate your app layout on `isAuthenticated` (via `AuthGateView`) so child views can assume an authenticated user.
-7. Observe `authManager.$isAuthenticated` in downstream state (it changes both directions).
-8. Sequence: auth ready → open documents → query data.
-9. Customize email templates via CLI if you need branded auth emails.
+- **Do not clear the session after a transport failure.** Retry transient failures; request sign-in again when the server rejects refresh credentials.
+- **Returning Apple identities need explicit invitation acceptance.** Call `invitations.accept` after sign-in when carrying a pending token.
 {{/lang}}

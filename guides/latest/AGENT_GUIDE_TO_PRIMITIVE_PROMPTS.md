@@ -1,6 +1,40 @@
-# Prompt Feature Guide for Coding Agents
+# Prompt Guide for Coding Agents
 
-How to author, test, and run LLM prompts on Primitive: `prompts/<key>.toml` configuration, the `primitive` CLI, and `ctx.prompts.run` from a server function.
+A prompt stores model settings and a reusable template in `prompts/<key>.toml`.
+A server function runs it by key. Change and test configurations separately
+from the function that calls them.
+
+## Define a prompt
+
+Define a prompt in TOML and push it with `config push`. The `[prompt]` table
+carries its identity; the template text lives on a **configuration** alongside
+the provider and model:
+
+```toml
+# primitive/dev/prompts/summarizer.toml
+[prompt]
+kind = "chat"
+key = "summarizer"
+displayName = "Document Summarizer"
+
+[[configs]]
+name = "default"
+active = true    # exactly one entry carries this — it is the config the server runs
+provider = "gemini"
+model = "models/gemini-3-flash-preview"
+
+[configs.chat]
+temperature = 0.5
+systemPrompt = "You are a skilled summarizer. Create clear, accurate summaries."
+userPromptTemplate = """
+Summarize the following text in a {{ input.style || 'brief' }} style:
+
+{{ input.text }}"""
+```
+
+```bash
+primitive config push
+```
 
 ## Run a prompt from a server function
 
@@ -16,321 +50,126 @@ export default defineFunction(async (input: { text: string }, ctx) => {
 });
 ```
 
-## Quick Mental Model
+Pass values under `variables`; templates read them under `input`.
+`configId` selects one of the prompt's configurations (any other id answers
+`PROMPT_NO_CONFIG`) and `modelOverride` changes the model for one call. No prompt capability is required; the function’s `access` rule
+controls callers.
 
-A **prompt** is versioned configuration: a named template (e.g. `summarizer`) plus 1+ **configs**, authored in `prompts/<key>.toml` and applied by `primitive config push`. Each config is a `(provider, model, systemPrompt, userPromptTemplate, ...)` tuple. One config is the **active** config — that's what runs when you don't pass `configId` / `--config`. Test cases are attached to the prompt and verify outputs (regex / contains / JSON subset / LLM evaluator).
-
-A prompt runs from a **server function**, through `ctx.prompts.run(key, …)`. It has no client endpoint and no access rule of its own: the calling function's `access` gate is the whole authorization, and no capability line is needed to run a prompt. `primitive prompts execute` is the admin diagnostic for running one by hand.
-
-Templates use `{{ }}` interpolation. Inputs are passed as `variables: { foo }` at run time and read as `{{ input.foo }}`.
-
----
-
-## Availability
-
-A prompt's availability is one server-owned `status` — `active | inactive | archived` — and it is **not** a TOML key; see the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#toml-is-the-only-write-path) for the server-owned model and [Push pruning](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#push-pruning-deleting-server-entities) for archive vs. prune and the recovery recipe. Every created or pushed prompt is active; `primitive prompts disable <prompt-id>` takes one out of service and `primitive prompts enable <prompt-id>` puts it back — both take the prompt ID `primitive prompts list` prints, not its key (the console has the matching action).
-
-| Status     | `ctx.prompts.run`                  | `primitive prompts execute` |
-| ---------- | ---------------------------------- | --------------------------- |
-| `active`   | Yes                                | Yes                         |
-| `inactive` | No (`400 PROMPT_NOT_EXECUTABLE`)   | Yes — it is the diagnostic  |
-| `archived` | No                                 | No — it has been deleted    |
-
-`primitive prompts execute` is the documented way to trial an inactive prompt before enabling it. An archived prompt is refused everywhere — `ctx.prompts.run`, `primitive prompts execute`, test runs, and as another test case's **evaluator**. Archiving destroys nothing: the prompt's configs and stored bodies stay, so executions and analytics rows that name it keep resolving.
-
-The per-CONFIG `status` is a different question and stays in TOML. A config defaults to `status = "active"`; `status = "archived"` takes that named version out of service, and the resolve path refuses it (`PROMPT_CONFIG_NOT_EXECUTABLE` when a run pins it). `config pull` writes the line only for a config that IS archived, so an ordinary pulled prompt file carries no `status` at all — an omitted line means active, and deleting an `archived` line puts that config back in service on the next push.
-
-> `PROMPT_NOT_FOUND` (`404`) from `ctx.prompts.run` means no prompt with that key exists in the app. An inactive prompt is `400 PROMPT_NOT_EXECUTABLE`, not a `404`. A prompt with no active config and no `configId` in the call — or a `configId` that is not one of this prompt's configs — is `400 PROMPT_NO_CONFIG`.
-
----
-
-## Template Syntax
-
-Prompts render with the platform's strict template engine.
-
-### Variable access
+## Template syntax
 
 ```
-{{ input.foo }}              # input.foo
-{{ input.user.name }}        # nested
-{{ input.items[0] }}         # array index
-{{ input.items[0].name }}    # mixed
+{{ input.text }}
+{{ input.style || 'brief' }}
+{{ input.items[0].name }}
 ```
 
-### Template context
+Missing variables fail rendering. Use a fallback for optional values. Use the
+`json` filter when interpolating structured values; do not assemble JSON by
+quoting unescaped input.
 
-```typescript
-{
-  input: Record<string, any>,    // your variables, e.g. variables: { x } → input.x
-  selected: any,                 // alias for input
-  meta: Record<string, any>,
-  output?: any,                  // ONLY in evaluator prompts (see below)
-}
-```
+## Test before activation
 
-### Missing variables fail the render
-
-An unresolved reference fails the render. Guard an optional path with a `||` fallback.
-
-```
-template:  "Hello {{ input.name }}"
-vars:      {}
-output:    "Hello "
-```
-
-Use `||` chained fallbacks or the `default` filter to handle this:
-
-```
-{{ input.name || "Anonymous" }}
-{{ input.name || input.username || "Anonymous" }}
-{{ input.name | default: "Anonymous" }}
-```
-
-Note `||` only falls back when the resolved value is null/undefined/empty-string (`templates.ts:363`). A resolved variable equal to `0` or `false` is kept and does NOT fall through. The one exception: a literal numeric `0` written directly in the template (e.g. `{{ 0 || "x" }}`) falls through to the next variant because the literal-number branch checks `if (asNumber)` (`templates.ts:347`).
-
-### Filters (pipe syntax)
-
-```
-{{ input.data | json }}                   # JSON.stringify with 2-space indent
-{{ input.name | upper }}                  # uppercase (alias: uppercase)
-{{ input.name | lower }}                  # lowercase (alias: lowercase)
-{{ input.text | trim }}
-{{ input.items | length }}                # array/string len, object key count (alias: size)
-{{ input.items | first }}
-{{ input.items | last }}
-{{ input.obj | keys }}
-{{ input.obj | values }}
-{{ input.val | string }}
-{{ input.val | number }}
-{{ input.items | join: ", " }}            # default sep is ","
-{{ input.name | default: "Anonymous" }}
-
-# String
-{{ input.text | split: "," }}
-{{ input.text | replace: "old", "new" }}
-{{ input.text | truncate: "100" }}        # appends "..."
-{{ input.text | startsWith: "foo" }}
-{{ input.text | endsWith: "bar" }}
-{{ input.text | contains: "baz" }}
-
-# Number
-{{ input.n | round }} | floor | ceil | abs
-{{ input.n | toFixed: "2" }}
-
-# Date
-{{ "" | now }}                            # current ISO timestamp
-{{ input.ts | toISOString }}
-
-# Array
-{{ input.items | pluck: "name" }}         # [{name:"a"},{name:"b"}] → ["a","b"]
-{{ input.items | where: "type", "user" }}
-{{ input.items | sort: "name" }}          # or no arg for primitives
-{{ input.items | reverse }}
-{{ input.items | flatten }}
-{{ input.items | uniq }}
-{{ input.items | compact }}               # remove null/empty/false
-{{ input.items | slice: "0", "5" }}
-{{ input.items | concat: '["x","y"]' }}   # concat with JSON-encoded array
-
-# Validation — THROWS on mismatch (non-retryable)
-{{ input.items | expect: "array" }}       # array | object | string | number | boolean
-```
-
-Filter arguments are quoted: `| filter: "arg1", "arg2"`. Unquoted bare words also work (`| join: ,`) but quoting is safer.
-
-Unknown filter names log a warning and pass the value through unchanged.
-
-### Raw value vs string interpolation
-
-If the entire template is exactly one expression, the raw value is preserved (arrays/objects not stringified). Otherwise everything becomes a string.
-
-```
-template:  "{{ input.items }}"
-vars:      { items: [1,2,3] }
-result:    [1,2,3]   # actual array
-
-template:  "Items: {{ input.items }}"
-vars:      { items: [1,2,3] }
-result:    "Items: 1,2,3"   # string
-```
-
-Use `| json` when you need to embed objects in larger strings:
-
-```
-Data: {{ input.config | json }}
-```
-
-### Don't do this
-
-```
-# WRONG — assumes a missing var renders empty. It doesn't: the render fails.
-"Hello {{ input.name }}!"   →  error (unresolved reference: input.name)
-
-# WRONG — using {{}} inside JSON without escaping breaks parsing.
-"Reply with {\"name\": \"{{ input.name }}\"}"
-# If input.name is `Bob"; DROP TABLE users; --`, you get malformed JSON.
-# Prefer outputSchema with structured output instead, or | json the whole object.
-
-# WRONG — base64 attachment data in template context bloats prompts.
-# Attachments under variables.attachments[] are auto-stripped from templates
-# and sent as file parts. Don't reference them in {{ }}.
-```
-
----
-
-## TOML File Format
-
-Read and written by `primitive config pull` / `primitive config push` — the only path that creates or updates a prompt.
-
-### Basic structure
+Define test cases to validate prompt behavior before you activate a change. A
+case is a TOML file beside the prompt, applied by `config push`:
 
 ```toml
+# prompts/summarizer.tests/basic-test.toml
+[test]
+name = "basic-test"
+inputVariables = '{"text": "Long article text...", "style": "bullet points"}'
+expectedOutputContains = '["•"]'
+```
+
+```bash
+primitive config push --only prompt/summarizer
+primitive prompts tests list summarizer
+primitive prompts tests run-all summarizer
+```
+
+Test commands accept the prompt key or ID. Push new or edited test files
+before running them: tests execute the registered server-side cases.
+
+Use `primitive config fields prompt` for test-case fields. Remove a case file
+and push with `--prune` to delete it. See
+[Test Case Identity](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md).
+
+Verification types include substring `contains`, regex pattern, JSON subset, and LLM-as-judge.
+
+Use `primitive prompts preview` to inspect rendered text without a model call.
+Use `primitive prompts execute` for an admin test. `execute` can run a disabled
+prompt; a server function cannot.
+
+## Configurations
+
+Each `[[configs]]` entry has a unique `name`, a `provider`, and a `model`.
+Set exactly one `active = true`; runs use it unless they specify `configId`.
+Use `status = "archived"` to retire a named configuration.
+
+Shared keys are `name`, `status`, `description`, `provider`, `model`,
+`providerConfig`, and `active`. `providerConfig` is stored metadata and does
+not modify the provider request.
+
+| Chat key | Purpose |
+| --- | --- |
+| `systemPrompt` | Instructions to the model. |
+| `userPromptTemplate` | Template rendered from input variables. |
+| `temperature`, `topP` | Sampling settings. |
+| `maxTokens` | Output token limit. |
+| `outputFormat` | Text or JSON output. |
+| `outputSchema` | Configuration-level schema; function result validation uses the prompt-level schema. |
+| `reasoningEffort`, `reasoningBudget` | Alternative reasoning controls; choose one. |
+| `strictOutput` | OpenRouter strict schema output; requires a compatible model and prompt output schema. |
+
+Chat keys go under `[configs.chat]`. A decisions configuration uses
+`[configs.decisions]` with `questions`. The prompt’s `kind` selects the block
+and is fixed at creation. Use `primitive config fields prompt` for field types.
+
+## Typed output
+
+When a prompt answers JSON, declare its shape once on the prompt and stop
+parsing it by hand. `[prompt.outputSchema]` is sent to the provider, the answer
+is validated against it, and `config push` renders it into
+`functions/primitive-prompt-types.d.ts` so the function's call is typed from it:
+
+```toml
+# primitive/dev/prompts/categorize.toml
 [prompt]
-kind = "chat"                    # optional: chat (default) | decisions — fixed at create
-key = "my-prompt"                # required, unique per app, kebab-case
-displayName = "My Prompt"        # required
-description = "What it does"     # optional
-inputSchema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+key = "categorize"
+displayName = "Categorize"
 
-[[configs]]
-name = "default"                 # required, unique per prompt
-description = "..."              # optional
-provider = "gemini"              # required: gemini | openrouter
-model = "models/gemini-3-flash-preview"   # required
+[prompt.outputSchema]
+type = "object"
+required = ["category"]
 
-[configs.chat]                   # the block named by the prompt's kind
-userPromptTemplate = "Summarize: {{ input.text }}"   # required for kind = "chat"
-systemPrompt = "You are concise."        # optional
-temperature = 0.3                # optional, number or string ("0.3"); stored as string
-maxTokens = 1000                 # optional integer
-outputFormat = "text"            # optional: text (default) | json — request/response shaping only
-reasoningEffort = "minimal"      # optional: none | minimal | low | medium | high — how much the provider may think
-# reasoningBudget = 512          # ...or a token budget instead. Never both.
+[prompt.outputSchema.properties.category]
+type = "string"
 ```
 
-### Prompt kinds and the per-kind block
-
-`[prompt].kind` says what the prompt runs: `chat` (the default, and every
-prompt written before the key existed) or `decisions`, OpenRouter's decisions
-endpoint with its named typed `questions`. It is fixed at create — converting a
-prompt means a new key, and `config push` declines a changed `kind` as
-immutable before it sends anything.
-
-A `[[configs]]` entry carries the keys that are not specific to a kind
-(`name`, `status`, `description`, `provider`, `model`, `providerConfig`, plus
-the `active` marker) and then exactly ONE block, named after the prompt's kind:
-
-| `kind` | block | keys |
-| ------ | ----- | ---- |
-| `chat` | `[configs.chat]` | `systemPrompt`, `userPromptTemplate`, `temperature`, `topP`, `maxTokens`, `outputFormat`, `outputSchema`, `reasoningEffort`, `reasoningBudget`, `strictOutput` |
-| `decisions` | `[configs.decisions]` | `questions` |
-
-A `[configs.chat]` block under a decisions prompt — or a `[configs.decisions]`
-block under a chat prompt — is refused, naming the block and the kind.
-
-### Field reference
-
-**`[prompt]`:**
-
-| Key            | Required | Notes                                                                                |
-| -------------- | -------- | ------------------------------------------------------------------------------------ |
-| `key`          | Yes      | Unique per app                                                                       |
-| `displayName`  | Yes      |                                                                                      |
-| `description`  | No       |                                                                                      |
-| `kind`         | No       | `chat` (default) \| `decisions`. Fixed at create; decides which `[configs.<kind>]` block an entry may carry |
-| `inputSchema`  | No       | JSON Schema, as a `[prompt.inputSchema]` table or a JSON string                      |
-| `outputSchema` | No       | JSON Schema, same forms. Round-trips: `config pull` writes it back. **This is the one a server function reads** — see below                     |
-
-`config push` applies the complete `[prompt]` table: a file with no `outputSchema` key clears any output schema stored on the server.
-
-**`[prompt.outputSchema]` is the declaration that counts.** It is what a run sends to the provider, and it is what `ctx.prompts.run("<key>")` parses and validates the answer against, handing it back as `parsed` — typed, because `config push` renders it into `functions/primitive-prompt-types.d.ts`. A config's own `[configs.outputSchema]` is stored with that config and is **not** read by `ctx.prompts.run`.
-
-What a function gets back — `parsed`, the `PROMPT_OUTPUT_*` codes, `upstreamStatus` on a provider failure, the generated types — is under Typed output (in Running from a server function).
-
-**`[[configs]]` — the shared keys:**
-
-| Key                  | Required | Notes                                              |
-| -------------------- | -------- | -------------------------------------------------- |
-| `name`               | Yes      | Unique per prompt                                  |
-| `description`        | No       |                                                    |
-| `provider`           | Yes      | `gemini` \| `openrouter` (CLI default: `openrouter`). A decisions config must be `openrouter` |
-| `model`              | Yes      | Provider-specific identifier                       |
-
-**`[configs.chat]` — a `kind = "chat"` prompt's settings:**
-
-| Key                  | Required | Notes                                              |
-| -------------------- | -------- | -------------------------------------------------- |
-| `userPromptTemplate` | Yes      |                                                    |
-| `systemPrompt`       | No       |                                                    |
-| `temperature`        | No       | Stored as string; numbers in TOML are accepted     |
-| `topP`               | No       | Nucleus-sampling cutoff; stored as string          |
-| `maxTokens`          | No       | Integer                                            |
-| `outputFormat`       | No       | `text` (default) \| `json`. On openrouter, `json` requests provider JSON mode (`response_format`); on gemini it only normalizes the response (fence stripping) — a gemini config constrains the request with `outputSchema` instead. `json` alone gives `ctx.prompts.run` an untyped `parsed`. |
-| `outputSchema`       | No       | Config-level JSON Schema, stored with the config. `ctx.prompts.run` validates against `[prompt.outputSchema]`, not this one |
-| `reasoningEffort`    | No       | `none` \| `minimal` \| `low` \| `medium` \| `high`. How much the provider may spend on reasoning before answering. Mutually exclusive with `reasoningBudget` |
-| `reasoningBudget`    | No       | The same control as a whole number of reasoning tokens. Mutually exclusive with `reasoningEffort` |
-| `strictOutput`       | No       | `true` sends `[prompt.outputSchema]` to OpenRouter as a strict `json_schema`, so the provider constrains the answer. OpenRouter only; refused beside a config-level `outputSchema`, with `outputFormat = "text"`, or when the prompt declares no `outputSchema`. The model must support structured outputs: a write naming one that does not is refused `AGENT_MODEL_CAPABILITY_MISSING`, and a write is refused `AGENT_MODEL_CAPABILITIES_UNAVAILABLE` when the model catalog cannot be checked |
-
-**`[configs.decisions]` — a `kind = "decisions"` prompt's settings:**
-
-| Key         | Required | Notes                                                        |
-| ----------- | -------- | ------------------------------------------------------------ |
-| `questions` | Yes      | The named typed questions the model answers, authored as `[configs.decisions.questions.<name>]` tables (or a JSON string). Each has a `type` (`choice` \| `score` \| `noul`) and `instructions`; a `choice` question also needs `criteriaSource` — `"static"` with a `criteria` table of at least two option key = description pairs, or `"dynamic"` with no table (each run supplies the options as `variables.criteria.<name>`) |
-
-**Back at the `[[configs]]` root, whatever the kind:**
-
-| Key                  | Required | Notes                                              |
-| -------------------- | -------- | -------------------------------------------------- |
-| `providerConfig`     | No       | Stored with the config and returned by the API, but **not applied to the provider request**. Keyed to the provider rather than to the kind, so it stays at the entry root. Nothing reads it at execution — to bound the model's reasoning use `[configs.chat].reasoningEffort` / `reasoningBudget` above |
-| `active`             | No       | Marks this entry as the live config — exactly one entry may carry `active = true` (two is an error, not first-wins). Written by `config pull`, honored on create and update |
-
-**Not exposed in TOML**: the config's `status` (activation is its own endpoint) and the server-owned ids/timestamps. Every field in the tables above round-trips — `config pull` writes back what the server holds, and `config push` rejects a key the CLI does not recognize rather than dropping it silently.
-
-### Multiple configs
-
-```toml
-[prompt]
-key = "summarizer"
-displayName = "Document Summarizer"
-
-[[configs]]
-name = "default"
-provider = "gemini"
-model = "models/gemini-3-flash-preview"
-
-[configs.chat]
-temperature = 0.3
-userPromptTemplate = "Summarize: {{ input.text }}"
-
-[[configs]]
-name = "creative"
-provider = "gemini"
-model = "models/gemini-3-pro-preview"
-
-[configs.chat]
-temperature = 0.8
-userPromptTemplate = "Write an engaging summary of: {{ input.text }}"
-
-[[configs]]
-name = "claude"
-provider = "openrouter"
-model = "anthropic/claude-3-5-sonnet"
-
-[configs.chat]
-temperature = 0.5
-userPromptTemplate = "Provide a concise summary: {{ input.text }}"
+```ts
+const answer = await ctx.prompts.run("categorize", {
+  variables: { text: input.text },
+});
+if (!answer.success) throw new Error(answer.error ?? "categorize failed");
+// `parsed` is the validated JSON value, typed from the schema above.
+return { category: answer.parsed.category };
 ```
 
-Mark the live config with `active = true` on exactly one `[[configs]]` entry. `config pull` writes that marker and `config push` honors it on create AND update, so the committed file always says which config the server is actually running. Two markers is an error rather than a first-wins rule. With no marker, the first entry becomes active when the prompt is created and nothing is re-activated afterwards.
+Check `success` before reading `parsed`. Its fields are typed from the prompt’s
+output schema.
 
-### Decisions prompts
 
-`kind = "decisions"` runs OpenRouter's decisions endpoint instead of a chat
-completion: the config declares named typed `questions`, the caller supplies
-one variable `state` — the value they are asked about — and the answer is one
-typed answer per question.
+
+Push writes `functions/primitive-prompt-types.d.ts` from prompt schemas.
+`parsed` is typed from `[prompt.outputSchema]`; without a schema it is unknown.
+
+## Decisions prompts
+
+A decisions prompt sends a state value and named questions to a decisions
+model. Its response contains an answer for each question. Use
+`kind = "decisions"` with an OpenRouter configuration:
 
 ```toml
+# primitive/dev/prompts/transaction-categorizer.toml
 [prompt]
 kind = "decisions"
 key = "transaction-categorizer"
@@ -352,49 +191,140 @@ gas-and-fuel = "Gas & Fuel (Auto & Transport)"
 groceries = "Groceries (Food & Restaurants)"
 ```
 
-A decisions config carries no `userPromptTemplate` and no `systemPrompt`; the
-questions are the prompt. `variables.state` is required and read by PRESENCE,
-so `null`, `0` and `""` are values and only an absent key is refused — before
-the provider call, so nothing is billed. `attachments` are refused the same
-way.
+A decisions config has no `userPromptTemplate` and no `systemPrompt`: the
+questions ARE the prompt.
 
-The three question types, with the answer each returns:
+### `state` is the input
 
-| `type` | `criteria` | Answer |
-| ------ | ---------- | ------ |
-| `choice` | with `criteriaSource = "static"`, a table of at least two `option key = description` pairs (each description a string or a JSON object); with `criteriaSource = "dynamic"`, none — the run supplies it | `{ type, choice, probabilities, confidence }` |
-| `score` | an ARRAY of the two ends of the scale, low first (required) | `{ type, score, legend, probabilities, confidence }` |
-| `noul` | none | `{ type, noul }` |
+A decisions run takes one variable, `state` — the value the questions are asked
+about. It is passed to the provider verbatim, whatever its JSON shape, and
+nothing is templated:
 
-`output` is the answers object serialized, and a server function receives it as
-`parsed` with nothing declared — a decisions run always answers JSON.
-`metrics` carries the token counts and `metrics.cost`, the price of the call in
-USD as the provider reported it. To get `parsed` TYPED, declare
-`[prompt.outputSchema]` matching the answers: typed access comes only from that
-declaration, never from the questions, because any active config can be pinned
-by `configId` and only the prompt-level schema is enforced at run time.
+```ts
+const answer = await ctx.prompts.run("transaction-categorizer", {
+  variables: {
+    state: {
+      transaction: {
+        bank_description: "CHEVRON 0093847",
+        amount: -61.2,
+        date: "2026-08-11",
+      },
+    },
+  },
+});
+```
 
-A test case carries `state` in its `inputVariables` and asserts on the answers
-with `expectedJsonSubset` (`'{"category": {"choice": "gas-and-fuel"}}'`). A
-decisions prompt may NOT be a test case's evaluator: an evaluator is handed the
-evaluated input and output as template variables, which a decisions run cannot
-read, so an evaluator must be a chat prompt.
+Always supply `variables.state`. It can be any JSON value, including `null`,
+`0`, or an empty string. Decisions prompts accept state and question options;
+use chat prompts for attachments.
 
-#### Options supplied per run
+### The answers
 
-Every `choice` question says where its options come from with a required
-`criteriaSource`. `criteriaSource = "static"` requires the `criteria` table in
-the config, and a run may not supply one. `criteriaSource = "dynamic"` refuses a
-config table: each run supplies the options as `variables.criteria.<question>`,
-beside `state` — for options that are data, such as "which of these previous
-transactions is the same merchant". The config still owns the question's name,
-type and instructions; a run only supplies what it chooses between.
+`output` is the answers object serialized, and a server function receives it
+as `parsed` with no declaration needed — a decisions run always answers JSON.
+`metrics` carries `inputTokens`, `outputTokens`, `totalTokens` and
+**`metrics.cost`**, the price of the call in USD as the provider reported it
+(absent when the provider reports none).
+
+There are three question types. To get `parsed` **typed**, declare the matching
+`[prompt.outputSchema]` — typed access comes only from that declaration, never
+from the questions, because any active config of the prompt can be pinned by
+`configId` and only the prompt-level schema is enforced at run time.
+
+**`choice`** — pick one of the `criteria` keys. `criteria` is a table of at
+least two `option key = description` pairs, each description a non-empty string
+or a non-empty JSON object, and every `choice` question declares where it comes
+from with `criteriaSource`: `"static"` for a table in the config, as above, or
+`"dynamic"` for options each run supplies (see
+[Options supplied per run](#options-supplied-per-run)).
+
+```json
+{ "type": "choice", "choice": "gas-and-fuel",
+  "probabilities": { "gas-and-fuel": 1, "groceries": 0 }, "confidence": 1 }
+```
 
 ```toml
+[prompt.outputSchema]
+type = "object"
+
+[prompt.outputSchema.properties.category]
+type = "object"
+
+[prompt.outputSchema.properties.category.properties.type]
+const = "choice"
+
+[prompt.outputSchema.properties.category.properties.choice]
+enum = ["gas-and-fuel", "groceries"]
+
+[prompt.outputSchema.properties.category.properties.probabilities]
+type = "object"
+
+[prompt.outputSchema.properties.category.properties.confidence]
+type = "number"
+```
+
+**`score`** — a number between the two ends of a scale. Here the `criteria` is an **array**
+of exactly the two endpoint descriptions, low first; the endpoint answers
+`400` without it. The answer carries the `legend` it scored against beside the
+score:
+
+```json
+{ "type": "score", "score": 0.01,
+  "legend": { "0": "not unusual at all", "1": "extremely unusual" },
+  "probabilities": { "0": 0.99, "1": 0.01 }, "confidence": 0.98 }
+```
+
+```toml
+[configs.decisions.questions.unusual]
+type = "score"
+instructions = "How unusual is this transaction for a typical household?"
+criteria = ["not unusual at all", "extremely unusual"]
+```
+
+**`noul`** — a bare number, with no confidence:
+
+```json
+{ "type": "noul", "noul": 0.81 }
+```
+
+Any other key on a question is passed through to the provider, which validates
+it — except `criteriaSource`, which is the platform's own and is never sent.
+
+### Options supplied per run
+
+Some questions only have options at run time: "which of this household's
+previous transactions is the same merchant as this one" has a different set of
+candidates for every transaction. Declare such a question
+`criteriaSource = "dynamic"`, with no `criteria` table, and pass the options
+with each run as `variables.criteria.<question>`, beside `state`:
+
+```toml
+# primitive/dev/prompts/precedent-matcher.toml
+[prompt]
+kind = "decisions"
+key = "precedent-matcher"
+displayName = "Precedent matcher"
+
+[[configs]]
+name = "jev"
+active = true
+provider = "openrouter"
+model = "typesafe/jev-1.13"
+
 [configs.decisions.questions.precedent]
 type = "choice"
 instructions = "Which previous transaction is the same merchant as this one, if any?"
-criteriaSource = "dynamic"         # each run passes variables.criteria.precedent
+criteriaSource = "dynamic"         # each run must pass variables.criteria.precedent
+
+[configs.decisions.questions.category]
+type = "choice"
+instructions = "Which household category does this bank transaction belong to?"
+criteriaSource = "static"          # the table below is required; a run may not supply one
+
+[configs.decisions.questions.category.criteria]
+gas-and-fuel = "Gas & Fuel (Auto & Transport)"
+groceries = "Groceries (Food & Restaurants)"
+other = "None of the above"
 ```
 
 ```ts
@@ -403,8 +333,8 @@ const answer = await ctx.prompts.run("precedent-matcher", {
     state: { transaction },
     criteria: {
       precedent: {
-        p1: { bank_description: "CHEVRON 00938", category: "gas-and-fuel", amount: -42.1 },
-        p2: { bank_description: "SHELL 4411", category: "gas-and-fuel", amount: -50 },
+        p1: { bank_description: "CHEVRON 00938", category: "gas-and-fuel", amount: -42.1, date: "2026-07-30" },
+        p2: { bank_description: "SHELL 4411", category: "gas-and-fuel", amount: -50.0, date: "2026-07-12" },
         none: "No previous transaction is the same merchant",
       },
     },
@@ -412,557 +342,91 @@ const answer = await ctx.prompts.run("precedent-matcher", {
 });
 ```
 
-- Each option is `key = description`, the description a non-empty string or a non-empty JSON object. At least two options; keys non-empty with no leading or trailing whitespace. The same rule applies to a `"static"` table at push.
-- The run is refused BEFORE the provider call — nothing is billed — as `success: false` with `errorCode: "PROMPT_CRITERIA_INVALID"` and an `error` naming the question and the rule, when: a `"dynamic"` question has no options or a malformed table; the run supplies options for a `"static"`, `score` or `noul` question or a name the config does not declare; `variables.criteria` is not an object; or a stored `choice` question has no `criteriaSource`.
-- `criteriaSource` is the platform's key and is never sent to the provider. The answer is typed as for any `choice`; the provider's answer is passed through, so a function that acts on `choice` checks it against the keys it supplied.
-- `variables.criteria` means this only on a decisions prompt; on a chat prompt it is an ordinary variable (`{{ input.criteria }}`).
+The config still owns each question's name, type and instructions, so a run
+cannot change what is asked — only the options it chooses between. The provider
+is asked exactly the config's questions, with the run's table as each
+`"dynamic"` question's `criteria`, and the answer comes back typed as for any
+`choice` question. The provider's answer is passed through as it came, so a
+function that acts on `choice` checks it against the keys it supplied.
 
-A test case supplies per-run options in its `inputVariables`, beside `state`:
+A run's options follow the same rule as a config's table — at least two;
+option keys non-empty with no leading or trailing whitespace; each description
+a non-empty string or a non-empty JSON object — and are checked **before** the
+provider call, so a malformed run is never billed. These all answer
+`success: false` with `errorCode: "PROMPT_CRITERIA_INVALID"`, no tokens or cost
+in `metrics`, and an `error` naming the question and the rule:
+
+- a `"dynamic"` question with no `variables.criteria.<question>`, or a table the rule refuses;
+- options for a `"static"` question, for a `score` or `noul` question, or for a name the config does not declare;
+- a `variables.criteria` that is not an object;
+- a stored `choice` question with no `criteriaSource` — declare it and push again.
+
+`criteriaSource` is required on every `choice` question: push, and the admin
+create and update routes, refuse one without it, a `"static"` question without
+a table, a `"dynamic"` question with one, and `criteriaSource` on a `score` or
+`noul` question, naming the question. On a chat prompt `variables.criteria` is
+an ordinary variable (`{{ input.criteria }}`).
+
+### Testing a decisions prompt
+
+A test case carries `state` in its `inputVariables` and asserts on the answers
+with `expectedJsonSubset` — the chosen option is what you pin:
+
+```toml
+# prompts/transaction-categorizer.tests/chevron.toml
+[test]
+name = "chevron"
+inputVariables = '{"state": {"transaction": {"bank_description": "CHEVRON 0093847", "amount": -61.2, "date": "2026-08-11"}}}'
+expectedJsonSubset = '{"category": {"choice": "gas-and-fuel"}}'
+```
+
+A case for a `"dynamic"` question supplies the run's options the same way,
+beside `state` — a case's `inputVariables` is the run's `variables`:
 
 ```toml
 # prompts/precedent-matcher.tests/chevron-repeat.toml
 [test]
 name = "chevron-repeat"
-inputVariables = '{"state": {"transaction": {"bank_description": "CHEVRON 0093847", "amount": -61.2}}, "criteria": {"precedent": {"p1": {"bank_description": "CHEVRON 00938", "amount": -42.1}, "none": "No previous transaction is the same merchant"}}}'
+inputVariables = '{"state": {"transaction": {"bank_description": "CHEVRON 0093847", "amount": -61.2, "date": "2026-08-11"}}, "criteria": {"precedent": {"p1": {"bank_description": "CHEVRON 00938", "category": "gas-and-fuel", "amount": -42.1, "date": "2026-07-30"}, "none": "No previous transaction is the same merchant"}}}'
 expectedJsonSubset = '{"precedent": {"choice": "p1"}}'
 ```
 
-A case whose options are refused records a failed run whose one failed check
-names the question and the rule, on the synchronous runner and the batch
-runner alike, with no provider call.
-
-### Evaluator prompts
-
-Evaluators judge another prompt's output. They get TWO context entries:
-
-- `{{ input.* }}` — the **original input variables** that were passed to the prompt being evaluated
-- `{{ output }}` — the **output text** from that prompt (top-level, NOT under `input`)
-
-```toml
-[prompt]
-key = "haiku-evaluator"
-displayName = "Haiku Evaluator"
-
-[[configs]]
-name = "default"
-provider = "gemini"
-model = "models/gemini-3-flash-preview"
-
-[configs.chat]
-temperature = 0
-systemPrompt = "You judge LLM outputs. Respond ONLY with valid JSON."
-userPromptTemplate = """
-Original input topic: {{ input.text }}
-
-Output to evaluate:
-{{ output }}
-
-Respond with JSON:
-{
-  "passed": true,
-  "reasoning": "Brief overall assessment",
-  "checks": [
-    {"name": "Proper Haiku Form", "passed": true, "message": "Follows 5-7-5"},
-    {"name": "Relevant to Subject", "passed": true, "message": "On topic"}
-  ]
-}
-"""
-```
-
-> **Footgun:** `{{ input.output }}` does NOT give you the output to evaluate — it would only resolve if your variables happened to have an `output` key. Use bare `{{ output }}`.
-
-The evaluator output is parsed for `{ passed, reasoning, checks: [{name, passed, message}] }`. If JSON parsing fails, only the overall `passed` count is used.
-
----
-
-## CLI Reference
-
-The app is the one the project's selected environment names in `primitive/config.json` (`primitive whoami` reports it). All commands accept `--app <app-id>` or a positional `[app-id]` to override.
-
-Use `--json` for machine-readable output.
-
-### Reading prompts
-
-```bash
-primitive prompts list [app-id] [--status active|inactive] [--json]
-primitive prompts get <prompt-id> [--json]
-```
-
-### Writing prompts (TOML only)
-
-A prompt is `prompts/<key>.toml`: a `[prompt]` table plus one `[[configs]]` block per named model config, exactly one of which carries `active = true`. There is no create/update/delete command.
-
-```bash
-primitive config fields prompt                  # every key, type, required, default
-primitive config create prompt summarizer       # scaffold prompts/summarizer.toml
-primitive config push --only prompt/summarizer  # apply just this prompt
-```
-
-Delete a prompt by removing its file and running `primitive config push --prune`; its `<key>.tests/` sidecar goes with it.
-
-### Execute & preview
-
-```bash
-primitive prompts execute <prompt-id> --vars '{"text":"Hello"}' [--config <config-id>] [--json]
-primitive prompts preview <prompt-id> --vars '{"text":"Hello"}' [--config <config-id>] [--json]
-primitive prompts schema  <prompt-id> [--json]
-```
-
-`preview` renders the template without calling the LLM — fast for verifying interpolation.
-`schema` returns `{ promptId, promptKey, displayName, inputSchema, outputSchema, inputVariables, activeConfigId, activeConfigName }`. `inputVariables` is an array of `{ name, type, description, required }` derived from `inputSchema.properties` (NOT from `{{ }}` references in the template). When no `inputSchema` is set, `inputVariables` is an empty array.
-
-### Configs
-
-```bash
-primitive prompts configs list <prompt-id>
-primitive prompts configs get <prompt> <config>   # by key or id, name or id
-```
-
-Configs are read here and written in `prompts/<key>.toml`: each is a
-`[[configs]]` entry with `name`, `provider` and `model`, plus a
-`[configs.chat]` block (`userPromptTemplate`, `systemPrompt`, …) or a
-`[configs.decisions]` block, per the tables above. `active = true` marks the live one,
-`status = "archived"` archives one, and duplicating is copying the block under a
-new `name`. Apply with `primitive config push --only prompt/<key>`.
-
-### Test cases
-
-Test cases are authored in TOML, one file per case, in a sidecar directory
-beside the prompt, and applied by `config push`:
-
-```toml
-# prompts/greeting.tests/basic-test.toml
-[test]
-name = "Basic test"
-description = "Greets by name"
-inputVariables = '{"text":"hello"}'
-# Empty means "not set": the case runs against the active config, unpinned and
-# unscored. Blanking a field and pushing CLEARS it server-side.
-configName = ""
-evaluatorPromptKey = ""
-evaluatorConfigName = ""
-expectedOutputPattern = ""
-expectedOutputContains = '["hi","hello"]'
-expectedJsonSubset = '{}'
-```
-
-`primitive config fields prompt` lists every key. `inputVariables`,
-`expectedOutputContains` and `expectedJsonSubset` carry JSON **text** — invalid
-JSON fails the push preflight, before anything is applied. Deleting a case is
-removing its file and running `primitive config push --prune`.
-
-Read them back from the CLI:
-
-```bash
-primitive prompts tests list <prompt>
-primitive prompts tests get  <prompt> <test-case-id>
-```
-
-Every `<prompt>` argument of the `prompts tests` commands is the prompt's
-**key** (the name `prompts list` prints beside the id, and the one
-`prompts/<key>.tests/` is addressed by) or its id. An identifier that names no
-prompt in the app exits non-zero with `No prompt '<arg>' in app <app-id>`, so
-"No test cases found." only ever means the prompt exists and has no registered
-cases.
-
-### Running tests
-
-```bash
-primitive prompts tests run <prompt> <test-case-id> [--config <config-id>] [--json]
-primitive prompts tests run-all <prompt> [--config <config-id>] [--test-cases "id1,id2,id3"] [--json]
-primitive prompts tests runs <prompt> [--limit 20] [--group <comparison-group>] [--json]
-```
-
-`run-all` exits with code `1` if any test fails. Useful for CI. It executes the **registered** cases (the ones a push has sent), not whatever is on disk — see [the case lifecycle](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#a-case-file-is-local-until-a-push-registers-it) for the local/registered distinction and `config diff`'s counters.
-
-### Batch (parallel) test execution
-
-Runs tests in parallel — much faster for large suites.
-
-```bash
-primitive prompts tests batch start  <prompt> [--config <config-id>] [--test-cases "id1,id2"] [--json]
-primitive prompts tests batch status <prompt> <batch-id> [--wait] [--json]
-primitive prompts tests batch cancel <prompt> <batch-id> [-y]
-```
-
-`status --wait` polls every 2s until completion. Exits `1` if any test failed.
-
-### Test case attachments (PDFs, images, etc.)
-
-Attachments are authored as files in `prompts/<key>.tests/<case>/` and uploaded
-by `primitive config push`; removing a file and running `config push --prune`
-deletes it server-side. The CLI reads server state:
-
-```bash
-primitive prompts tests attachments list     <prompt> <test-case-id>
-primitive prompts tests attachments download <prompt> <test-case-id> doc.pdf [output-path]
-```
-
-Upload size limit: **10 MB**. Attachments are sent to the model as file parts (`gemini`) or vision parts (`openrouter`) and are NOT visible in template context.
-
-> Pass attachments at runtime by including `attachments: [{name, type, data}]` in `variables`. The base64 `data` is stripped from the template context automatically and forwarded as a file part.
-
----
-
-## Sync (TOML version control)
-
-Prompt configs live at `prompts/<key>.toml`, with test cases in a sibling `<key>.tests/` directory. See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`) and how the directory is resolved.
-
-### Directory layout
-
-```
-primitive/<env>/
-  prompts/
-    summarizer.toml
-    summarizer.tests/                # NOTE: dir name is `<key>.tests`
-      basic.toml
-      edge-case.toml
-      basic/                         # attachments dir (one per test case slug)
-        document.pdf
-    evaluator.toml
-  functions/
-    ...
-  .sync-state.json                   # auto-generated state — commit this
-```
-
-### Test case TOML schema
-
-Test case TOMLs use a `[test]` table with **JSON-encoded strings** for structured fields:
-
-```toml
-[test]
-name = "Basic greeting"
-description = "Optional"
-inputVariables = '{"name":"Bob","occupation":"teacher"}'   # JSON string
-configName = "default"                                     # key-based ref to a config
-evaluatorPromptKey = "output-evaluator"                    # key-based ref to evaluator prompt
-evaluatorConfigName = "default"
-expectedOutputPattern = "^Hello.*"                          # regex
-expectedOutputContains = '["Bob","teacher"]'                # JSON array string
-expectedJsonSubset = '{"status":"ok"}'                      # JSON string
-```
-
-Key-based refs (`configName`, `evaluatorPromptKey`, `evaluatorConfigName`) are portable across apps. ID-based refs (`configId`, `evaluatorPromptId`, `evaluatorConfigId`) are also accepted but tied to a specific app — prefer the key-based forms.
-
-### What `config pull` actually writes
-
-Pull and push share one key set, so they cannot disagree about which fields exist:
-
-- `[prompt]`: `kind, key, displayName, description, inputSchema, outputSchema`
-- `[[configs]]`: `active` (on the live one only), `name, description, provider, model, providerConfig`
-- `[configs.chat]`: `systemPrompt, userPromptTemplate, temperature, topP, maxTokens, outputFormat, outputSchema, reasoningEffort, reasoningBudget, strictOutput`
-- `[configs.decisions]`: `questions`
-
-A field the server has not set is omitted (there is no TOML `null`), and a JSON
-field TOML cannot represent faithfully — a `null` anywhere inside a schema — is
-written as a JSON string instead of losing the member. A key the server returns
-that this CLI version does not know is named in a warning and left out of the
-file; upgrade the CLI to manage it.
-
-### What `config push` does
-
-- Updates existing prompts (matched by `key`) and updates the configs the file lists (matched by `name`). It deletes no `[[configs]]` entry the file omits and clears no activation: push warns `Prompt <key> still differs from the server after this push`, and `config diff` keeps reporting it until you `config pull` or remove the configuration server-side.
-- Creates new prompts and additional configs that don't exist on the server.
-- Activates the `[[configs]]` entry marked `active = true`, on create and on update alike. With no marker, the first entry becomes active on create.
-- Test case TOMLs in `<key>.tests/` are pushed and matched by filename slug.
-- Deciding what to apply, and what a prompt edited in the Admin Console since your last pull does to a push, follows the same rules as every other type — see the Configuration guide's [Previewing a push](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#previewing-a-push) and [Out-of-band changes](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#out-of-band-changes-and-stale-sync-state).
-
----
-
-## Verification Types
-
-### Pattern (regex)
-
-```bash
---pattern "^Hello.*world$"
-```
-
-### Contains (substring AND)
-
-```bash
---contains '["expected", "phrase", "another"]'
-```
-
-All strings must appear in output. JSON array of strings.
-
-### JSON subset
-
-```bash
---json-subset '{"status":"success","data":{"valid":true}}'
-```
-
-Output must be valid JSON containing all key/value pairs (deep). Extra fields in output are fine.
-
-### LLM evaluator
-
-```bash
---evaluator-prompt <evaluator-prompt-id> [--evaluator-config <config-id>]
-```
-
-The evaluator prompt receives `{{ input.* }}` (original input vars) and `{{ output }}` (the generated output). See [Evaluator prompts](#evaluator-prompts) above.
-
-Multiple verification types can stack on a single test case. All must pass for the test to pass.
-
----
-
-## Common Tasks
-
-### Create from scratch
-
-```bash
-primitive config create prompt greeting-generator
-```
-
-That writes `prompts/greeting-generator.toml` from the type's defaults. Fill it in:
-
-```toml
-[prompt]
-key = "greeting-generator"
-displayName = "Greeting Generator"
-
-[[configs]]
-name = "default"
-active = true
-provider = "gemini"
-model = "models/gemini-3-flash-preview"
-
-[configs.chat]
-temperature = 0.7
-userPromptTemplate = "Generate a friendly greeting for {{ input.name || 'friend' }} who works as a {{ input.occupation || 'professional' }}."
-```
-
-```bash
-primitive config push --only prompt/greeting-generator
-```
-
-### Test it
-
-```bash
-primitive prompts preview <prompt-id> --vars '{"name":"Alice","occupation":"engineer"}'
-primitive prompts execute <prompt-id> --vars '{"name":"Alice","occupation":"engineer"}'
-```
-
-### Add a regression test
-
-```toml
-# prompts/greeting-generator.tests/mentions-name-and-occupation.toml
-[test]
-name = "Mentions name and occupation"
-inputVariables = '{"name":"Bob","occupation":"teacher"}'
-expectedOutputContains = '["Bob","teacher"]'
-```
-
-```bash
-primitive config push --only prompt/greeting-generator
-primitive prompts tests run-all <prompt-id>
-```
-
-### Compare configs
-
-```toml
-# prompts/<key>.toml — add the candidate alongside the live one
-[[configs]]
-name = "creative"
-provider = "gemini"
-model = "models/gemini-3-pro-preview"
-
-[configs.chat]
-temperature = 0.9
-userPromptTemplate = "Generate a unique greeting for {{ input.name }} ({{ input.occupation }})."
-```
-
-```bash
-primitive config push --only prompt/<key>
-primitive prompts configs list <prompt-id>       # the new config's id
-primitive prompts tests run-all <prompt-id> --config <new-config-id>
-primitive prompts tests runs <prompt-id> --json  # compare runs across configs
-```
-
-### Version control
-
-```bash
-primitive config pull
-git add primitive/ && git commit -m "Snapshot prompts"
-
-# edit the synced prompts/*.toml files
-
-primitive config push --dry-run  # preview
-primitive config push            # apply
-```
-
----
-
-## Provider & Model Cheat Sheet
-
-### Gemini
-
-```toml novalidate
-provider = "gemini"
-model = "models/gemini-3.5-flash"         # fast/cheap (GA)
-model = "models/gemini-3-flash-preview"   # fast/cheap
-model = "models/gemini-3-pro-preview"     # higher quality
-```
-
-The `gemini` provider enforces a server-side allowlist of model names; a model not on the allowlist is rejected at execution time. `models/gemini-3.5-flash` is on the allowlist.
-
-### OpenRouter (everything else)
-
-```toml novalidate
-provider = "openrouter"
-model = "anthropic/claude-3-5-sonnet"
-model = "openai/gpt-4o"
-model = "google/gemini-2.0-flash-001"
-```
-
-Pick `gemini` provider for native Gemini features (file parts, structured output via `outputSchema`). Use `openrouter` for non-Google models or OpenRouter-specific routing.
-
-`outputSchema` **constrains the provider request only on the gemini provider** (native structured output). With openrouter, set `outputFormat = "json"` and instruct the model in the system prompt instead. Either way, `ctx.prompts.run` validates the answer against `[prompt.outputSchema]` on the platform, so a declared shape is enforced on both providers.
-
-`outputFormat` shapes the **provider request** on openrouter (`json` → `response_format: { type: "json_object" }`) and the **response normalization** on both providers (fence stripping). On gemini it does NOT constrain the request — that is `outputSchema`'s job, per the paragraph above. Recommended pairing for a prompt that answers JSON: `[prompt.outputSchema]` always, plus `outputFormat = "json"` on an openrouter config.
-
-`ctx.prompts.run`, the admin execute endpoint and `primitive prompts execute` all use **`[prompt.outputSchema]`**. `[[configs]].outputSchema` is authorable and round-trips, but none of them reads it.
-
----
+A case whose options are refused is recorded as a failed run whose one failed
+check names the question and the rule — on `primitive prompts tests run`,
+`tests run-all` and `tests batch start` alike — and no provider call is made,
+so the run history says why the case failed.
+
+A decisions prompt may not be a test case's **evaluator**: an evaluator prompt
+is handed the evaluated input and output as template variables, which a
+decisions run cannot read, so an evaluator must be a chat prompt. Naming one is
+a `400` at test-case create and update.
 
 ## Reasoning budget
 
-On a reasoning-by-default model, thinking is most of what a call costs — in
-latency as well as money. Measured on a merchant-categorisation prompt
-(`google/gemini-3.6-flash` through openrouter), reasoning was 49–82% of the
-output tokens on every call, and the duration tracked the output count almost
-linearly. A classification task does not want that, and changing the model is
-not the answer: it re-opens accuracy on a prompt whose test cases are tuned to
-the current one.
+Choose `reasoningEffort` or `reasoningBudget` on a named configuration, then
+compare its test results and `metrics.reasoningTokens`. Support depends on the
+model. A numeric budget may become an effort level on models without native
+token budgets; measure actual usage instead of assuming an exact cap.
 
-A config states the budget in one of two ways, never both:
+## Gotchas
 
-```toml novalidate
-[configs.chat]
-reasoningEffort = "minimal"   # none | minimal | low | medium | high
-# reasoningBudget = 512       # ...or a whole number of reasoning tokens
-```
+- Use the prompt key, not its database ID, in `ctx.prompts.run`.
+- Check `success` before reading `parsed`. Shape failures return
+  `PROMPT_OUTPUT_NOT_JSON` or `PROMPT_OUTPUT_SCHEMA_VIOLATION`; the model call
+  still occurred and may be billed.
+- Provider failures include `upstreamStatus` when available. A timeout uses
+  `PROMPT_UPSTREAM_TIMEOUT`. Retry transient failures only within the remaining
+  function budget.
+- Declare `[prompt.outputSchema]` for typed function output. A configuration’s
+  schema does not replace that validation contract.
+- Removing optional configuration fields clears their values. Omitting a
+  `[[configs]]` block does not delete it; archive the configuration explicitly.
+- Push test files before running them. Test `inputVariables` and expected-output
+  fields are JSON text inside TOML, not native tables.
+- Evaluator prompts must be chat prompts. They read the evaluated result as
+  `{{ output }}`, not `{{ input.output }}`.
 
-It travels with the NAMED config, so a reasoning and a non-reasoning variant of
-the same prompt are two `[[configs]]` entries and can be A/B'd through the
-ordinary test cases.
+## Related guides
 
-**Nothing is silently dropped.** Each value either maps onto the provider's own
-spelling or is refused at push, naming the remedy:
-
-| Provider / family | `reasoningEffort` | `reasoningBudget` |
-| ----------------- | ----------------- | ----------------- |
-| `openrouter` | Sent as OpenRouter's `reasoning.effort`; `none` becomes `reasoning: { enabled: false }` | Sent as `reasoning.max_tokens` |
-| `gemini`, 3.x | `thinkingConfig.thinkingLevel`. Gemini 3 cannot turn thinking off, so `none` is refused; Pro takes `low`/`high` only | Refused — Gemini 3 translates a budget to a level rather than honoring it as a bound. Use `reasoningEffort` |
-| `gemini`, 2.5 | Only `none`, which means a budget of 0. Anything else is refused | `thinkingConfig.thinkingBudget`. Gemini 2.5 Pro cannot stop thinking: its floor is 128 tokens |
-| `gemini`, 2.0 and earlier | Refused — the model has no reasoning control | Refused |
-
-Two caveats worth knowing before you rely on a number:
-
-- On `openrouter`, `reasoningBudget` is an exact bound only on budget-native
-  models. Effort-only models translate it to the nearest effort level. The
-  budget is a request, and `metrics.reasoningTokens` is the record of what was
-  actually spent.
-- Every openrouter request that carries a reasoning setting also carries
-  `provider: { require_parameters: true }`, which keeps it away from endpoints
-  that would accept the request and ignore the setting. A model that cannot
-  honor what you asked for therefore FAILS the execution with the provider's
-  own reason — for example, "Reasoning is mandatory for this endpoint and
-  cannot be disabled" — rather than quietly running without it.
-
-### Measuring it
-
-`metrics.reasoningTokens` is reported separately by every path that returns
-metrics: `ctx.prompts.run` in a server function, the admin execute endpoint,
-and `primitive prompts execute`. It is the only honest number: OpenRouter counts
-reasoning INSIDE `completion_tokens`, Gemini counts it OUTSIDE
-`candidatesTokenCount`, so neither headline figure says how much of the decode
-was deliberation. It is absent when the provider reports none, and `0` when a
-setting successfully declined it.
-
----
-
-## Running from a server function
-
-`ctx.prompts.run(promptKey, { variables, modelOverride, configId })` — see [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#running-a-prompt) for the full envelope.
-
-- The first argument is the `promptKey`, NOT the `promptId`. Once the tree has pushed, a key it does not declare is a compile error.
-- `variables` becomes the `input` namespace in templates. `variables: { x: 1 }` → `{{ input.x }}`. There is no top-level access to your variables (`{{ x }}` won't resolve).
-- `configId` pins a config of THIS prompt; `modelOverride` swaps the model for this call only.
-- No capability line: a prompt is reachable from any function, and the function's `access` gate is the authorization.
-- The model call is bounded by the invocation's remaining time; past it the call fails with `PROMPT_UPSTREAM_TIMEOUT`.
-- A run with a caller emits a `prompt.executed` analytics event attributed to that caller; a trigger-fired run (no caller) emits none.
-
-| Answer | Meaning |
-|---|---|
-| `success: true` | `output` is the text; `parsed` is the validated JSON value when `[prompt.outputSchema]` is declared (typed), or when the config that ran declares `outputFormat = "json"` (untyped). |
-| `success: false`, `errorCode: "PROMPT_OUTPUT_NOT_JSON"` | Declared JSON; the answer did not parse. `output` has the text. |
-| `success: false`, `errorCode: "PROMPT_OUTPUT_SCHEMA_VIOLATION"` | Parsed, and `[prompt.outputSchema]` refuses it; `error` names the failing paths. |
-| `success: false`, `errorCode: "PROMPT_CRITERIA_INVALID"` | A decisions run's `variables.criteria` was refused before the provider call — nothing billed; `error` names the question and the rule. See [Options supplied per run](#options-supplied-per-run). |
-| `success: false`, `errorCode: "PROMPT_UPSTREAM_TIMEOUT"` | The provider itself ran out of time (`upstreamStatus` 504 or 408), or the invocation's deadline passed before the call could run. |
-| `success: false`, no `errorCode` | Any other provider failure; `error` says why, and `upstreamStatus` carries the provider's own HTTP status when it answered. |
-| `404 PROMPT_NOT_FOUND` | No prompt with that key. |
-| `400 PROMPT_NOT_EXECUTABLE` | The prompt is inactive or archived. |
-| `400 PROMPT_NO_CONFIG` / `PROMPT_CONFIG_NOT_EXECUTABLE` | No usable config: none active, a `configId` that is not this prompt's, or a pinned config that is archived. |
-
-### Typed output
-
-Declare `[prompt.outputSchema]` and stop parsing JSON by hand: the platform sends the schema to the provider, parses the answer, validates it against the schema, and hands it back as `parsed`.
-
-```toml
-# prompts/categorize.toml
-[prompt]
-key = "categorize"
-displayName = "Categorize"
-
-[prompt.outputSchema]
-type = "object"
-required = ["suggested_transactions"]
-
-[prompt.outputSchema.properties.suggested_transactions]
-type = "array"
-```
-
-```ts
-const answer = await ctx.prompts.run("categorize", { variables: { payload } });
-if (!answer.success) throw new Error(answer.error ?? "categorize failed");
-// `parsed` is typed from the schema above; no JSON.parse, no failure branch.
-return { suggested: answer.parsed.suggested_transactions };
-```
-
-- `parsed` is on the **success arm only**, which is what the `success` check unlocks. Reading it unguarded is a compile error, and so is a field the schema does not declare.
-- A bad answer is the envelope's failure arm, never an HTTP error. Two shape failures, both `success: false` with an `errorCode`, both keeping `output`, `metrics` and `configId` because the run happened and was billed: `PROMPT_OUTPUT_NOT_JSON` (declared JSON; the model answered text that does not parse, or that parses to a number JSON cannot represent) and `PROMPT_OUTPUT_SCHEMA_VIOLATION` (it parsed and the schema refuses it; `error` names the failing paths).
-- A **provider** failure has `error` set and **no** `errorCode`, unless the upstream itself ran out of time, when it is `PROMPT_UPSTREAM_TIMEOUT`. An `errorCode` starting `PROMPT_OUTPUT_` is always about the answer — that is how to tell a wrong shape from a failed model.
-- A provider failure carries **`upstreamStatus`**, the provider's own HTTP status, whenever the provider answered — Gemini and OpenRouter alike, so the field does not depend on which provider the config names — and `error` names that status too. It is absent when there was no provider answer to report (an unset provider key, an empty completion), so a number in it is never one this platform decided. Branch retries on it: 408, 429, 502, 503 and 504 are worth another attempt — 408 and 504 are the two upstream timeouts, the statuses `PROMPT_UPSTREAM_TIMEOUT` is answered for — and any other 4xx is not.
-- A decisions run refused for its per-run options is the same failure arm with `errorCode: "PROMPT_CRITERIA_INVALID"` and no tokens or cost in `metrics`: the provider was never called, so there is no `upstreamStatus` either.
-- A validation `error` names paths and the schema's constraints and never quotes the model's answer — `output` is where the answer is, so a diagnostic in a log carries no generated content.
-- `ctx.prompts.run` validates against `[prompt.outputSchema]`; a config's own `[configs.outputSchema]` is not read here. `outputFormat = "json"` on the config that ran gives `parsed` when the text parses, but untyped (`unknown`); declare the schema to get a type.
-- **Generated types.** `config push` renders `functions/primitive-prompt-types.d.ts`: `<Key>PromptOutput` for every `prompts/*.toml` declaring a `[prompt.outputSchema]`, and the `PromptSchemas` augmentation keyed by prompt key that types `ctx.prompts.run("<key>")`. A prompt declaring no schema gets an empty entry, so its `parsed` stays optional and `unknown` — and removing a schema and pushing makes a handler reading `parsed.field` a compile error rather than a runtime `undefined`.
-- The prompt key is the one push deploys: `[prompt] key` when declared, the file name otherwise.
-
-### Don't do this
-
-```ts
-// WRONG — passing the prompt id instead of the prompt key
-await ctx.prompts.run("01HXY...PROMPT_ID", { variables: {} });
-// → PROMPT_NOT_FOUND. Use the key from the TOML.
-
-// WRONG — expecting a top-level variable
-await ctx.prompts.run("p", { variables: { name: "Alice" } });
-// template: "Hi {{ name }}"   ← unresolved reference, the render fails
-// Fix: template: "Hi {{ input.name }}"
-```
-
----
-
-## Tips for Coding Agents
-
-1. Use `--json` whenever piping output to other tools.
-2. Run inside the project so the environment names the app, rather than passing `--app` everywhere.
-3. Prefer TOML + `config push` over CLI flags for anything with multiple configs or test cases.
-4. Always `preview` before `execute` when debugging templates — much faster.
-5. A missing variable fails the render. Use `||` fallbacks for paths that may be absent. (Note: `inputSchema` is metadata only — it is NOT validated against `variables` at execute time.)
-6. Evaluator prompts use `{{ output }}` (top-level), NOT `{{ input.output }}`.
-7. `outputSchema` constrains the provider request only with `provider = "gemini"`. With openrouter, use `outputFormat = "json"` + prompt the model. Declare `[prompt.outputSchema]` either way: `ctx.prompts.run` validates against it on both providers and types `parsed` from it.
-8. A test case's `test.inputVariables` is JSON **text** in the sidecar TOML (`prompts/<key>.tests/<case>.toml`) — a single-quoted TOML string holding a valid JSON object.
-9. `config pull` writes every authorable field back, including `outputSchema`, `topP` and `providerConfig` — a mistyped key fails the push instead of being dropped.
-10. Availability is `primitive prompts disable`/`enable`, never a TOML key — there is no separate "publish" step, and everything you push is live. Archiving a prompt outright is `primitive prompts archive <id>` (the delete flow's soft path: the row and its configs stay, it keeps its `promptKey`, `enable` refuses it, and there is no un-archive).
+- [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md)
+- [Configuration](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md)

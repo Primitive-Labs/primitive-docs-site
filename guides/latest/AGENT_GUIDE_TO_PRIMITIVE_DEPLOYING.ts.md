@@ -1,6 +1,6 @@
 # Deploying Primitive apps to production
 
-This guide is the reference for shipping a Primitive app to production through its native distribution channel.
+Deploy the web template to its hosting environment, or distribute the native app through TestFlight and the App Store.
 
 ## Web (Cloudflare Workers)
 
@@ -70,7 +70,7 @@ Passthrough arguments that would take over what the deploy already decided — `
 
 ### Adding environments
 
-The two axes grow separately.
+Configure deployment environments and Primitive environments independently.
 
 **Another deploy environment:**
 
@@ -91,7 +91,7 @@ VITE_EXPECTED_PRIMITIVE_ENV=prod
 
 Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too.
 
-Rules: absent (the default) keeps the axes fully independent; a value in the base `.env` is the default for every mode and `.env.<mode>` overrides it; an empty value cancels the check for that mode; a non-empty `VITE_EXPECTED_PRIMITIVE_ENV` in the process environment wins over the files, which is how a deliberate cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev PRIMITIVE_ENV=dev pnpm test --mode alpha`). The pure-env CI hatch — a build supplying both `VITE_APP_ID` and `VITE_API_URL` — resolves nothing and so skips the check; overriding only one of them does not, because the other half still comes from the resolved environment. `cf-deploy` reads `.env*` from the project root, so under a custom Vite `envDir` its `--check` will not see the declaration (a real deploy still fails inside the build).
+Use `VITE_EXPECTED_PRIMITIVE_ENV` when a mode contains backend-specific settings. A mode’s `.env` file overrides the base value; an empty value disables the check for that mode. A process environment value overrides the files. Builds supplied with both `VITE_APP_ID` and `VITE_API_URL` resolve no Primitive environment; `cf-deploy` rejects those overrides.
 
 ```toml
 [env.test]

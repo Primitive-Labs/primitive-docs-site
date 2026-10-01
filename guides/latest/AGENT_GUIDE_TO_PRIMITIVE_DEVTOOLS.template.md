@@ -18,40 +18,6 @@ capabilities:
 
 The tools are active only in development builds and never ship to production.
 
-## Server Timing
-
-Every REST response from the platform (`/app/{appId}/api/*` and `/admin/api/*`)
-carries a `Server-Timing: total;dur=<int-ms>` header attributing the request's
-server-side handler time. The header is listed in `Access-Control-Expose-Headers`,
-so any HTTP tooling — or the response object of a raw fetch — can read it when
-attributing a slow request to server work vs. transport.
-
-## Response Caching
-
-Every `/app/{appId}/api/*` response carries `Cache-Control: no-store` unless its
-handler sets a directive of its own, so no HTTP cache keeps a copy of an
-authenticated response. One endpoint opts out deliberately:
-`GET /avatars/:userId` serves world-readable bytes with
-`public, max-age=31536000, immutable`.
-
-Blob downloads still send an `ETag` and still answer a conditional
-`If-None-Match` with `304 Not Modified` — `no-store` stops a cache from storing
-the body, not an app from revalidating. What it removes is a cache's ability to
-reuse a stored blob body after that 304.
-
-{{#lang swift}}
-The client enforces the same rule locally, so it holds against a server too old
-to send the header: every `URLSession` it builds sets `urlCache = nil` and
-`requestCachePolicy = .reloadIgnoringLocalCacheData`, and every request it
-builds carries that policy. `URLCache` keys entries by URL alone — it ignores
-`Authorization` — and `URLCache.shared` is disk-backed on iOS, so an
-authenticated response stored there would be readable by a request carrying a
-different token or none. Nothing the client fetches enters it, on any path
-(REST calls, blob bytes, the OAuth code exchange, token refresh). Cookie
-handling is unchanged: the sessions are built from
-`URLSessionConfiguration.default` and keep using `HTTPCookieStorage.shared`.
-{{/lang}}
-
 {{#lang ts}}
 The tools are a single browser overlay (the **DevTools** overlay) provided by the
 `primitiveDevTools` Vite plugin, opened from a floating button in the running app.
@@ -84,67 +50,23 @@ export default defineConfig({
 });
 ```
 
-The plugin is loaded at Vite config time (Node), so `primitiveDevTools` MUST
-be imported from `"primitive-app/vite"`, NOT from `"primitive-app"`.
+### Gotcha: plugin import
 
-```typescript
-// WRONG — this entry point is browser-only and will fail at config time
-import { primitiveDevTools } from "primitive-app";
-
-// CORRECT
-import { primitiveDevTools } from "primitive-app/vite";
-```
+Import `primitiveDevTools` from `primitive-app/vite` in Vite configuration. The browser entry point `primitive-app` cannot run there.
 
 ## Opening DevTools
 
-1. Wait for authentication (the floating Primitive-logo button only appears
-   when `client.isAuthenticated()` is true).
-2. The button is by default at the bottom-right corner; users can drag it to
-   any edge. Position is saved in localStorage. Short click opens; drag moves.
-3. Opening pushes `#devtools` to the URL hash. Refreshing with `#devtools`
-   re-opens automatically. Browser back/forward open/close.
-4. Close: click the X in the header, or press Escape.
-5. Optional `keyboardShortcut` toggles the overlay.
+1. Sign in to the development app.
+2. Click the floating Primitive button.
+3. Choose **Document Explorer**, **Test Harness**, or **Blob Explorer**.
 
-The overlay is a DOM element teleported to `<body>`, NOT a route. It covers
-the current page; the underlying app keeps running.
+Press Escape or click the close button to return to the app. Opening `#devtools` in the URL also opens the overlay.
 
-The active tab (`documents` / `tests` / `blobs`) is persisted to localStorage
-under `primitive-devtools-active-tab`.
-
-### Browser automation flow
-
-```
-1. Navigate to any page in the dev-mode app
-2. Wait for auth → floating button appears
-3. Click the floating button (avoid drag — keep movement under 3px)
-4. Click a sidebar icon to switch tabs:
-   - Document icon → Document Explorer
-   - Clipboard/checklist icon → Test Harness
-   - Cloud-upload icon → Blob Explorer
-```
-
----
+The overlay keeps Primitive's own palette, font, and radius in every app; the app's `:root` tokens, Tailwind `@theme` values (other than shadows and breakpoints) and element base styles don't restyle it. It follows the app's `dark` class. Check theme changes in the app's own screens, not in the overlay.
 
 ## Document Explorer
 
-Three-panel unified view (no "index → model card" drilldown):
-
-- **Left panel** — Document sidebar: search, "Add Document" button,
-  document list, pending invitations, "Mass Delete Owned" action.
-  Each row shows the document title plus a badge: `root` (amber) or
-  permission label `Owner` / `Editor` / `Viewer`.
-- **Middle panel** — Records table. Header has a "{ModelName} model"
-  dropdown (switch model), an info button (toggles a Schema /
-  Relationships / Methods / Indexes / Unique Constraints panel), and a
-  "New {ModelName}" button (write users only). Below the header is a
-  Filter Bar (filter chips + "Add filter" button), the records table,
-  and pagination.
-- **Right panel** — Document properties (only ≥ lg breakpoint by default,
-  collapsible). Shows title, document ID (click to copy), created date,
-  permission, tags, aliases, sharing, and a **Models** summary listing each
-  model with `>0` records as a clickable name plus record count. Clicking
-  a model name navigates the middle panel to that model.
+Select a document in the left panel, then choose a model to inspect its records. The right panel shows document properties, sharing, and model counts.
 
 ### Common tasks
 
@@ -176,45 +98,11 @@ Three-panel unified view (no "index → model card" drilldown):
 
 #### Filtering
 
-The Filter Bar sits below the model header. There is no per-column filter
-icon.
-
-```
-1. Click "Add filter"
-2. Field dropdown: pick the field
-3. Operator dropdown: equals / not equals / is null / is not null /
-   contains / not contains / starts with / ends with / in list / not in list /
-   > / >= / < / <=
-4. Value input (hidden for is_null/is_not_null; boolean shows a select;
-   number uses a number input; "in list"/"not in list" take comma-separated)
-5. Click "Add" (or "Save" when editing an existing chip)
-6. Click an existing filter chip to edit it; click its X to remove;
-   "Clear all" clears the bar
-```
-
-Operators offered are filtered by field type:
-
-- `string` → all
-- `id` → equals/not_equals/is_null/is_not_null/in/not_in
-- `number` → equality, list, gt/gte/lt/lte
-- `boolean` → equality + null only
-- `date` → equality + null + comparison (no text ops)
-- `stringset` → equality + null + contains/not_contains + in/not_in
-
-Filters are persisted per model in localStorage.
+Click **Add filter**, choose a field and operator, enter a value, then click **Add**. Click a filter to edit it or its X to remove it. Available operators depend on the field type.
 
 #### Sorting
 
-Single-field only, via column header click. Sorting is **only allowed on
-indexed fields** — clicking a non-indexed column header does nothing.
-
-```
-- 1st click on column header → ascending
-- 2nd click → descending
-- 3rd click → cleared (default id sort)
-```
-
-There is no separate "Sort tab" or multi-field sort UI.
+Click an indexed column header to cycle through ascending, descending, and default ordering.
 
 #### Inspect schema / methods / indexes
 
@@ -233,108 +121,9 @@ There is no separate "Sort tab" or multi-field sort UI.
 3. Confirm zero results / count decreased
 ```
 
-### Element-identification cheat sheet
-
-| Element | How to find it |
-|---|---|
-| DevTools floating button | `<button class="pdt-btn">` containing the Primitive logo image, fixed-position to one screen edge |
-| Tab icons | Left icon bar in overlay; `title="Document Explorer" | "Test Harness" | "Blob Explorer"` |
-| Document row | Left panel; text = title; trailing badge = `root` or `Owner`/`Editor`/`Viewer` |
-| Add Document | Button in left panel header (write-permitted users only) |
-| Model selector | Middle-panel header button: text "{ModelName} model ▾" |
-| Schema/info toggle | Icon button next to model selector; `title="Show model properties"` |
-| New Record | Primary button in middle-panel header right side; text "New {ModelName}" (write users) |
-| Filter Bar | Strip below model header; "Add filter" button + chip list |
-| Row edit / delete | Per-row icons in the data table (pencil / trash) |
-| Bulk delete records | Selection action bar replaces model header when rows are checked; shows "{N} selected", Clear, Delete |
-| Pagination | Footer of middle panel |
-| Right-panel collapse | Arrow on the panel edge (≥ lg breakpoint only) |
-| Dropdowns/modals | Tagged with `data-devtools-dropdown` / `data-devtools-modal` so Escape lets them handle the key first |
-
----
-
 ## Test Harness
 
-Registered `.primitive-test.ts` test groups run in two contexts: interactively
-in this panel, in the same authenticated session as the host app, and headlessly
-in Node under vitest (see "Headless runs (vitest / CI)" below). Key
-invariants (both contexts unless noted):
-
-1. **Explicit document lifecycle.** Tests that need document/model operations
-   call `createTestDocument()` / `destroyTestDocument()` themselves.
-   `createTestDocument()` creates a local-only document titled
-   `===TEST=== {timestamp}-{random}`, opens it with
-   `enableNetworkSync: false`, and calls `client.setDefaultDocumentId(docId)`.
-   Model operations like `.save()`, `.find()`, `.query()` use it implicitly.
-   Pass `createTestDocument({ networkSync: true })` for a **server-resident**
-   document — required for server-side operations (blob upload, collection
-   membership) that return `404 Document not found` against a local-only doc.
-2. **Pure-logic tests skip documents.** Tests that only use in-memory model
-   instances, utility functions, or validation logic don't need a test
-   document — they just use the simple `(log) => ...` signature.
-3. **Document cleanup via try/finally.** `destroyTestDocument()` cleans up the
-   document: a local-only doc is closed and `evict()`ed (no server round-trip);
-   a `networkSync: true` doc is deleted server-side
-   (`documents.delete(id, { forceCloseIfOpen: true })`) so test docs don't
-   accumulate. Always call it in a `finally` block.
-4. **Scope queries to the test document.** `createTestDocument()` sets its
-   document as the default, but that default only routes **writes** — a model
-   query spans every open document regardless of the default. An unscoped
-   `Task.query({ ... })` can pick up records from other documents open in the
-   session. Pass `{ documents: doc.docId }` (a single id or an array) so the
-   assertion sees only its own data:
-   ```ts
-   const highPriority = await Task.query({ priority: 2 }, { documents: doc.docId });
-   ```
-   When a test can't scope by document (it checks an aggregate that legitimately
-   spans documents), give each row a run-unique field value, filter on that
-   value, assert only on the rows it created, and delete them in the `finally`.
-   Never assert on absolute totals like `(await Task.query({})).data.length`
-   — another open document's rows inflate the count, and the test fails only once
-   that document is non-empty.
-5. **Host-app docs are quiesced.** `beginTestRun()` closes every currently
-   open host document; `endTestRun()` re-opens them after the run.
-6. **Leftover cleanup.** `deleteAllTestDocuments()` runs on app start, when
-   the overlay opens, and at the start of each run — anything titled with
-   `===TEST===` is evicted.
-7. **Timeouts differ by context.** The browser panel never kills a test — it
-   can hang indefinitely. The headless adapter times each test out at 60s
-   (`testTimeoutMs`).
-
-### UI
-
-**Left panel — selection:**
-- Master "Available Tests" checkbox + "{N} selected" / Clear / Run bulk
-  action bar (overlays header when any test is selected).
-- All tests are auto-selected whenever the test list changes.
-- Group rows: checkbox (full/partial/empty), group name, "{selected}/{total}".
-- Test rows: checkbox, status icon (spinning clock = running, green check =
-  passed, red X = failed, blue % circle = scored), test name, result badge
-  ("Passed" / "Failed" / "{passed}/{total} ({pct}%)").
-- Click a test name to focus the output log on that test (other lines dim
-  to 20% opacity); click again to unfocus.
-- Footer: "{total} tests in {N} groups" + green "{passed} passed" / red
-  "{failed} failed" once results exist.
-
-**Right panel — output:**
-- Buttons: **Copy** (all output), **Copy Failing Tests** (lines whose
-  `testId` matches a failed test), **Clear** (output + results + focus).
-- Monospace lines: `HH:MM:SS AM/PM - <message>`. Per-test `log()`
-  output is prefixed with `[<test-id>]`.
-- During a run: progress bar at the bottom: "Running: {group} :: {name}"
-  and "{completed}/{total}".
-
-### Running tests
-
-```
-1. Open Test Harness tab
-2. (All tests are pre-selected.) Adjust with checkboxes if needed.
-3. Click "Run" in the bulk action bar (only visible when ≥1 test selected)
-4. Wait for status icons to stop spinning and progress bar to reach total
-5. Read result badges + footer summary
-6. For failures: click the test name to focus its log lines, or use
-   "Copy Failing Tests" to copy them for analysis
-```
+Write `.primitive-test.ts` files, then run them in the panel or with Vitest in Node. To run in the panel, choose tests and click **Run**. Select a failed test to inspect its output.
 
 ### Writing tests
 
@@ -413,87 +202,14 @@ export default myTests;
 | Fail | Throw an `Error` | Red "Failed" + `error.message` |
 | Scored | Return a string starting with `N/M (P%)` (e.g. `"3/5 (60%)"`) | Blue score badge with the parsed numbers |
 
-The score regex is `/^(\d+)\/(\d+)\s*\((\d+(?:\.\d+)?)%\)/` — it MUST
-appear at the start of the returned string.
+### Gotchas when implementing tests
 
-### Common test mistakes
-
-```typescript
-// WRONG — test signature mismatched: missing async / wrong return type
-const bad: TestGroup = {
-  name: "Bad",
-  tests: [
-    {
-      id: "x",
-      name: "x",
-      run: (log) => "synchronous return"  // run MUST return Promise<string>
-    } as any
-  ]
-};
-
-// WRONG — duplicate id across files: only one will appear in the runner
-{ id: "test-1", ... }   // in tests/a.primitive-test.ts
-{ id: "test-1", ... }   // in tests/b.primitive-test.ts  — CONFLICT
-
-// WRONG — no error means PASS even if the assertion is missing
-run: async (log) => {
-  const doc = await createTestDocument();
-  try {
-    const found = await Task.find("nope");
-    // forgot to throw if !found
-    return "ok";
-  } finally {
-    await destroyTestDocument(doc);
-  }
-}
-
-// WRONG — missing finally block: document leaks if test throws
-run: async (log) => {
-  const doc = await createTestDocument();
-  await new Task({ title: "x" }).save();
-  await destroyTestDocument(doc);   // never reached if save() throws
-  return "ok";
-}
-
-// WRONG — the file extension matters. Vite plugin discovers
-// `**/*.primitive-test.ts` only. `.test.ts` will be ignored.
-//   src/tests/foo.test.ts          ← NOT discovered
-//   src/tests/foo.primitive-test.ts ← discovered
-
-// WRONG — using createTestDocument when no document/model ops are needed
-// (wastes time creating/destroying a document for nothing)
-run: async (log) => {
-  const doc = await createTestDocument();  // unnecessary
-  try {
-    if (2 + 2 !== 4) throw new Error("math broken");
-    return "ok";
-  } finally {
-    await destroyTestDocument(doc);
-  }
-}
-// RIGHT — pure logic, no document needed
-run: async (log) => {
-  if (2 + 2 !== 4) throw new Error("math broken");
-  return "ok";
-}
-```
-
-### Scored test example
-
-```typescript
-{
-  id: "compat",
-  name: "compatibility checks",
-  run: async (log) => {
-    const checks = [check1(), check2(), check3(), check4(), check5()];
-    const passed = checks.filter(Boolean).length;
-    const total = checks.length;
-    const pct = ((passed / total) * 100).toFixed(1);
-    log(`${passed}/${total} passed`);
-    return `${passed}/${total} (${pct}%)`;   // blue score badge
-  },
-}
-```
+- Use a globally unique test ID and the `.primitive-test.ts` suffix so the runner discovers the test correctly.
+- Return a string from an async test to pass; throw an error to fail. An assertion must throw when its condition is false.
+- For model operations, create a test document and destroy it in `finally`. Pure logic needs no document.
+- The default test document isolates writes, not queries. Pass `{ documents: doc.docId }` to queries. For cross-document tests, tag records with a unique value and filter on it.
+- Blob uploads and collection membership need `createTestDocument({ networkSync: true })`; cleanup deletes that server-side document.
+- A scored result must start with `N/M (P%)`. Headless runs fail incomplete scores by default.
 
 ### Environment-scoped tests
 
@@ -520,9 +236,7 @@ skipped count in the summary).
 
 ### Headless runs (vitest / CI)
 
-The same registered groups run in Node under `vitest run` — no browser or
-headless-browser stack, so `pnpm test` can gate merges. The template ships the
-wiring; the pieces, all load-bearing:
+Run the same groups in Node with `pnpm test`. The template includes these files:
 
 - `src/tests/primitive-tests.spec.ts` — the single vitest spec that adapts
   every registered group:
@@ -553,46 +267,17 @@ wiring; the pieces, all load-bearing:
   `Cannot find package 'ws'`.
 - Script: `"test": "pnpm codegen && vitest run"`.
 
-Environment selection: `vitest.config.ts` merges the app's Vite config, so the
-`primitiveEnv()` plugin resolves the run's Primitive environment exactly as it
-does for `pnpm dev` — from `primitive/config.json`, honoring `primitive env
-use` and `PRIMITIVE_ENV`. The app id and server URLs come from there, not from
-a `.env` file (no `.env` file repeats them). Point one run elsewhere:
+The backend is selected from `primitive/config.json`. Override it for one run:
 
 ```bash
 PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" PRIMITIVE_ENV=alpha pnpm test
 ```
 
-vitest's `--mode` is the OTHER axis: it selects `.env.<mode>` (app-behavior
-keys) and never the backend. Pass it with **no `--` separator**:
+#### Gotchas when selecting the test environment
 
-```bash
-PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" pnpm test --mode staging
-```
-
-`pnpm test -- --mode staging` is a silent wrong-mode run: vitest drops every
-argument after a bare `--` (the mode flag and any positional test filter), so
-the suite runs full and green with the default mode's app behavior. The plugin
-prints the resolved Primitive environment (name, apiUrl, appId, config path)
-at the start of every run, so which backend a run used is never a guess.
-
-Because the axes are independent, `PRIMITIVE_ENV=dev pnpm test --mode alpha`
-signs in and writes test data against `dev` while using alpha's app behavior —
-a real combination, and a dangerous mistake when a mode's keys are coupled to
-one backend. Such a mode should declare its environment:
-
-```dotenv
-# .env.alpha
-VITE_EXPECTED_PRIMITIVE_ENV=alpha
-```
-
-The plugin then fails the run at config time — before a spec is collected or
-anything signs in — which is why the check lives there and not in the app's
-`envConfig.ts`: `src/tests/primitive-tests.spec.ts` builds its client straight
-from `import.meta.env` and never imports it. Opt-in; a non-empty
-`VITE_EXPECTED_PRIMITIVE_ENV` in the shell overrides the file, so a deliberate
-cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev
-PRIMITIVE_ENV=dev pnpm test --mode alpha`).
+- Use a derived test address whose base is listed in `testAccountBaseEmails`; the bare base address is not a test account. The app must also admit that user.
+- Vitest's `--mode` selects `.env.<mode>` app settings, not the backend. Pass it directly: `pnpm test --mode staging`. Arguments after a bare `--` are ignored.
+- If mode settings depend on a backend, set `VITE_EXPECTED_PRIMITIVE_ENV` in that mode's file. A mismatch fails before sign-in. A non-empty shell value overrides the file.
 
 `registerPrimitiveTests(options)` — from `primitive-app/testing`:
 
@@ -601,12 +286,12 @@ PRIMITIVE_ENV=dev pnpm test --mode alpha`).
 | `models` | required | The app's model classes, typically `allModels` from `@/models` |
 | `testModules` | required | `import.meta.glob("./**/*.primitive-test.ts")`; each module's default export must be a `TestGroup` or `TestGroup[]` |
 | `appId` / `apiUrl` / `wsUrl` | `process.env.VITE_APP_ID` / `VITE_API_URL` / `VITE_WS_URL` | |
-| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Must be a `+primitivetest` derivative of a whitelisted test-account base (`[app].testAccountBaseEmails` in `app.toml`, applied with `primitive config push --only app`) — the bare base address itself is never a test account and always fails sign-in. Use a stable suffix per CI project so the find-or-create provisioner reuses one test user across runs |
+| `email` | `process.env.PRIMITIVE_TEST_EMAIL` | Derived test address; use a stable suffix for each CI project |
 | `otpCode` | `"000000"` (`PRIMITIVE_TEST_OTP_CODE`) | The test-account OTP bypass code |
 | `testTimeoutMs` | `60_000` | Per-test timeout |
-| `clientOptions` | storage `{ type: "auto" }` | Partial client options; `auto` storage uses better-sqlite3 if installed, memory otherwise — no native deps required |
+| `clientOptions` | storage `{ type: "auto" }` | Partial client options |
 | `cleanupTestDocuments` | `true` | Deletes leftover `===TEST===` documents after the run |
-| `failBelowFullScore` | `true` | A scored result below full marks (`"7/10 (70%)"`) FAILS the run; the panel shows the same result as scored without failing |
+| `failBelowFullScore` | `true` | Fail scored tests below full marks |
 
 Auth and failure semantics:
 
@@ -619,54 +304,9 @@ Auth and failure semantics:
 - JUnit output for CI ingestion:
   `pnpm vitest run --reporter=junit --outputFile=test-results.xml`.
 
-### Element-identification cheat sheet
-
-| Element | How to find it |
-|---|---|
-| Test Harness tab | Sidebar icon, `title="Test Harness"` |
-| Master checkbox | First checkbox in left panel header (adjacent to "Available Tests") |
-| Bulk action bar | Overlays the left-panel header when ≥1 test selected; contains "{N} selected", Clear, Run |
-| Run button | Inside the bulk action bar; play icon + text "Run" |
-| Group row | Has the group name, a checkbox, and "{selected}/{total}" |
-| Test row | Has a checkbox, a status icon, the test name, and (after run) a result badge |
-| Output log line | Selector `[data-test-id="<test-id>"]` per per-test line |
-| Copy / Copy Failing Tests / Clear | Top-right of the right panel |
-| Progress bar | Bottom of right panel during a run |
-
----
-
 ## Blob Explorer
 
-Three-panel layout sharing the document sidebar with Document Explorer.
-
-- **Left** — Document sidebar (selection state shared with Document Explorer).
-- **Middle** — Toolbar (document title, blob ID search, Refresh, Upload),
-  paginated table (Filename / Content Type / Size / Uploaded / Blob ID),
-  per-row hover Download/Delete, checkbox column for bulk select (write
-  users only), and a bulk action bar showing selected count + Delete.
-- **Right** — Collapsible blob detail (≥ lg breakpoint by default):
-  Preview (images / PDFs / short text/CSV), Actions (Download, Open in
-  new tab, Delete), Info (Blob ID, Filename, Content Type, Size,
-  Uploaded date, SHA-256). IDs are click-to-copy.
-
-Search mode: typing in the blob-ID search switches to exact server-side
-lookup and hides pagination. Pagination size (10/25/50/100) is persisted
-in localStorage. Upload requires write access. Bulk-delete requires write
-access.
-
-### Element-identification cheat sheet
-
-| Element | How to find it |
-|---|---|
-| Blob Explorer tab | Sidebar icon, `title="Blob Explorer"` |
-| Blob ID search | Text input in middle-panel toolbar |
-| Upload | "Upload" button in toolbar (write users) |
-| Refresh | Circular-arrow icon in toolbar |
-| Row download / delete | Hover actions on each row |
-| Bulk action bar | Replaces toolbar when rows are checked |
-| Detail panel | Right edge; collapse arrow on its left edge |
-
----
+Select a document to list its blobs, then select a file to preview or download it. Upload and delete require write access. Enter a blob ID for an exact lookup.
 
 ## Browser-console debugging
 
@@ -698,26 +338,12 @@ Not exposed in production builds or non-debug hostnames.
 
 ---
 
-## Browser automation tips
+## Gotchas when automating the overlay
 
-- Wait for the floating button before doing anything else — it's gated
-  on auth and on host-app mount (a `MutationObserver` watches `#app`).
-- The first overlay open runs `deleteAllTestDocuments()` (a syncMetadata
-  + list + evict-each pass). On a slow connection this can take a few
-  seconds — wait for the spinner labelled "Initializing dev tools..."
-  to clear before interacting.
-- If you see "Initialization Failed", click "Retry". This usually means
-  leftover-test-doc cleanup hit an error.
-- Validation workflow: act in the host app → open Document Explorer →
-  pick the document → switch model via dropdown → filter → read.
-- Test workflow: Test Harness tab → adjust selection → Run → wait for
-  spinners to stop and progress to reach total → read badges → use
-  "Copy Failing Tests" to capture failures.
-- Don't try to drag the floating button — keep pointer movement under 3px
-  during click, otherwise it repositions instead of opening.
-- Escape behavior is layered: nested `[role=dialog][data-state=open]`,
-  `[data-devtools-modal]`, `[data-devtools-dropdown]`, and focused
-  inputs/textareas/selects all consume Escape before the overlay does.
+- Wait for sign-in and for **Initializing dev tools...** to finish before interacting.
+- Click rather than drag the floating button; dragging repositions it.
+- Close nested dialogs before closing the overlay with Escape.
+- Inspect data after acting in the app: choose the document and model, then filter for the expected record.
 {{/lang}}
 
 {{#lang swift}}
@@ -789,12 +415,7 @@ Create a record by hand:
 
 ### Surfacing your models
 
-Models appear in the Records table automatically — the base `PrimitiveAppState`
-conforms to `InspectableModelHost`, and its default `inspectableModels` reads the
-client's shared cross-document store (one entry per model per open document). A
-model is listed as soon as it's registered (`client.registerModels([...])`) or
-read/written once through its codegen'd facade. The standard path needs no
-inspector glue.
+Registered models appear automatically for each open document. Register a model with `client.registerModels([...])` or use it through its generated model API.
 
 For a hand-built runtime-schema `DynamicModel` that doesn't go through the
 facade, `override` the `open var inspectableModels` and append:
@@ -869,65 +490,19 @@ tab.
 
 ## Performance
 
-A live chronological timeline of every document-level phase event the inspector
-has seen — `loadedFromSqlite`, `loadedFromServer`, `synced`, `syncStateChanged`,
-`closed` — with plain-English labels. Summary cards totalize on-disk vs server
-volume and timing. The whole view derives from the continuous event stream, so new
-events appear the instant they arrive; a filter-by-doc dropdown isolates one
-document's trace when several are syncing at once. Read the timeline to answer
-"what data loaded, from where, in how long?" — each `synced` event is annotated
-with the models that became available on that document.
+Use the timeline to see when documents load and sync. Filter by document to inspect one operation's duration and data source.
 
-## Memory SQL
+## Storage inspection
 
-A live browser and ad-hoc query runner over the in-memory SQLite that backs
-`model.query()` / `count` / `aggregate` / `queryPaged` / `findByUnique`. The engine
-is per-(model, document) and lives entirely in RAM, kept in sync with the
-document's data via an update observer.
-
-- **Model picker + context strip** — the model name and the `documentId` the
-  projection is bound to.
-- **Schema strip** — `PRAGMA table_info` for the active table (name, type, PK, NOT
-  NULL), so you can see what an indexed query actually hits.
-- **Table view** — a true SQL table; each row has a `del` button that routes through
-  the model's delete (document-store → engine projection), not a raw SQL DELETE.
-- **Create row** — a `+ new row` modal, inputs dispatched by field `kind`.
-- **Custom query box** — a SQL textarea (Cmd/Ctrl+Enter to run). Accepts only
-  `SELECT`, `PRAGMA`, and `WITH` (CTE) statements; direct DML is rejected because
-  it would desync the projection from its document-store source of truth.
-- **Polling** — while the tab is active, the catalog + active table refresh every
-  ~2s; a button pauses/resumes (useful for a stable result set).
-
-Useful for: which columns the engine projects for a model, whether stringset
-junction tables populate on writes, whether SQL rows match the records on the
-Documents tab, and how a filter/index translates to SQL.
-
-## SQLite (disk)
-
-Read-only browser over the client's on-disk durability store — the file at
-`<Documents>/JsBaoClient/<appId>:<userId>/jsbao_storage.sqlite`. This is the
-durability layer (encoded document blobs, `meta`, `kv`, `auth`), not the query layer;
-for per-model SQL tables use Memory SQL. Table tabs along the top show each store
-with its row count; clicking loads rows (key, value, metadata, updatedAt),
-most-recently-updated first.
-
-The **diag** toggle opens a resolution trace: the `appId` being scanned, the
-filesystem roots checked, every `appId:*` subdir found (with mtime), the resolved
-storage path, and a file probe (open status, size, journal mode, listed tables,
-row counts pre/post checkpoint). If the tab looks blank, diag says why — typically
-"no logged-in namespace dir yet".
+The inspector includes views for query results and locally stored data. Use them to compare stored values with the records shown under **Documents**. Ad-hoc queries are read-only; use model operations to change records.
 
 ## Events
 
-The full live client event stream as a filterable log: pause,
-auto-scroll, filter-by-type, text filter. The stream is captured continuously (not
-tab-gated), so switching back to this tab shows you didn't miss anything.
+Filter the live client event log by type or text. Pause scrolling while inspecting a sequence.
 
 ## Logs
 
-Inspector-internal log tail — failed actions, internal errors and warnings. It
-self-refreshes while active so failures surface immediately, and an action failure
-re-loads logs so the same error has richer context next time you look.
+Read inspector errors here when an action fails.
 
 ## Validation workflow
 
@@ -939,30 +514,15 @@ re-loads logs so the same error has richer context next time you look.
 5. To cross-check query behavior: Memory SQL → run the same SELECT and compare
 ```
 
-## Security + limits
+## Gotchas when using the inspector
 
-- The whole inspector is behind `#if DEBUG`; release builds open no port, capture
-  no events, and read no UI resources.
-- No authentication — any client on the same network can hit the endpoints. Fine
-  on a personal dev network; don't run DEBUG builds on public Wi-Fi, and don't
-  ship a DEBUG build to external testers.
-- Every action is a round trip over the network (~5–20ms on a good LAN), so it's
-  visibly not real-time; the event stream is push-based, so observation lag stays
-  low even when action lag doesn't.
+- Use a trusted development network. The inspector has no authentication, so other clients on the network can reach it.
+- Release builds exclude the inspector. Distribute release builds to external users.
+- Inspection actions change the running app's data; use a test account and test data when exercising writes.
 
 ## Driving the UI with idb
 
-The Debug Inspector asserts **state** — what the client holds and what tests
-return. It cannot drive the **UI**: tapping a button or typing in a field. For
-that, use **idb** (Facebook's iOS Debug Bridge), the one tool that reaches a
-running SwiftUI app headlessly. `xcrun simctl` has no tap or text input, and
-macOS accessibility can't see inside a SwiftUI surface, so idb is the way to
-tap, type, and read the on-screen accessibility tree.
-
-The two are complements, not alternatives: **idb drives the UI, the Inspector
-asserts the resulting state.** A typical check taps through a flow with idb,
-then switches to the Inspector to confirm the records or connection state that
-resulted.
+Use idb to tap controls and type into the simulator. Use the inspector to check the resulting data and connection state.
 
 ### The `ui_signin` smoke scenario
 
@@ -980,84 +540,22 @@ bash scripts/smoke-test.sh             # default run — launch_survive only, no
 `scripts/smoke-test.sh` (and `pnpm swift:smoke` in the monorepo) stays
 zero-dependency. Run `ui_signin` explicitly to opt into idb.
 
-Every run targets a simulator dedicated to the app under test — named
-`Smoke — <bundle id>` and created on first use — never whichever device happens
-to be booted. That is what lets two apps built from the template smoke-test side
-by side on one machine without app B installing onto app A's simulator and
-asserting against app A's UI. Override the device name with
-`PRIMITIVE_SMOKE_SIM` (e.g. to share one device between two checkouts of the
-same app on purpose) and the device type it is created from with
-`PRIMITIVE_SMOKE_SIM_BASE` (default `iPhone 17 Pro`).
+The test uses an app-specific simulator. Set `PRIMITIVE_SMOKE_SIM` to choose its name or `PRIMITIVE_SMOKE_SIM_BASE` to choose a device type. Interactive runs use a separate simulator selected with `PRIMITIVE_RUN_SIM` or `--sim`.
 
-`./run-ios.sh` follows the same rule with a device of its own,
-`Run — <bundle id>` — renamed with `PRIMITIVE_RUN_SIM`, created from
-`PRIMITIVE_RUN_SIM_BASE` (default `iPhone 17 Pro`) — so a smoke run never
-reinstalls the app out from under the session you are driving by hand, and
-neither run lands on another app's simulator (#2999). Pass
-`--sim <name-or-udid>` to target some other device for one run.
-
-The scenario locates login controls by stable `.accessibilityIdentifier`
-(`primitive.login.emailField`, `primitive.login.emailSubmit`,
-`primitive.login.otpField`, `primitive.login.otpVerify`), so it survives
-copy changes to the login form. It asserts the identifier in
-`PRIMITIVE_SMOKE_SUCCESS_ID` renders after sign-in (default
-`primitive.template.home`, the unmodified template's Home screen); point it at
-your own screen's identifier when you replace the post-login UI.
+If you replace the home screen, set `PRIMITIVE_SMOKE_SUCCESS_ID` to your screen's accessibility identifier. The default is `primitive.template.home`.
 
 ### Prerequisite: a test account
 
-`ui_signin` signs in through the `+primitivetest` OTP bypass — no mailbox, no
-real code. Whitelist a base email on the app, then hand the scenario a derived
-address. The full contract (address shape,
-the fixed `000000` code, the per-app whitelist, TTL, and member-only roles) is
-in the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) under
-"Test User Sign-In" — don't re-derive it here.
-
-The scenario's preflight checks all three prerequisites through the CLI's
-effective-settings view before it builds:
-
-```bash
-primitive apps get --json   # must list your base under testAccountBaseEmails,
-                                 # report emailSignInEnabled: true, and have a
-                                 # signup mode that admits the test address
-```
-
-Email sign-in always offers the code — one email carries it — so
-`emailSignInEnabled: true` is the hard requirement. Set these in `app.toml` and
-apply with `primitive config push --only app`. Then:
+Configure a derived test email using the [Authentication guide](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md). Email sign-in must be enabled, the base email must be allowed, and the app must admit the derived address.
 
 ```bash
 export PRIMITIVE_SMOKE_TEST_EMAIL="you+primitivetest-smoke@example.com"
-```
-
-**The signup mode has to admit the address.** The `+primitivetest` bypass
-replaces the emailed code, not the app's signup gate, and a freshly scaffolded
-app is `mode = "invite-only"` — an unadmitted test address is rejected at OTP
-request with `This app is invite-only. You've been added to the waitlist.`
-Either set `mode = "public"` in `app.toml` and run
-`primitive config push --only app`, or stay invite-only and admit the exact
-derived address first — the Authentication guide's "Invite-only apps:
-pre-create the member" covers how.
-
-The preflight can read `mode` but not the app's members, so under a
-non-public mode it fails unless you tell it the address is already admitted:
-
-```bash
-export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1   # invite-only + address admitted
-```
-
-To check the prerequisites without the multi-minute boot and build, run the
-preflight on its own:
-
-```bash
+# For an invite-only app, after admitting the derived address:
+export PRIMITIVE_SMOKE_TEST_EMAIL_INVITED=1
 PRIMITIVE_SMOKE_PREFLIGHT_ONLY=1 scripts/smoke-test.sh ui_signin
 ```
 
-It exits 0 when everything is in place and otherwise names the exact setting to
-fix. That includes the case where `primitive apps get` itself fails (CLI
-not logged in, app id unresolvable, API error): the preflight reports
-`could not read settings (is the CLI logged in and pointed at this app?)`
-instead of failing with no explanation.
+The preflight checks setup without booting or building. Resolve any reported settings or CLI authentication error before running the full scenario.
 
 ### Installing idb
 
@@ -1067,38 +565,7 @@ In an app scaffolded from the Swift template, this is one command:
 bash scripts/setup-idb.sh
 ```
 
-It is idempotent — on a machine that already has idb it installs nothing — and
-it fails loudly if it can't finish, rather than letting the problem resurface
-later as an unexplained "cannot run accessibility commands".
-
-What it does, and what to run by hand without the template: idb is two pieces, a
-native companion (Homebrew) and the `idb` Python client.
-
-```bash
-brew install facebook/fb/idb-companion
-python3.12 -m venv ~/.local/share/primitive/idb-venv
-~/.local/share/primitive/idb-venv/bin/pip install fb-idb
-mkdir -p ~/.local/bin                                              # may not exist yet
-ln -s ~/.local/share/primitive/idb-venv/bin/idb ~/.local/bin/idb   # put `idb` on PATH
-```
-
-The link step is deliberately not `ln -sf`: if you already manage an `idb` at
-`~/.local/bin/idb`, it errors instead of replacing it (which is what the script
-does too). Remove yours first if you want the venv's client there.
-
-**Pin Python 3.12.** `fb-idb` calls `asyncio.get_event_loop`, which was removed
-in Python 3.14, so it fails to run under 3.14 — and Homebrew's Python is PEP 668
-externally-managed, so a plain `pip install fb-idb` is refused outright. A 3.12
-venv answers both, which is why the script builds one (at
-`PRIMITIVE_IDB_VENV`, default `~/.local/share/primitive/idb-venv`, so every app
-on the machine shares one install).
-
-`scripts/smoke-test.sh` finds that venv's client itself — including when a
-broken 3.13/3.14 `idb` shadows it on PATH — so `ui_signin` needs no PATH export.
-For ad-hoc `idb` commands, add `export PATH="$HOME/.local/bin:$PATH"` to your
-shell (the script prints the line when it's needed). `ui_signin`'s preflight
-detects a missing or unrunnable idb and points at `bash scripts/setup-idb.sh`
-rather than printing a raw stack trace.
+The script installs the companion and a Python 3.12 client in a shared virtual environment. It reuses a working installation. Smoke tests find the client automatically; add `~/.local/bin` to PATH for manual commands.
 
 ### Driving idb by hand
 
@@ -1114,28 +581,7 @@ idb --companion localhost:10882 ui text "hello"         # type into the focused 
 idb --companion localhost:10882 ui key 40               # 40 = Return
 ```
 
-**The `DEVELOPER_DIR` is not optional on a current Xcode.** `idb_companion`
-loads SimulatorKit — the framework behind every HID call (`ui tap`, `ui text`,
-`ui key`) — from `$DEVELOPER_DIR/Library/PrivateFrameworks/SimulatorKit.framework`,
-and Xcode 27 ships it at `Xcode.app/Contents/SharedFrameworks/` with no
-`Contents/Developer/Library/PrivateFrameworks` at all. A companion started
-plainly under that Xcode serves `describe-all` happily and fails every tap with
-
-```
-SimulatorKit is required for HID interactions: Error Domain=com.facebook.FBControlCore
-Code=0 "Attempting to load a file at path '…/Developer/Library/PrivateFrameworks/
-SimulatorKit.framework', but it does not exist"
-```
-
-`scripts/idb-developer-dir.sh` prints a developer directory where the framework
-is: a symlink mirror of the Xcode bundle with SimulatorKit restored to the path
-idb looks in, built on first use and shared by every app on the machine
-(`PRIMITIVE_XCODE_SHIM_DIR`, default `~/.local/share/primitive/xcode-hid-shim`).
-Nothing inside `Xcode.app` is written and nothing needs root. On an Xcode that
-still keeps the framework where idb looks, it prints the active developer
-directory unchanged and creates nothing. `ui_signin` runs it itself — including
-in its preflight, so an Xcode it cannot work with is reported before the build
-rather than as a failed tap after it (#3487).
+Use `scripts/idb-developer-dir.sh` as shown so the companion can locate Xcode's input frameworks. The sign-in scenario does this automatically.
 
 To tap a control by identifier rather than raw coordinates, read
 `describe-all`, find the element whose `AXUniqueId` matches (this is where a
@@ -1156,3 +602,9 @@ Like `launch_survive`, this is macOS-only (a booted simulator plus idb) and is
 **not** part of the Linux `pnpm test` suite. It's a developer- and
 agent-invoked check, not a gate the Linux CI enforces.
 {{/lang}}
+
+## HTTP diagnostics
+
+- `Server-Timing: total;dur=<milliseconds>` reports server-side request duration.
+- Authenticated app responses use `Cache-Control: no-store`; avatar responses are publicly cacheable.
+- Blob downloads support `ETag` and conditional `If-None-Match` requests. Keep the original body yourself if reusing it after a `304`.

@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Blobs
 
-Guidelines for AI agents implementing file storage in Primitive apps. This guide covers **document-scoped blobs** — binary files attached to a specific document. General-purpose storage outside any document lives in the [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md).
+Document blobs attach files to a document and inherit its permissions. Each blob can hold up to 10 MB. Use [blob buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) for files independent of documents.
 
 ## Document-scoped blob operations
 
@@ -62,20 +62,11 @@ let blobs = client.documents.blobs(documentId: documentId)
 
 ## Overview
 
-**Document-scoped blobs** — binary files attached to a specific document. Access follows the document's permissions. **Cap: 10 MB per blob.**
-
-
-```swift
-let blobs = client.documents.blobs(documentId: documentId)
-```
-
-For general-purpose storage outside any document context — avatars, server-generated files, public assets, anonymous reads via signed URLs — use a **blob bucket** instead (100 MB per blob). The [Blob Buckets guide](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) covers buckets and the full decision rule for choosing between the two.
-
----
+Readers can download document blobs; editors can upload or delete them. Uploaded files queue when offline and downloaded files can be cached locally.
 
 ## Uploading
 
-SHA-256 is computed client-side and used for server-side dedup. See **Upload with disposition** above for the full options form. The download endpoint chooses `Content-Disposition` from the `?disposition=` query param (default `attachment`), not from the upload-time value — pass `disposition` explicitly to the download URL when serving inline.
+Repeated uploads can reuse the same file content. See **Upload with disposition** above for the full options form. The download endpoint chooses `Content-Disposition` from the `?disposition=` query param (default `attachment`), not from the upload-time value — pass `disposition` explicitly to the download URL when serving inline.
 
 
 `upload` accepts `Data`.
@@ -196,7 +187,7 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
 
 ---
 
-## Queue management
+## Gotchas: upload queue management
 
 Inspect and control the per-document upload queue, and set the client-wide upload concurrency (applies to all documents). The `queueId` is the `blobId` for document uploads.
 

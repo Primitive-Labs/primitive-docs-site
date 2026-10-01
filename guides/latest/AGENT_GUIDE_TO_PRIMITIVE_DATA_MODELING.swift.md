@@ -6,50 +6,33 @@ How to choose between **documents** and **databases**, and how to combine them. 
 
 | | **Documents** (js-bao) | **Databases** (js-bao-wss) |
 |---|---|---|
-| Backed by | On-device document store (Yjs), synced over WebSocket | Isolated server-side store, read and written by server functions |
+| Backed by | On-device data, synced with the server | Isolated server-side store, read and written by server functions |
 | Where data lives | On every client that has access, plus the server | Server only |
 | Reads | Local, synchronous after `documents.open()` | A function call (network round trip); one call can read several models |
 | Writes | Local first, async sync to server, automatic conflict-free merge | Network round-trip; last-write-wins per field |
-| Concurrent edits | Merge cleanly (Yjs) — true collaborative editing | No merge; concurrent writers race |
+| Concurrent edits | Concurrent edits merge automatically | No merge; concurrent writers race |
 | Real-time updates | Built in for everyone with the doc open | Opt-in: the function that writes publishes to a channel; granted clients subscribe |
 | Offline | Yes — reads/writes work offline, sync resumes on reconnect (`offline: true` on the client) | No — every call requires the network |
 | Access control | Whole-document grant: `reader`, `read-write`, `owner` | The function's `access` gate (who may call) and its code (which rows) |
 | Per-record access for end users | Not possible — anyone with the doc gets everything | Yes — the function filters what each caller sees |
 | Practical size | ~10 MB per ordinary document (soft); a large document (`documentFormat: 2`) is validated at 2 GB | ~5 GB per database (one isolated instance each) |
-| Server-enforced fields | No (client writes Yjs updates directly) | Yes — `timestamps`, per-model triggers, and the function's own code |
+| Server-enforced fields | Client-controlled | Yes — `timestamps`, per-model triggers, and the function's own code |
 | Server logic | Server functions read and write document records (`ctx.doc(id)`; see [The typed document handle](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-document-handle)) | Server functions, plus `timestamps` and per-model triggers |
 | Aggregates / multi-step reads | Client-side over local data | `aggregate` and `count` on the typed handle; several models in one function call |
 
-The corollaries that follow are what to use when picking sides.
-
 ## Decision rules
 
-Apply these in order. Stop at the first one that fits.
-
-1. **Different users need to see different records inside the same dataset?** → **Database**. Documents grant access to the whole document; you cannot project rows out per user.
-2. **Multiple users editing the same data live (Google-Docs style)?** → **Document**. Yjs is the only system here that merges concurrent edits without conflict.
-3. **Must work offline?** → **Document** (open the client with `offline: true`). Databases need the network for every call.
-4. **Dataset will exceed ~10 MB for a single sharing unit, or users only need a slice?** → **Database**. Documents replicate fully to every client. Size alone is the exception: when every member of the sharing unit needs all of the data, create it as a **large document** (`documentFormat: 2`) instead — records live in a persisted local store instead of in memory, validated at 2 GB. A Node client opens one with no extra configuration; a browser client needs the durable engine configured (`databaseConfig: { type: "opfs", options: { workerURL } }`) or the open is refused. See the large-document pattern below.
-5. **Server must own a field (timestamps, audit fields, computed status, role assignments)?** → **Database**. Use `timestamps`, triggers, or the writing function's code; documents have no equivalent.
-6. **Need aggregates, group-by, or one round-trip that touches several models?** → **Database** (`aggregate` on the handle; one function reading several models with `Promise.all`).
-7. **None of the above and the data is per-user or per-shared-workspace?** → **Document**. Cheaper, lower latency, simpler.
-
-If after running through these the answer is still ambiguous, ask the user before designing the data layer. Migrating between the two systems later is expensive.
+- Choose documents for offline access and collaborative editing when everyone with access sees the same data.
+- Choose databases for caller-specific record visibility and server-enforced fields.
+- Use large documents when a dataset exceeds ordinary-document guidance but still needs one sharing boundary.
 
 ### Common false signals
 
-- "Real-time" alone does **not** mean documents. A function that writes a database row can publish the change to a channel; the difference is that documents also merge concurrent **edits**.
-- "Shared with a team" alone does **not** mean databases. Documents share cleanly with groups when every member should see everything in the document.
-- "Has a server" does not mean databases. Documents are also synced through a server — but the server treats the doc as opaque Yjs state and cannot enforce per-record rules.
+Realtime updates alone do not require documents: a database-writing function can publish to a channel. Team sharing alone does not require databases: documents can be shared with groups.
 
 ### When to ask the user
 
-If you cannot answer one of these from context, ask before building:
-
-- **Sharing model**: private per user, shared identically with a group, or per-record visibility?
-- **Volume**: order of magnitude of records and total bytes per sharing unit?
-- **Roles**: do different roles see different subsets of the same data?
-- **Offline / collaborative editing**: required, nice-to-have, or irrelevant?
+Clarify the sharing boundary, expected volume, and offline requirements when the task does not establish them.
 
 ## Canonical patterns
 
@@ -125,25 +108,7 @@ Use for: any data where what a caller sees depends on who they are. The `access`
 
 ### Database — server-enforced fields
 
-For plain audit times on every model, use `timestamps` on the type config:
-
-```toml
-[type]
-databaseType = "project"
-timestamps = { create = "createdAt", update = "modifiedAt" }
-```
-
-For invariants that depend on the record's data (e.g. set `completedAt` only when `status == "done"`), or that stamp who wrote a record, use a per-model trigger:
-
-```toml
-[triggers.tasks]
-triggers = [
-  { on = "create", set = { createdBy = "user.userId" } },
-  { on = "save", when = "record.status == 'done' && record.completedAt == null", set = { completedAt = "now()" } },
-]
-```
-
-Both apply server-side on every save and patch, whichever function made it.
+Fields the server sets on every write, whichever function made it, come from the database type config: [`timestamps`](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#timestamps) for plain audit times, and per-model [triggers](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#triggers) when the rule depends on the record's data (`completedAt` only when `status == "done"`) or stamps who wrote the record.
 
 ### Database — realtime
 
@@ -158,33 +123,9 @@ Load the initial state with a function call, then apply channel messages as they
 
 ## Worked architectures
 
-### Personal productivity app
-
-All data is per user. Documents only. One per-user document via `getOrCreateWithAlias`. Settings can sit in the root document via `userStore`.
-
-### Collaborative workspace (shopping lists, project boards)
-
-Documents only. One document per workspace. Owner shares with teammates via group or email. Real-time edits are free.
-
-### Classroom / LMS (mixed)
-
-- **Documents** for student work being actively drafted with teacher feedback (collaborative editing, offline drafting).
-- **Database** (`type: "classroom"`, one per class) for assignments, grades, roster. Server functions enforce per-role visibility: a submit function records the work under the caller's own id; a grading function checks the caller's `teacher` membership for the class before it writes. Triggers stamp `submittedAt`, `gradedBy`.
-
-### Multi-tenant SaaS / project management
-
-- **Document** per user for personal preferences, dashboard layout.
-- **Database** per organization (`type: "org"`) and **per project** (`type: "project"`). Each database is an isolated instance, so per-project databases scale and fail independently. The functions that read and write them check group membership (`team`, `admin`) in their `access` gate or code.
-
-### E-commerce
-
-- **Document** per user for cart and wishlist (offline, instant).
-- **Database** (`type: "catalog"`, app-wide) for products, search, reviews. Per-seller `type: "seller_store"` databases for orders/inventory.
-
-### Chat / messaging
-
-- **Documents** per channel for messages — real-time merge-based sync handles concurrent posting and edits, full history available offline.
-- **Database** (app-wide) for the channel directory and user profiles, behind `search-users` / `create-channel` functions.
+- **Personal app:** one document per user.
+- **Team workspace:** one document per independently shared project.
+- **Marketplace:** database for inventory and orders; documents for private lists or drafts.
 
 ## Design principles
 
@@ -219,7 +160,7 @@ Membership checks — `isMemberOf(groupType, groupId)` in a function's `access` 
 - Server must enforce who sees what? → **Databases**.
 - Both? → Documents for the editing surface, databases for the structured/queryable layer (see Classroom and E-commerce above).
 
-## Anti-patterns
+## Gotchas
 
 | Don't | Do |
 |---|---|

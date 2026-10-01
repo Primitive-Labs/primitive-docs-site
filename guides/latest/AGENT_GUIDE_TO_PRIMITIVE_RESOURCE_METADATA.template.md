@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Resource Metadata
 
-Guidelines for AI agents attaching typed, access-controlled metadata to a resource — a user, a group, a collection, or a database. Metadata is grouped into named **categories**; each category has its own schema and its own CEL `readRule`/`writeRule`, so different data about the same resource can carry different rules (a self-editable `profile` category vs. a server-function-only `billing` category).
+Resource metadata stores typed values about users, groups, collections, and databases. Define categories with schemas and read/write rules, then read or replace each category’s values.
 
 ## Category configs
 
@@ -29,13 +29,14 @@ maxLength = 120
 primitive config push
 ```
 
-- **Field types:** `string`, `number`, `boolean`, `date`, `id`, `stringset`. `enum` (string array) is valid only on a `string` field; other supported constraints are `required`, `maxLength`, `maxCount`.
-- **`unique`:** set `unique = true` on one `string`/`id` field (at most one per category) to enforce that no two resources of that type share the value AND make the value reverse-resolvable (`client.resourceMetadata.resolve` / `primitive metadata resolve` / `ctx.api.resourceMetadata.resolve` from a function, all below). The indexed value is capped at 512 UTF-8 bytes. Writing a value another resource already owns is rejected `409` (atomic — the write rolls back); rewriting the same value on the same resource is idempotent; clearing the field or deleting the row frees the value in the same write. Enabling `unique` on a category that already has rows is refused (they'd be unindexed) — declare it at category-creation time, or recreate the category.
-- **Category name `attrs` is reserved** — it's the read-only projected category (see **`md.self.attrs`** below), not a category you define.
-- **Limits:** up to 100 keys per category, 16 KB per category item.
-- **`readRule`/`writeRule` context:** `user.userId`, `user.role` (the caller), `resource.resourceType`, `resource.resourceId` (also bound as `resource.id`), `resource.category`. When the subject is a `database` or `collection`, the rule can also read the resource's own columns via **`resource.attrs.<column>`** — `database`: `databaseId`, `databaseType`, `createdBy`; `collection`: `collectionId`, `collectionType`, `name`, `createdBy`. The canonical use is creator bootstrap: `writeRule = "user.userId == resource.attrs.createdBy"`. The subject row loads lazily (a rule that never references `resource.attrs` issues no extra read) and the binding fails closed: any other resource type, an unmapped column, or a missing row denies. The membership helpers `isMemberOf`/`memberGroups`/`hasRole` are also wired, so a rule can be group-scoped (`isMemberOf('class-teachers', resource.id)`) instead of only self-scoped; memberships load once, only when the rule references a membership helper (`hasRole` needs no load — it reads only `user.role`). `hasCollectionAccess` is rejected at save time in a category rule (collection-scoped only; it can never resolve here). An **app-level** owner or admin always bypasses both rules; a resource-level permission (e.g. a database's `owner`/`manager` grant) never bypasses — the rule itself is what authorizes resource-scoped callers. Omitting either rule defaults to deny.
-- **Category authoring is admin-scoped** — define and update categories via TOML sync, or directly through the admin-gated `metadata-categories` REST route. `client.resourceMetadata` covers values only (`get`/`set`/`getBatch`/`list`/`delete`/`resolve`); the CLI's `primitive metadata-category-configs list`/`get` inspect the definitions read-only (the `metadata` noun carries value verbs only), and a definition is removed by deleting its `metadata-category-configs/<resourceType>.<category>.toml` and running `primitive config push --prune` — there is no delete verb. Deleting a definition is a hard delete of the definition only — stored value rows are **not** deleted and, with no query path from a category to its values, become **unreachable** (reads/writes `404`, rows can't be removed by any surface). Delete the values first (`primitive metadata delete` / `resourceMetadata.delete`) if you need them gone. Re-creating the same `{resourceType, category}` resurfaces orphaned rows bound to the new schema (possibly stale/mismatched on read).
-- **A category rule can declare its own `metadataManifest`** (same `self`/`paths`/`secrets` shape as any other owning config) so it can reach declared secrets or a traversal path's source category — see "A category rule's own manifest" below. Without one, the rule still gets inferred `md.self` reads but binds no `secrets`/`vars`.
+| Setting | Meaning |
+|---|---|
+| Field type | `string`, `number`, `boolean`, `date`, `id`, or `stringset` |
+| `readRule` / `writeRule` | CEL conditions; omitted rules deny regular members |
+| `unique` | One `string` or `id` field per category; declare before storing values |
+| Limits | 100 keys and 16 KB per category item; unique values up to 512 UTF-8 bytes |
+
+App owners and admins bypass category rules. Resource owners and managers do not. Use `resource.attrs` only for supported database and collection attributes.
 
 ## Values: read, write, batch read, list, delete, resolve
 
@@ -281,22 +282,27 @@ That is how to make a server-owned category: give it a `writeRule` no client sat
 
 ## Create-time initial metadata
 
-A collection or database create can stamp metadata in the same operation — category name → values, applied once the resource exists (so `md.self` resolves) instead of via a follow-up write. From the CLI:
+A collection, database, or group create can stamp metadata in the same operation — category name → values, applied once the resource exists (so `md.self` resolves) instead of via a follow-up write. From the CLI:
 
 ```bash
 primitive databases create "Class Roster" --type roster --initial-metadata '{"settings":{"visibility":"class-only"}}'
 primitive collections create "Class 42" --initial-metadata '{"settings":{"visibility":"class-only"}}'
+primitive groups create --type class-reading-group --name "Reading group" --initial-metadata '{"classLink":{"classId":"class-A"}}'
 ```
 
 - Each category is schema-validated **before** the resource is created — an invalid entry fails the whole create (all-or-nothing), not a partial create with dropped metadata.
-- The category's `writeRule` is **waived** for this stamp — creation authority already covers it. The waiver is unreachable from the regular REST write route: it never accepts a caller-supplied `resourceId`, so it can't be used to bypass `writeRule` on an existing resource.
+- The category's `writeRule` is **waived** for this stamp — creation authority already covers it. The waiver is unreachable from the regular REST write route and applies only to the resource the create makes, so it can't be used to bypass `writeRule` on an existing resource.
 - Capped at 10 categories per create.
 
-In the client, `collections.create()` takes an optional `initialMetadata` — category name → that category's values:
+In the client, `collections.create()` and `groups.create()` take an optional `initialMetadata` — category name → that category's values:
 
 {{ example: documents/collection-initial-metadata }}
 
-On a collection specifically, staging `initialMetadata` at create time can also gate the `collection.create` rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide. A database create has no caller create rule to gate; `group.create` takes no `initialMetadata`.
+{{ example: users-and-groups/group-initial-metadata }}
+
+Staging `initialMetadata` at create time can also gate the create rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide and [Gating group creation on staged metadata](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#gating-group-creation-on-staged-metadata) in the Users and Groups guide. A database create has no caller create rule to gate.
+
+A group's stamp only writes fresh rows. Group metadata is keyed by `groupId` alone (no type), so a category already stored under that id — another type's group, or a deleted group's retained metadata — fails the create with `409 METADATA_EXISTS`; neither the group nor any metadata is created, and the stored row is untouched. Pick another `groupId`, or delete the stored category first.
 
 ## Metadata lifecycle
 
@@ -307,9 +313,9 @@ A write never checks that the target resource exists — a write for a not-yet-c
 - Whatever flow deletes a resource must also delete that resource's metadata — the platform doesn't do it for you. Delete each category with `delete` (client/CLI) or `ctx.api.resourceMetadata` from a function; a teardown function that deletes the resource deletes its categories in the same invocation.
 - **Order deletes correctly.** Delete a category's *values* before deleting the category *config* — once the config is gone, the values are orphaned and can no longer be deleted through any surface. And when a `writeRule` reads `resource.attrs.<column>`, delete the metadata before the owning resource — the rule loads the resource's own columns to authorize the delete, so it fails closed once the resource row is gone.
 
-## Anti-patterns
+## Gotchas
 
-- Declaring `[metadata.self] categories` for a plain `md.self.<category>` read — it's redundant, since self-reads are inferred; declaration matters only to load a category the rule never names, or to serve as the source category for a declared traversal path's `via` key. A **traversal path** (`md.<pathName>`) is the opposite: it's never inferred, so referencing one without a `[metadata.paths.*]` declaration is an undeclared reference. `secrets.<KEY>` likewise must be in the config's `secrets` allowlist. How an undeclared path or out-of-allowlist secret fails depends on the rule site: a **metadata category `readRule`/`writeRule`** is linted at save time (a save-time 400), but a **group/collection rule set** is not — there the undeclared reference binds `null` and denies at runtime instead.
+- Declare traversal paths and secret keys before using them in rules. Plain `md.self.<category>` reads are inferred. Undeclared references can reject a category config or deny a group/collection operation.
 - Expecting a category's own `readRule` to restrict what a *different* rule can read via `md.self`/`md.caller` — it only gates the read API, not CEL use of the value (trusted-author model).
 - Relying on resource deletion to clean up its metadata — there's no cascade; delete metadata explicitly in the same flow.
 - Trying to create or list category configs from the client SDK — that surface is TOML-sync/admin-REST only.

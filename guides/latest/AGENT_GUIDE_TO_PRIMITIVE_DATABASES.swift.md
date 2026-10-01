@@ -1,26 +1,14 @@
 # Working with Databases in the Primitive platform
 
-Guidelines for building apps with Primitive's server-side database storage.
+A database stores records on the server. Apps access it through server functions; each function authorizes callers and scopes their data.
 
 ## Core Concept: Databases
 
-A **database** is an isolated, server-side data store that app code reaches through a **server function**:
-
-1. **Records are read and written from a function.** `ctx.db(databaseId, "<type>")` returns a typed handle; `.model("<Model>")` binds one model, which has `query`, `count`, `aggregate`, `save`, `patch`, `delete` and `batch`. Filters and options are plain objects.
-2. **The function runs on the app's authority.** Once a caller is through the function's `access` gate, the code reads and writes every model of every database of the app. The gate decides who may call; the code decides which rows they get.
-3. **Schemaless.** Save any JSON records; a model exists once something is written to it. An optional `[models.*]` declaration on the database type types the handle and drives indexes.
-
-**Lifecycle is function code too.** Creating, resolving, sharing and inspecting databases are `ctx.api.databases.*` calls (see [Managing databases](#managing-databases)). App code has no database calls: its only database-related call is invoking a function. App admins also have the `primitive databases` CLI for administrative lifecycle and record work.
-
-**Size:** an individual database holds up to ~5 GB. For more, split data across databases (one per tenant, project, or domain) — each is an isolated instance that scales independently.
-
-The function surface (`ctx.db`, `ctx.api`, the generated types, the paged envelope, registered queries) is documented in full in the [Server Functions guide](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#database-records). This guide covers the database side — types, schema, the query and write bodies, lifecycle, permissions — and does not re-teach the runtime.
+`ctx.db(databaseId, "<type>").model("<Model>")` returns a typed model handle. The database type defines shared model declarations, indexes, and server-stamped fields. Each database holds up to ~5 GB; use one per team or tenant when access and queries follow that boundary.
 
 ## When to Use Databases vs. Documents
 
-Primitive offers two storage options: **documents** (local-first, real-time collaborative) and **databases** (server-side, reached through functions). Many apps use both — documents for personal/collaborative data, databases for app-wide shared data.
-
-See the [Data Modeling guide](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md) for the decision framework, comparison table, and example app architectures.
+Use a database for server-enforced rules and caller-specific records. See [Data Modeling](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md) for the choice between documents and databases.
 
 ## Quick Start
 
@@ -160,7 +148,7 @@ Records are schemaless, so the rows of one model need not all carry the field yo
 | `{ priority: 1 }` (ascending) | **first**, before every real value |
 | `{ priority: -1 }` (descending) | **last**, after every real value |
 
-That is SQLite's own `ORDER BY` placement for nulls, and it is identical on the server and in the JS and Swift clients, so the same records page in the same order everywhere. Paging visits every matching record exactly once in either sort direction and either paging direction; ties are broken by `id`, which every record has, so boundaries are stable when many rows share a value or share having none.
+That is the database's own `ORDER BY` placement for nulls, and it is identical on the server and in the JS and Swift clients, so the same records page in the same order everywhere. Paging visits every matching record exactly once in either sort direction and either paging direction; ties are broken by `id`, which every record has, so boundaries are stable when many rows share a value or share having none.
 
 Cursors are **opaque** base64 tokens — never parse or construct one. A cursor issued before this ordering was specified keeps working unchanged, so a client holding one need not restart its walk.
 
@@ -292,7 +280,7 @@ With **exactly one** operation there is no key to read through: each group's val
 - Or bind the caller with a registered query's `$caller` parameter (below).
 - A check that depends on the input — "is this caller in the team that owns `input.databaseId`?" — is code: read `ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "team" })` (a bare array of `{ groupType, groupId, name, … }`) and refuse before touching the rows.
 
-**Nothing is declared per database or per model.** A function reaches every database of the app; the capability lines a function declares are for integrations, secrets and the high-blast operations only (creating, deleting or re-owning a database among them — see [Capabilities](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#capabilities)).
+**Nothing is declared per database or per model.** A function reaches every database of the app; the capability lines a function declares are for integrations, secrets and the permission-changing operations only (creating, deleting or re-owning a database among them — see [Capabilities](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#capabilities)).
 
 ## Registered queries
 
@@ -566,7 +554,7 @@ Use `timestamps` for plain audit times; use triggers when the rule depends on th
 
 ## Managing databases
 
-Lifecycle calls go through `ctx.api.databases` in a function. Each takes one options object with its path parameters and a `body`; each answers the route's JSON. The high-blast calls need a capability line on the function (`capabilities = [...]`) — an undeclared one is refused with `FUNCTION_HIGH_BLAST_GRANT_MISSING`, naming the string to add.
+Lifecycle calls go through `ctx.api.databases` in a function. Each takes one options object with its path parameters and a `body`; each answers the route's JSON. Calls that create, delete, or change permissions need a capability line on the function (`capabilities = [...]`) — an undeclared one is refused with `FUNCTION_HIGH_BLAST_GRANT_MISSING`, naming the string to add.
 
 | Call | Args | Capability |
 |---|---|---|
@@ -623,29 +611,12 @@ A group grant (`grantGroupPermission`) gives every member of the group `manager`
 
 **Don't add end users as managers** to share data with them. Share by writing the function that serves them the rows.
 
-## Best Practices
+## Gotchas
 
-### Database design
-
-- **Create multiple databases for isolation.** Each database is a separate isolated instance. Use separate databases for separate tenants, projects, or data domains.
-- **Use database types** to share models, indexes and triggers across databases of the same kind.
-- **Use triggers and `timestamps`** for server-side invariants (created times, audit fields) — don't trust client-provided values that pass through a function's input.
-- **Per-database configuration** goes in a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category (separate `readRule`/`writeRule`) or in a settings record inside the database.
-
-### Function design
-
-- **Gate tightly, scope in code.** `access` says who may call; the code says which rows. An unfiltered `query()` reads every row of the model, whoever called.
-- **Never trust an id from input for authorization.** Take the caller from `ctx.user` or a `$caller` parameter, not from `input.userId`.
-- **One function per screen's worth of reads.** Read several models with `Promise.all` over the handle and return them together — one client round trip (see the [Performance guide](AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.md)).
-- **Bulk, not loops.** One `query` with `$in` over a list of keys (up to 1,000) instead of a query per key; `pMap` from `primitive-functions` when per-item calls are unavoidable.
-- **Prefer server-assigned ids.** Omit `id` on `save` unless you genuinely need a deterministic one (idempotency, a precomputed key).
-
-### Performance
-
-- **Index** every field used in `filter` or `sort` — declare `indexed = true` in the schema. Without an index, the database scans every record of that model.
-- **Cap with `limit`** and page with `uniqueStartKey`.
-- **`count` is much cheaper than `query`** for "how many".
-- **`batch`** for many writes in one request.
+- A function acts with app authority. Validate requested IDs and authorize writes; scope reads to the caller.
+- A schema change does not rewrite existing records. Check existing data before adding uniqueness.
+- Use conditional writes when an update depends on a previously read value.
+- Keep queries within one logical database where possible; index fields used for filtering and sorting.
 
 ## Common Patterns
 
@@ -701,7 +672,7 @@ A `[models.*]` schema that DECLARES either name is refused at push with the same
 
 Rename the declared field (`kind`, `category`, `status`) and push again.
 
-## Common Errors
+## Error handling
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|

@@ -1,54 +1,21 @@
 # Working with Documents in the Primitive platform.
 
-Guidelines for building apps with Primitive's document-based architecture.
+A document stores model records locally, syncs changes, and defines a sharing boundary. Open it before querying or writing. Use separate documents when data needs separate access.
 
 ## Core Concept: Documents
 
-A **document** is:
-
-1. A container for js-bao model objects
-2. A sharing boundary—each document can be shared with different users at different permission levels
-3. Can be used entirely interally, or exposed to app users as a concept that make sense for the application. For example a document might map to a Company in a business application, a Portfolio in a financial app, or a Channel in a communication app.
-
-**Properties:**
-
-- Documents are read/written locally. js-bao handles sync with the server.
-- When other clients edit a document, local data updates in real-time.
-- Access is all-or-nothing: users either have access to the entire document or none of it.
-
-**Decision rule**: If data needs to be shared independently, it belongs in separate documents.
-
-**Permission Levels:**
-
-- **Reader** - View-only access
-- **Read-write** - View and edit capabilities
-- **Owner** - Full control including sharing and deletion
-
-**Size Guidelines:** Documents work best around ~10 MB each (soft limit). For most apps (thousands of records, years of data), this is sufficient. Past that, create a **large document** (`documentFormat: 2`; `--large` on the CLI) instead of splitting the data across documents or moving it to a database — validated at 2 GB. It is opt-in at creation and never migrated. Past creation it is the same document API: open it, then read and write through the same model classes. Which clients can open one, how to create it, its limits and its read path: [Large Documents](#large-documents).
+Documents support offline reads and writes and automatically merge concurrent edits. Permissions apply to the whole document: `reader`, `read-write`, or `owner`.
 
 ## Documents vs. Databases
 
-Primitive also provides **Databases** — isolated, server-side storage an app reaches through server functions. Documents are best for personal data, real-time collaboration, and offline access. Databases are best for app-wide shared data, large datasets, and fine-grained access control. Many apps use both.
-
-See the [Data Modeling guide](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md) for a full decision framework, comparison table, and example app architectures. See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for database API documentation.
+Use documents for local-first collaboration. Use databases for records served through server functions with caller-specific access. See [Data Modeling](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md).
 
 ## Critical Rules
 
-1. **Queries operate over ALL open documents.** NEVER iterate over documents to query. Filter results by documentId or other fields in the query itself.
-
-2. **Use model IDs, not document IDs.** Model data references entirely in objects using model IDs. Use documentIds ONLY when required for APIs (sharing, save location). In routes and queries, prefer model IDs.
-
-3. **NEVER remove fields from models.** Add a deprecation comment instead.
-
-4. **ALWAYS declare new models in the schema and regenerate.**
-   Add the model to `models.toml`, then run `npx js-bao-codegen-v2`.
-
-5. **Prefer query filtering over in-memory filtering.** Push filter conditions into the query itself rather than fetching everything and filtering on the client.
-
-6. **Load data at the screen level, not in leaf components.** Pass data and readiness into sub-components as props.
-
-7. **Understand the root document's role and limitations.** The root document is a special per-user document that is automatically created and opened. It can never be shared or deleted, and there is exactly one per user. It's a natural home for user preferences and settings that should be available whenever the user signs in. The root document can hold any model, but store most application data in regular documents for greater flexibility (sharing, collaboration, multiple documents). Use the "single document" pattern with aliases for personal apps, or the "one document at a time" pattern for multi-workspace apps.
-   The template stores user preferences in the root document via `userStore`.
+- Queries span open documents. Use the `documents` option to narrow them.
+- Use model record IDs for relationships; document IDs select storage and sharing.
+- Define models in `models.toml` and regenerate after changes. Keep custom code outside generated files.
+- The root document is private, automatically opened, and cannot be shared or deleted. Use regular documents for shared application data.
 
 ## Document Lifecycle
 
@@ -61,48 +28,19 @@ Documents must be opened before querying or modifying data within them.
   const result = await Task.query({}, { documents: documentId });
 ```
 
-Documents are ready to be queried once the `.open()` call finishes. Applications should wait for all required documents to be opened and show a loading state until then, then track document-specific readiness explicitly. `open()` is idempotent — calling it on an already-open document is a no-op. Handle open failures explicitly: surface an error or redirect; don't silently continue.
+Await `open()` before reading or writing. Show a loading state while it runs, and handle failures before continuing. Close documents when they are no longer needed.
 
-When an open needs server state to satisfy its `waitForLoad` — `network`, or `localIfAvailableElseNetwork` with no local copy — the call fails fast with a coded error instead of waiting on a sync that cannot happen:
+#### Gotchas when opening
 
-| Code | When |
-|---|---|
-| `DOCUMENT_UNAVAILABLE_OFFLINE` | `waitForLoad: network` while the network mode is offline |
-| `NETWORK_REQUIRES_AUTOSTART` | `waitForLoad: network` with `enableNetworkSync: false` — nothing would ever start the sync being waited for |
-| `NO_LOCAL_AND_NO_NETWORK` | `localIfAvailableElseNetwork` with no local copy and the document's sync left to the caller |
-| `CONNECTION_DISABLED` | the WebSocket is neither up nor able to come up — no token, or the state a logout / auth failure leaves behind |
-| `NETWORK_TIMEOUT` | the open waited out its availability budget (`availabilityWait`, default 30 seconds) without the sync completing — it throws rather than returning a possibly-empty document |
+- Queries span all open documents, so unnecessary opens also widen query results.
+- An open requiring server state can fail offline or time out. Handle the error code and retry `open()` when connectivity returns.
+- Open after authentication. A view or store being ready does not mean its documents are open.
 
-A failed open does not leave the document registered as open — handle the error and retry the open itself.
-Thrown as `JsBaoError` with the matching `code` — narrow with `isJsBaoError(err)` and branch on `err.code`, not on the message text.
-
-Open only the documents you need to query or want real-time updates from — every open document syncs continuously. Don't open documents you don't need, and close ones you're done with (see [Closing Documents](#closing-documents)).
-
-Track readiness with an `isReady` ref.
-
-**Wrong** — querying or saving before the document is open throws (or returns nothing for queries on no-document models):
-
-```typescript
-// DON'T: kick off open() and immediately query
-jsBaoClient.documents.open(documentId);          // missing await
-const result = await TodoItem.query({});         // throws DocumentClosedError on save,
-                                                 // returns empty data for query
-```
-
-**Store readiness is not document readiness:** if you wrap document tracking in a Pinia store of your own, keep the two flags apart. A store-level `isReady` means the **store** finished initializing (its document list and invitation list have loaded) — it says nothing about whether any particular document has been opened. Track document-specific readiness separately (e.g. after `documents.open()` resolves) before querying data in those documents.
-
-**Where in the Vue tree to open documents:**
-
-- **Open in pages/layouts/stores, not sub-components.** Sub-components receive readiness and data as props.
-- **Open after authentication, not before.** Gate on `userStore.isAuthenticated` (not `isInitialized`). The template's `AppLayout` already gates rendering on `isAuthenticated`, so components mounted inside it can call `open()` safely.
-- **Session-scoped documents** (small bounded set, < ~20): open once at app/layout level for the session.
-- **Route-scoped documents** (per-page, unbounded count, or transient): open on route entry, close on route leave. Render a loading state until `documents.open()` resolves and (with `useJsBaoDataLoader`) `initialDataLoaded` is true.
-- **Stray opens widen query scope** — JavaScript queries span every open document by default, so an unneeded open document doesn't just cost sync traffic, it changes query results.
-
+Open session documents in the app layout or store; open route-specific documents on entry and close them on exit.
 
 ### 2. Finding documents a user can access
 
-There is **no single "my documents" list**. A user reaches documents through **four distinct paths** — query each separately and combine in the UI. Do NOT try to unify them into one server-side list.
+List owned, directly shared, group-shared, and collection-shared documents separately, then combine them for navigation.
 
 **a. Documents they own** (`ownedDocuments` — created, or ownership transferred):
 
@@ -119,7 +57,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
   // convenience: `const owned = await client.me.ownedDocuments({ tag: "channel" })`.)
 ```
 
-**b. Documents shared directly with them** (`sharedDocuments` — non-owner `DocumentPermission` rows; group/collection shares do NOT appear here):
+**b. Documents shared directly with them** (`sharedDocuments` — direct non-owner grants; group and collection shares use their own lists):
 
 ```typescript
   const { items, nextCursor } = await client.me.sharedDocuments({
@@ -156,7 +94,7 @@ There is **no single "my documents" list**. A user reaches documents through **f
 
 Each row from `sharedDocuments` extends the base `DocumentInfo` (`title`, `createdBy`, `createdAt`, `lastModified`, plus `tags`/`metadata`/`thumbnailBlobId` when set) with the share-only extras `permission` (never `"owner"`), `grantedBy` (who granted the access) and `source` (always `"permission"` — a direct, non-owner grant).
 
-`ownedDocuments` and `sharedDocuments` return the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, NOT base64url — pass it back as the `cursor` option for the next page). `ownedDocuments()` returns a flat `DocumentInfo[]` by default, or the envelope with `returnPage: true`.
+`ownedDocuments` and `sharedDocuments` return the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, not base64url — pass it back as the `cursor` option for the next page). `ownedDocuments()` returns a flat `DocumentInfo[]` by default, or the envelope with `returnPage: true`.
 
 For an "everything I can access" surface, combine these two calls with group and collection memberships:
 
@@ -170,11 +108,7 @@ const collections = await jsBaoClient.collections.list();
 
 `jsBaoClient.documents.hasLocalCopy(documentId)` is the synchronous local-cache check, useful when deciding whether to render skeletons before `open()` resolves.
 
-#### Do not use
 
-- **The former `documents.list` method** — removed. It returned the union of owner + reader + read-write rows. Use `me.ownedDocuments` and `me.sharedDocuments`; `ownedDocuments` takes the same option set (`tag`, `limit`, `cursor`, `returnPage`).
-- **The former `documents.createInvitation`, `documents.acceptInvitation`, `documents.declineInvitation` and `me.pendingDocumentInvitations` methods** — removed with the per-document invitation model. Use `documents.updatePermissions(documentId, { email, ... })` for the share path; the platform creates an `AppInvitation` + `DeferredDocumentPermission` and the recipient redeems it via `client.invitations.accept(inviteToken)`. `documents.listPendingInvitations(documentId)` lists a document's outstanding deferred grants.
-- **`client.me.bookmarks.*`** — render "my documents" from `me.ownedDocuments()` + `me.sharedDocuments()` (and `collections.list()` / `groups.listUserMemberships(...)` if you also want group/collection access).
 
 #### `syncMetadata()` reference
 
@@ -183,7 +117,7 @@ const collections = await jsBaoClient.collections.list();
 - `scope: "all"` (default) syncs every document the user can reach, paginating the listing to completion; `scope: "single"` + `documentId` syncs one row.
 - `authoritative` (default `true`) treats the response as a complete snapshot of the scope: local rows the response doesn't mention are dropped from the index and, if they had cached metadata, `documentMetadataChanged` fires with `action: "deleted"`. Pass `authoritative: false` to merge only, with no eviction. Both scopes default to authoritative — `scope: "single"` is **not** forced non-authoritative, and it's exactly this scope that produces the `action: "deleted"` event for a single document a peer revoked or hard-deleted.
 - `payloadType` doesn't disable eviction, it **defers** it: an `"ids"` sync re-fetches the document and only evicts, with a synthetic authoritative upsert, once a 404/403 confirms it's actually gone — it never deletes on the strength of an id list alone. It defaults to `"full"` under `scope: "all"`; under `scope: "single"` it defaults to `"full"` when the fetched or supplied document exists and `"ids"` when it doesn't.
-- `retainIds` (an iterable of document IDs) exempts specific documents from an authoritative eviction, but **only applies to `scope: "all"`** — it's assembled solely in that branch, as is the automatic retention of the currently-open root document. `includeRoot: true` drops only that automatic retention — the root document then comes back in the listing itself, so there is nothing to exempt it from — and the IDs you pass in `retainIds` are added either way. `shouldRetain` (a `(documentId) => boolean` predicate) is the one exemption that reaches `scope: "single"` too — protect a document mid-open so a sync that hasn't caught up to it yet doesn't sweep it out from under you.
+- `retainIds` protects documents from eviction during `scope: "all"` only. Use the `shouldRetain(documentId)` predicate when a single-document sync must also protect a document, such as one still opening.
 - `background: true` swallows sync errors instead of throwing — use it for a periodic or on-navigation refresh you don't want to fail the caller over.
 
 ```typescript
@@ -331,7 +265,7 @@ Every example below is compiled against the real client as part of the docs buil
 
 Test presence with `$exists`. Its treatment of an *explicitly stored* null is path-dependent: the server counts a **stored JSON null** as present (`$exists: true` matches it), while the browser and Swift replicas keep each field in a typed column where a stored null is indistinguishable from an absent field (`$exists: false` matches it). Absent fields behave the same on every path; only explicit nulls differ. `$in` with a `null` entry matches nothing for that entry — use a `null` equality or `$exists: false` instead.
 
-**Negative operators never exclude an absent field (breaking change, #3166).** A filter that uses `$ne` or `$nin` to *exclude* records by a possibly-absent field matches the records lacking it — including access filters injected by `beforeQuery` hooks and write conditions. To exclude the missing case, add a `null` entry to `$nin` — it matches only records carrying a non-null value other than the excluded one, identically on every path:
+**Negative operators include absent fields.** A filter that uses `$ne` or `$nin` to *exclude* records by a possibly-absent field matches the records lacking it — including access filters injected by `beforeQuery` hooks and write conditions. To exclude the missing case, add a `null` entry to `$nin` — it matches only records carrying a non-null value other than the excluded one, identically on every path:
 
 ```typescript
 { deleted: { $nin: [null, true] } }
@@ -365,7 +299,7 @@ Records are schemaless, so the records of one model need not all carry the field
 | `{ priority: 1 }` (ascending) | **first**, before every real value |
 | `{ priority: -1 }` (descending) | **last**, after every real value |
 
-That is SQLite's own `ORDER BY` placement for nulls, and it is identical on the server and in the JS and Swift clients, so the same records page in the same order everywhere — a database's records follow the same rule (`AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md`). Paging visits every matching record exactly once in either sort direction and either paging direction; ties are broken by `id`, which every record has, so boundaries are stable when many records share a value or share having none. A page that reports more rows always carries the cursor to reach them.
+Pagination uses the same ordering on clients and the server. Ties use `id`; a page with more results includes a cursor. Pass the cursor back unchanged.
 
 Cursors are **opaque** base64 tokens — never parse or construct one. A cursor issued before this ordering was specified keeps working unchanged, so a client holding one need not restart its walk.
 
@@ -600,7 +534,7 @@ const { data: messages } = useJsBaoDataLoader({
 
 The same pattern adapts to "the K most recent" or "channels the user belongs to" — change the `me.ownedDocuments` / `me.sharedDocuments` calls and the readiness condition; everything else stays.
 
-**Create-then-requery is safe for a just-created owned doc.** `me.ownedDocuments` reads a server index that is only eventually consistent, so for a short window after `documents.create()` a raw server read can omit the doc you just made. The JavaScript client bridges that window: it merges a just-created owned document into the `me.ownedDocuments` result from its local cache, so a store that rebuilds its list on navigation (`load()` above re-running after `create()` + `documents.open(...)`) will still include the new document. You can still append the new entry optimistically after `create()` for an instant UI, but you no longer have to avoid the destructive re-query to keep the new doc from disappearing.
+`me.ownedDocuments` includes newly created owned documents from the local cache while the server listing catches up. You can refresh the list after creation or add the result immediately for faster UI feedback.
 
 
 ## Data Modeling Decisions
@@ -680,7 +614,7 @@ import { Todo } from "@/models";
 
 **Step 4: Make additional edits** to the schema in `models.toml` and run `npx js-bao-codegen-v2` again.
 
-**CRITICAL: NEVER edit `*.generated.ts` files or `src/models/index.ts`.** Both are overwritten on every codegen run.
+**CRITICAL: Never edit `*.generated.ts` files or `src/models/index.ts`.** Both are overwritten on every codegen run.
 
 ### Registering a Model at Runtime
 
@@ -940,7 +874,7 @@ Dates are stored as ISO-8601 strings. Convert for comparisons:
 
 ## Querying Data
 
-`Model.query()` returns a `PaginatedResult`: `{ data: T[], nextCursor?, prevCursor?, hasMore }`. ALWAYS access rows through `.data`.
+`Model.query()` returns a `PaginatedResult`: `{ data: T[], nextCursor?, prevCursor?, hasMore }`. Always access rows through `.data`.
 
 ```typescript
 // Query a specific document
@@ -1242,8 +1176,8 @@ Under the hood it wraps the same compiled client calls documented above — `Mod
 
 - Use `useJsBaoDataLoader` no more than once per component
 - **Return a single structured object** from `loadData`
-- NEVER add a watch on `loadData` results. Do processing inside `loadData`.
-- NEVER rely on component remounting for route param changes. The loader only sees changes via `queryParams`.
+- Never add a watch on `loadData` results. Do processing inside `loadData`.
+- Never rely on component remounting for route param changes. The loader only sees changes via `queryParams`.
 - Gate skeleton/loading UI on `showSkeleton`, not on `documentReady` or raw load state — it handles the initial-load wait and suppresses the warm-reload flash for you. The gate the template ships is `import PrimitiveLoadingGate from "@/components/shared/PrimitiveLoadingGate.vue"`.
 - `initialDataLoaded` becomes true after the first successful `loadData`. Make rendering/redirect decisions ONLY after `initialDataLoaded` is true.
 - For side effects after load (like redirects), watch `initialDataLoaded` and act when it becomes true.
@@ -1334,7 +1268,7 @@ const snapshot = { id: todo.id, title: todo.title, completed: todo.completed };
 
 ### Model Instances Are Not Plain Objects
 
-A model instance is **not** a POJO, and you cannot spread or clone it. Each declared field is a getter/setter defined on the class **prototype** (backed internally by copy-on-write change tracking over the document's Yjs state) — *not* an own enumerable property on the instance. JavaScript's spread and rest operators only copy *own enumerable properties*, so they never invoke those getters and the field data is silently dropped.
+A model instance is **not** a POJO, and you cannot spread or clone it. Each declared field is a getter/setter defined on the class **prototype** (backed internally by copy-on-write change tracking over the document's document data) — *not* an own enumerable property on the instance. JavaScript's spread and rest operators only copy *own enumerable properties*, so they never invoke those getters and the field data is silently dropped.
 
 ```typescript
 // ❌ All of these lose the model's field data — they do NOT throw, they just produce empty/partial objects:
@@ -1495,13 +1429,7 @@ Documents can be shared with individual users (by userId or email), with groups,
 
 **Document permission levels:** `"owner"` > `"read-write"` > `"reader"`. (`"admin"` is an app-role projection, not a grantable document permission.) Effective permission = MAX(direct, group-derived, collection-derived). Granting a *lower* group permission to someone who already has a higher direct grant is a no-op for them.
 
-| Primitive | Grants | Scope |
-|-----------|--------|-------|
-| `DocumentPermission` | Direct access to one document | Document |
-| `DocumentGroupPermission` | Access via group membership | Document |
-| `Collection` membership | Access to every document in a collection | Collection |
-| `CollectionGroupPermission` | Collection access via group membership | Collection |
-| `DocumentAccessRequest` | Request the owner notice you | Document |
+Access can come from a direct grant, a group, or a collection. An access request asks the owner for a grant; it does not grant access itself.
 
 **Decision rules:**
 
@@ -1561,7 +1489,7 @@ await client.documents.setGroupPermission(...);  // use grantGroupPermission
 await client.documents.requestAccess(id, { message: "..." }); // missing required `permission`
 ```
 
-Render the user's documents from two calls: `client.me.ownedDocuments()` for documents they own, and `client.me.sharedDocuments()` for documents shared directly with them (non-owner `DocumentPermission` rows). Group- and collection-shared documents are listed through `groups.listDocuments` / `collections.listDocuments`.
+Render the user's documents from two calls: `client.me.ownedDocuments()` for documents they own, and `client.me.sharedDocuments()` for documents shared directly with them (direct non-owner grants). Group- and collection-shared documents are listed through `groups.listDocuments` / `collections.listDocuments`.
 
 ### Building a share UI
 
@@ -1641,7 +1569,7 @@ async function revoke(target: { userId: string } | { email: string }): Promise<v
 
 `documentUrl` has to be a URL your app actually routes to. A recipient who is already a member gets the `document-share` email, whose link is the `documentUrl` you sent, verbatim — a path you invented lands them on your Not Found page. The scaffolded template routes `/`, `/login`, `/logout`, the OAuth callback and `/invite/accept`, and everything else falls to the catch-all, so add the document's own route (`src/router/routes.ts`) and build the URL from it, or send a page you already have. (A recipient who is not a member yet is a different email: the deferred `document-share-deferred` template carries a tokenized accept URL composed from the app's `baseUrl`, which the template does route.)
 
-Both lists are point-in-time reads, not live queries: re-run `refresh()` after every write, and after the user accepts an invitation elsewhere. The owner row cannot be removed — hand the document over with `documents.transferOwnership(documentId, newOwnerId)` instead. The full surface, including batch grants and access requests, is in [Programmatic Sharing — Full Reference](#programmatic-sharing--full-reference) below.
+Both lists are point-in-time reads, not live queries: re-run `refresh()` after every write, and after the user accepts an invitation elsewhere. The owner row cannot be removed — hand the document over with `documents.transferOwnership(documentId, newOwnerId)` instead. The full surface, including batch grants and access requests, is in [Quick Reference](#quick-reference) above.
 
 ### Handling Invitations
 
@@ -1744,7 +1672,9 @@ client.on("networkMode", ({ mode, isOnline, reason }) => {
 
 Reading `mode === "offline"` to drive offline UI is wrong: it is true only when the app pinned offline itself.
 
-While the device is unreachable the client behaves as it does when offline is pinned: HTTP calls fail fast with `OFFLINE`, reads come from the local cache, and queued blob uploads wait. Nothing is lost — it resumes on reconnect.
+While the device is unreachable the client behaves as it does when offline is pinned: reads come from the local cache and queued blob uploads wait. Nothing is lost — it resumes on reconnect.
+
+HTTP calls made while offline fail fast, without attempting the request, with a `JsBaoError` whose code is `OFFLINE`. A request that is attempted and fails in transit (DNS failure, connection refused) throws `JsBaoNetworkError` instead. Treat both as retryable.
 
 ### Updating Document Metadata
 
@@ -1775,134 +1705,6 @@ The one exception: if the caller is neither the owner nor an app owner, the plat
   // Force-close before deleting
   await client.documents.delete(documentId, { forceCloseIfOpen: true });
 ```
-
-### Programmatic Sharing — Full Reference
-
-Beyond the Quick Reference, the full programmatic surface. Inspecting a document's current members and pending invites:
-
-```typescript
-  // Current members (accepted permission grants)
-  const members = await client.documents.getPermissions(documentId);
-
-  // Pending email invites on this document
-  const pending = await client.documents.listPendingInvitations(documentId);
-```
-
-#### Direct shares: `updatePermissions`
-
-The method is **`updatePermissions`** (no `setPermissions`). Two forms — single user (by id or email) and batch (any mix of userId and email):
-
-```typescript
-// Single user (by id or email)
-await client.documents.updatePermissions(documentId, {
-  email: "alice@example.com",
-  permission: "read-write",
-});
-
-// Batch (any mix of userId and email)
-await client.documents.updatePermissions(documentId, {
-  permissions: [
-    { userId: "user-abc", permission: "read-write" },
-    { email: "alice@example.com", permission: "reader" },
-    { email: "bob@example.com",   permission: "read-write" },
-  ],
-});
-```
-
-Optional fields on either form: `sendEmail`, `documentUrl`, `note`.
-
-When `sendEmail: true`, the server delivers per-recipient emails:
-
-- **Existing app members** receive the `document-share` template, populated with the caller-supplied `documentUrl`.
-- **Non-members (deferred grants)** receive the `document-share-deferred` template, populated with an accept URL composed from `app.baseUrl` + the new `inviteToken` (shape `${app.baseUrl}/invite/accept?inviteToken=...`).
-
-Both branches share two preconditions when `sendEmail: true`: `documentUrl` must be supplied in the request, and the app must have `baseUrl` configured (so the deferred branch can compose its accept URL). Either missing returns HTTP 400 (`"documentUrl is required when sendEmail is true"` or `"Cannot send share email: app baseUrl is not configured"`). Customize either email type by authoring `email-templates/document-share.toml` or `email-templates/document-share-deferred.toml` and running `primitive config push`.
-
-Repeated email-based calls are idempotent: a second `updatePermissions` call for the same email updates the existing pending `DeferredDocumentPermission` in place rather than creating a duplicate row, so the latest `permission` value wins at signup-time resolution and `client.documents.listPendingInvitations(documentId)` shows one entry per pending recipient.
-
-**There is no `permission: null` to remove.** Removal is a separate call (`removePermission` by userId or by email; `transferOwnership` to hand a document to a new owner):
-
-```typescript
-  // Remove a current member by userId:
-  await client.documents.removePermission(documentId, "user-abc");
-  await client.documents.removePermission(documentId, { userId: "user-abc" });
-
-  // Cancel a pending email-based invite, OR remove a current member matched by email:
-  await client.documents.removePermission(documentId, { email: "alice@example.com" });
-
-  await client.documents.transferOwnership(documentId, newOwnerId);
-```
-
-**Don't do this** (silent no-op for someone with a higher group permission, and there is no `null` form):
-
-```typescript
-// WRONG — there is no setPermissions
-await client.documents.setPermissions(documentId, [
-  { userId, permission: null },
-]);
-
-// WRONG — downgrades direct grant to "reader" but does NOT lower a higher
-// group-derived permission. The user keeps read-write via the group.
-await client.documents.updatePermissions(documentId, {
-  userId, permission: "reader",
-});
-// Correct: also lower or revoke the group permission.
-```
-
-Lowering a user's direct permission while they still have a higher one via a group is a no-op — the group wins (effective = MAX). To actually lower it, also lower or revoke the group permission.
-
-#### Response shape
-
-```typescript
-// {
-//   success: true,
-//   message: "...",
-//   results?: [
-//     // Direct (existing user):
-//     { status: "granted" | "updated", userId: "user-abc", permission: "read-write" },
-//
-//     // Deferred (email not yet an app user):
-//     { status: "pending_signup",
-//       email: "bob@example.com",
-//       permission: "read-write",
-//       appInvitationCreated: true,
-//       invitationId: "inv-123",
-//       inviteToken: "..." | null }   // combine with your accept URL
-//   ]
-// }
-```
-
-`results` is only present when at least one entry was deferred (i.e. the batch contained an email that didn't yet map to an app user). For all-direct grants — single-user or batch — the response is just `{ success: true, message }` with no `results` array. Branch on `status` per row when `results` is present.
-
-#### Group sharing
-
-The method is **`grantGroupPermission`** (no `setGroupPermission`). Member changes inside the group propagate automatically — no per-membership permission calls.
-
-```typescript
-  await client.documents.grantGroupPermission(documentId, {
-    groupType: "team",
-    groupId: "engineering",
-    permission: "read-write", // owner | read-write | reader
-  });
-
-  // Listing / revoking
-  await client.documents.listGroupPermissions(documentId);
-  await client.documents.revokeGroupPermission(documentId, "team", "engineering");
-```
-
-#### Looking up users
-
-`client.users.lookup(email)` reports whether an email maps to an existing app user — use it to decide whether to share by `userId` (definitive) or `email` (will defer if no app user yet). The argument is a plain string, not `{ email }`.
-
-```typescript
-const result = await client.users.lookup("alice@example.com");
-// { exists: true, user: { userId, name, email } }
-// or { exists: false }
-```
-
-#### Redeeming a deferred grant
-
-The recipient redeems a deferred grant (after signup or in a different session) with `client.invitations.accept(inviteToken)`, using the `inviteToken` returned from the share call. Only needed for the cross-identity path — email-matched signup resolves automatically. See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants) for when the explicit accept call is required versus automatic resolution.
 
 ### Document Access Requests
 
@@ -1966,7 +1768,7 @@ Calling with no `permission` will 400. Re-requesting from the same user updates 
 | Body code | When |
 |-----------|------|
 | `ALREADY_HAS_ACCESS` | Caller already has any permission |
-| `RATE_LIMITED` | Too many requests; body has `retryAfter` |
+| `RATE_LIMITED` | Too many requests; `details.retryAfter` gives the wait in seconds |
 | `ACCESS_REQUEST_ALREADY_RESOLVED` | Approve/deny called on a non-pending request |
 
 #### Owner / admin flow
@@ -1995,22 +1797,26 @@ await client.documents.denyAccessRequest(documentId, requestId, {
 - One pending request per `(document, requester)` — re-requesting updates it in place.
 - Resolved requests are immutable.
 
-#### Real-time delivery
+#### Refreshing access requests
 
-The server pushes WS frames `document:access-request-created` (to owners/admins) and `document:access-request-resolved` (to the requester). **These are not surfaced as typed `client.on(...)` events.** Poll `listAccessRequests()` on the owner side, and check `documents.get` again on the requester side after a sensible interval, or wire your own WS frame handler if you need lower latency.
+Refresh `listAccessRequests()` when the owner opens the requests view. The requester receives an email with the outcome.
 
 ### Collections
 
-Group documents into a **collection** to share them as a unit. Permissions granted on a collection materialize onto all current and future documents in it.
+A collection shares a set of documents as one unit. Access from collections and direct grants combines; the highest permission wins. Deleting a collection preserves its documents.
 
-**Key properties:**
-- Permissions are **additive, max-wins** — a collection can only add access, never restrict it.
-- A document can be in multiple collections; access from all sources combines.
-- Deleting a collection revokes its permissions but never deletes the documents or any direct grants.
-- Member access is O(1) regardless of collection size (uses system-managed groups internally).
-- **Cascade rule:** sharing a collection automatically propagates access to every document inside it (current and future). Don't add per-document grants for documents already shared at the collection level — the collection grant is canonical. Prefer collection-level sharing over per-document sharing whenever the same set of users should see a related set of docs.
+```typescript
+  // Create a collection and put documents in it
+  const collection = await client.collections.create({ name: "Project Phoenix" });
+  await client.collections.addDocument(collection.collectionId, designDocId);
+  await client.collections.addDocument(collection.collectionId, specDocId);
 
-Create a collection, add/remove documents, and share it with a group or an individual user:
+  // One grant covers the whole set — including documents added later
+  await client.collections.addMember(collection.collectionId, {
+    email: "alice@example.com",
+    permission: "read-write",
+  });
+```
 
 ```typescript
   // Create
@@ -2038,8 +1844,6 @@ Create a collection, add/remove documents, and share it with a group or an indiv
   });
 ```
 
-A collection's members + pending invites in one call:
-
 ```typescript
   const access = await client.collections.getAccess(collectionId);
 
@@ -2047,100 +1851,13 @@ A collection's members + pending invites in one call:
   const pending = await client.collections.listPendingInvitations(collectionId);
 ```
 
-Additional collection calls:
+#### Gotchas for collections
 
-```typescript
-// Optional, immutable-after-create — bind create() to a CollectionTypeConfig
-// rule set. `initialMetadata` stamps resource-metadata categories at create
-// time (schema-validated, writeRule waived, capped at 10 categories) — link the
-// collection to an external entity here (read in CEL as md.self.classLink.classId).
-// See the Resource Metadata guide's "Create-time initial metadata" section.
-const collection = await client.collections.create({
-  name: "Q1 Reports",
-  collectionType: "class-reports",
-  initialMetadata: { classLink: { classId: "math-101" } },
-});
-
-// List
-await client.collections.listDocuments(collection.collectionId);
-// → { items: CollectionDocumentInfo[], nextCursor?: string, hasMore?: boolean }
-await client.collections.listCollectionsForDocument(documentId);
-
-await client.collections.revokeGroupPermission(collection.collectionId, "team", "engineering");
-await client.collections.removeMember(collection.collectionId, targetUserId);
-// Change a user's permission: call addMember again with the new level.
-```
-
-Collections accept email-based members exactly like documents and groups — a deferred grant that resolves on signup:
-
-```typescript
-// Add an individual member by userId
-await client.collections.addMember(collectionId, {
-  userId: "user-abc",
-  permission: "read-write",              // "reader" or "read-write"
-});
-
-// Or by email — deferred grant resolves on signup, mirroring documents/groups
-const result = await client.collections.addMember(collectionId, {
-  email: "newhire@example.com",
-  permission: "reader",
-  sendEmail: true,                       // optional: platform sends an invite email
-  collectionUrl: "https://...",          // required when sendEmail is true
-  note: "Sharing the onboarding docs",
-});
-// result.status: "added" | "already_member" | "pending_signup"
-// Pending case carries { invitationId, inviteToken, expiresAt }.
-
-// Share with a group (fans out to every document in the collection)
-await client.collections.grantGroupPermission(collectionId, {
-  groupType: "team",
-  groupId: "engineering",
-  permission: "reader",
-});
-
-// Inspect / undo
-const access = await client.collections.getAccess(collectionId);
-// → { members: [...], groups: [...] }
-const pending = await client.collections.listPendingInvitations(collectionId);
-// → [{ email, permission, invitationId, expiresAt, ... }]
-await client.collections.removeMember(collectionId, "user-abc");
-await client.collections.revokeGroupPermission(collectionId, "team", "engineering");
-// Change a user's permission: call addMember again with the new level.
-```
-
-The deferred-grant flow when adding a collection member by email (`collections.addMember`) mirrors the document share path: `app.baseUrl` must be configured, `sendEmail: true` requires `collectionUrl`, and `client.invitations.delete(invitationId)` cancels every pending collection add (plus any pending document shares and group adds) attached to the invitation. See the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#deferred-grants) for the resolution lifecycle.
-
-
-**CLI:**
-
-```bash
-primitive collections create "Q1 Reports" --description "Quarterly reports"
-primitive collections create "Q1 Reports" --initial-metadata '{"settings":{"visibility":"class-only"}}'
-primitive collections create "Q1 Reports" --owner user@example.com   # admin token only
-primitive collections list
-primitive collections documents {add|remove|list} <collection-id> [<document-id>]
-primitive collections share <collection-id> --group team/engineering --permission read-write
-primitive collections unshare <collection-id> --group team/engineering
-primitive collections members list <collection-id>
-primitive collections members add <collection-id> <user-id> --permission reader
-primitive collections members remove <collection-id> <user-id>
-primitive collections access <collection-id>   # combined groups + members view
-primitive collections delete <collection-id>   # documents are preserved
-
-# Scripted removal: -y skips the prompt, --json reports what was removed
-primitive collections delete <collection-id> -y --json
-# → {"success": true, "collectionId": "..."}
-primitive collections unshare <collection-id> --group team/engineering -y --json
-# → {"success": true, "collectionId": "...", "groupType": "team", "groupId": "engineering"}
-primitive collections documents remove <collection-id> <document-id> -y --json
-# → {"success": true, "collectionId": "...", "documentId": "..."}
-primitive collections members remove <collection-id> <user-id> -y --json
-# → {"success": true, "collectionId": "...", "userId": "..."}
-```
-
-`--owner <userId-or-email>` on `collections create` is the collections half of `documents create --owner`: an admin token (super-admin, or a console admin assigned to the app) creates the collection as the named app user, so the default rules — which key editing, deleting and managing documents and members on the creator — let that user manage it without being an admin. An app-user token of any role has `--owner` ignored and always creates as the caller; an email is resolved before anything is created, and a user who is not in the app fails the command with nothing created.
-
-The four removing verbs prompt for confirmation unless `-y` is passed, and take `--json` beside it. The ids in the result object come from the CLI — the server's body for these deletes is a bare `{ success: true }` that names nothing. `--json` does not imply `-y`: without it in a non-interactive shell the command exits 1, names `--yes`, prints no JSON, and removes nothing. A server refusal exits 1 with its message on stderr and an empty stdout, never a half-object. Without `--json` the verbs are unchanged — the success line goes to stderr.
+- Use collection-level sharing when the same people need the same set of documents. Avoid duplicating those grants on each document.
+- `collectionType` cannot change after creation.
+- `initialMetadata` validates and writes up to 10 categories during creation; category write rules are waived for that initial write.
+- Collection-wide sharing changes and deletion fail above 200 documents. Deletion also checks a documents × groups limit of 400. Remove documents or grants before retrying `COLLECTION_FANOUT_LIMIT`.
+- Emails for people who have not signed up create deferred grants.
 
 ### Collection Rule Sets
 
@@ -2228,64 +1945,38 @@ create = "isMemberOf('class-teachers', md.self.classLink.classId)"
 - **Fail-closed:** once a create rule reads `md.self.<category>`, a create omitting that category is denied (the value binds `null`), so a create that stamps the linkage in a later write is denied for that type — the linkage must be staged in the create call (atomic create-with-linkage).
 - **No traversal from the staged subject.** A create rule may read the staged value directly (`md.self.<category>.<key>`) but may not follow a declared path off it (`md.<pathName>.*`) — such a rule is rejected when the rule set is saved, since the subject does not exist yet to traverse from. (Traversal from a *persisted* subject in a non-create rule is unaffected.)
 
+### Migrating off `contextId`
+
+Collections used to carry a `contextId` field, read in rules as `collection.contextId`. The field is removed from the API, the rule context, the clients and the CLI; a metadata category ([Keying a Collection Rule Set on an External Id](#keying-a-collection-rule-set-on-an-external-id)) binds a collection to an outside entity now.
+
+- **Rules.** A collection rule set that reads `collection.contextId` (any selector form, `.?contextId` and `["contextId"]` included) or `md.self.attrs.contextId` is refused at save, and so by `primitive config push`, with an error naming the replacement. A rule set saved before the removal that still reads it is **denied** for every operation, whatever its shape — `!has(collection.contextId) || …` denies rather than allowing. Rewrite it to read `md.self.<category>.<key>`. `group.contextId` in group rule sets is unaffected.
+- **Creation code.** `collections.create()` / `collections.update()` with `contextId` is a 400, whatever the value, before anything is created. Pass `initialMetadata: { <category>: { <key>: <value> } }` on the create.
+- **Workflow steps.** A `collection.create` step carrying `contextId` fails the run naming `initialMetadata`; `primitive config push` refuses the key. Set `initialMetadata` on the step; templates resolve inside it.
+- **CLI import.** `collections export` writes no `contextId`; an older `collections.json` still imports, without the field, with one note counting the collections that carried it.
+- **Existing collections.** The platform does not copy stored values across, and once the removal is deployed no API returns them. Before that release is deployed, define the category and copy each value — for every collection `primitive collections list --all --json` lists with a `contextId`:
+
+```bash
+primitive metadata set collection <collectionId> classLink --data '{"classId":"<contextId>"}'
+```
+
 ### Building a "Members + Pending" UI
 
-The canonical sharing panel: people with access + people invited but not yet signed up. Use the per-resource `listPendingInvitations` endpoints — each shareable resource exposes a denormalized list so callers don't have to filter the app-level invitation list. Don't reach into `client.invitations.listDeferredGrants(...)` (admin-debug) or `client.invitations.list(...)` (app-level, admin/owner only) for product UI — the per-resource endpoints are the source. Removing yourself from a document also evicts the local copy.
+Show current access separately from invitations waiting for signup. Refresh after a membership change:
 
 ```typescript
-// Current members
-const members = await client.documents.getPermissions(documentId);
-// [{ userId, email, name, permission, grantedAt }, ...]   (getPermissions, not listPermissions)
+  // Current members (accepted permission grants)
+  const members = await client.documents.getPermissions(documentId);
 
-// Pending email shares for one document
-const docPending = await client.documents.listPendingInvitations(documentId);
-// [{ email, permission, invitationId, createdAt, expiresAt, grantedBy? }]
-
-// Pending group adds for one group
-const groupPending = await client.groups.listPendingInvitations(groupType, groupId);
-// [{ email, role, invitationId, deferredId, createdAt, expiresAt, addedBy? }]
-// deferredId → invitations.revokeDeferredGrant(deferredId, "group") cancels it
-
-// Pending collection adds for one collection
-const colPending = await client.collections.listPendingInvitations(collectionId);
+  // Pending email invites on this document
+  const pending = await client.documents.listPendingInvitations(documentId);
 ```
-
-**Canonical "share + render" flow:**
 
 ```typescript
-async function shareAndReload(documentId: string, email: string) {
-  const result = await client.documents.updatePermissions(documentId, {
-    email,
-    permission: "read-write",
-  });
-  // result.results is present only when at least one row was deferred
-  // (email didn't yet map to an app user). All-direct grants return just
-  // { success, message } — that's success; refetch the panel.
-  const [members, pending] = await Promise.all([
-    client.documents.getPermissions(documentId),
-    client.documents.listPendingInvitations(documentId),
-  ]);
-  return { members, pending };
-}
+  const access = await client.collections.getAccess(collectionId);
+
+  // Or fetch just the pending (not-yet-signed-up) invitations:
+  const pending = await client.collections.listPendingInvitations(collectionId);
 ```
-
-**Cancelling:**
-
-```typescript
-// Cancel one pending document share / group add (by email):
-await client.documents.removePermission(documentId, { email });
-await client.groups.removeMember(groupType, groupId, { email });
-
-// Remove someone who already has access (by userId):
-await client.documents.removePermission(documentId, userId);
-await client.groups.removeMember(groupType, groupId, userId);
-
-// Nuclear: cancel the whole AppInvitation, cascading every pending document
-// share and group add linked to it. Use only for "uninvite from the app
-// entirely" — NOT to cancel a single share.
-await client.invitations.delete(invitationId);
-```
-
 
 ### Sharing Discovery Cheat Sheet
 
@@ -2294,7 +1985,7 @@ Pick the call that answers the question you're actually asking:
 | Question | Call |
 |----------|------|
 | Documents the user owns | `client.me.ownedDocuments({ tag?, limit?, cursor?, returnPage? })` |
-| Documents directly shared with the user (non-owner `DocumentPermission`) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, nextCursor, hasMore }` |
+| Documents directly shared with the user (direct non-owner grants) | `client.me.sharedDocuments({ tag?, cursor?, limit? })` → `{ items, nextCursor, hasMore }` |
 | A document's outstanding deferred grants | `client.documents.listPendingInvitations(documentId)` |
 | Documents inside a collection | `client.collections.listDocuments(collectionId, { limit?, cursor? })` |
 | Documents shared with a group | `client.groups.listDocuments(groupType, groupId)` |
@@ -2308,20 +1999,20 @@ Pick the call that answers the question you're actually asking:
 - Calling a method that doesn't exist: `setPermissions`, `setGroupPermission`, `client.users.lookup({ email })`. The correct names are `updatePermissions`, `grantGroupPermission`, `client.users.lookup(email)`.
 - Passing `permission: null` to remove a grant — there is no null form. Use `removePermission`.
 - Lowering a user's direct permission while they still have a higher one via group — the group wins (effective = MAX).
-- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct `DocumentPermission` rows. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
+- Assuming `me.sharedDocuments()` includes group- or collection-shared docs — it only carries direct grants. Combine with `collections.list()` / `groups.listUserMemberships(...)` for a complete picture.
 - Showing a "request access" button without checking the caught error's `canRequestAccess` detail.
 - Calling `client.invitations.delete()` to cancel a single pending document share — it cascades to every share and group add linked to that invitation.
 - Polling `client.invitations.list` / `listDeferredGrants` to populate "Members + Pending" rows — those are app-level / admin surfaces; per-resource `listPendingInvitations` is the product UI source.
 
 **Sharing error codes** (server-emitted body codes):
 
-The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed. `JsBaoApiError` means the server responded (non-2xx); when the request never reaches the server at all (offline, DNS failure, connection refused or aborted), the client throws `JsBaoNetworkError` instead — no `.status`, just `.cause` carrying the underlying fetch error. A network failure is retryable: branch with `isJsBaoNetworkError(err)` or `instanceof JsBaoNetworkError`, never by parsing the message.
+The client throws a typed `JsBaoApiError` with `.status`, `.code`, and `.body` (the parsed error body) — read the code and details straight off the caught error, no manual message-parsing needed. `JsBaoApiError` means the server responded (non-2xx). A request that never reaches the server throws one of two retryable errors instead: a `JsBaoError` with code `OFFLINE` when the client is offline (pinned, or no network detected) and never attempts the request, or `JsBaoNetworkError` when the attempt fails in transit (DNS failure, connection refused or aborted) — no `.status`, just `.cause` carrying the underlying fetch error. Branch with `isJsBaoError(err) && err.code === "OFFLINE"` and `isJsBaoNetworkError(err)`, never by parsing the message.
 
 | Code | Endpoint | Meaning |
 |------|----------|---------|
 | `DOC_ACCESS_DENIED` (with `details.canRequestAccess`) | `documents.get` | 403; check the hint to decide between request-access UI and hard deny |
 | `ALREADY_HAS_ACCESS` | `requestAccess` | Caller already has a direct or group permission |
-| `RATE_LIMITED` | `requestAccess` | Body has `retryAfter` (seconds) |
+| `RATE_LIMITED` | `requestAccess` | `details.retryAfter` gives the wait in seconds |
 | `ACCESS_REQUEST_ALREADY_RESOLVED` | `approveAccessRequest`, `denyAccessRequest` | Request is no longer pending |
 
 App-membership and invitation error codes live in the [Invitations guide](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md#error-codes-quick-reference).
@@ -2344,337 +2035,86 @@ Pass `isReadOnly` to child components and use it to gate UI: `v-if="!isReadOnly"
 
 ## Admin CLI: Export / Import
 
-The `primitive` CLI provides export and import commands for migrating or backing up document data. These are admin operations, not used in application code.
+Export each user's documents separately, then import with the intended owner:
 
 ```bash
-# Export a single document (Yjs state, blobs, permissions, aliases)
-primitive documents export <document-id> --output ./primitive-export
-
-# Export all documents for a user
-primitive documents export-all --user-id <user-id> --output ./primitive-export
-primitive documents export-all --user-id <user-id> --owned-only  # Only owned documents
-
-# Import from an export directory
-primitive documents import <path>                         # Default: skip existing aliases
-primitive documents import <path> --aliases overwrite     # Overwrite existing user-scoped aliases
-primitive documents import <path> --aliases skip          # Keep existing aliases (default)
-primitive documents import <path> --overwrite --dry-run   # Preview without changes
+primitive documents export-all --user-id <user-id> --output ./export
+primitive documents import ./export --owner user@example.com
 ```
 
-Export creates a directory per document containing `metadata.json`, `document.yjs` (Yjs state), `permissions.json` (for reference), and `blobs/` (attachments). Permissions are **not** restored on import — the importing admin becomes the new owner and manages sharing in the target app. Document IDs are preserved across import, with one exception: a **root document** export (below). User-scoped aliases can be restored with `--aliases overwrite` or kept as-is with `--aliases skip`.
+### Gotchas when importing
 
-`--overwrite` merges rather than replaces, for every document: the import uploads the exported state and the server applies it with `Y.applyUpdate`, so keys only one side holds survive and a key both sides set resolves by Yjs's conflict rule — neither source-wins nor target-wins. The exception is a **large document** (`documentFormat: 2`): its export is a chain, and a chain is installed rather than merged. Installing replaces a document's entire history, so the server accepts it only into a document that holds no records yet — `--overwrite` cannot merge one into a document that already has content.
-
-#### Carrying the collections too
-
-Documents move on their own; the collections they sit in do not. `primitive collections export` / `collections import` carry each collection's name, description, type, context id, owner, group grants, direct members with their level, and which documents it holds — into `collections.json`, written into the same directory as the document bundle.
-
-```bash
-# Source app: documents and collections into ONE directory
-primitive documents export-all --user-id <user-id> --output ./primitive-export
-primitive collections export --output ./primitive-export
-
-# Target app: documents FIRST (they preserve their ids), then collections
-primitive documents import ./primitive-export --owner owner@example.com
-primitive collections import ./primitive-export --dry-run
-primitive collections import ./primitive-export
-```
-
-- **Order matters.** `collections.json` refers to documents by id, and `documents import` is what preserves them. The other order reports every document in every collection as a problem.
-- **Admin tokens only**, both verbs: the export reads the app-wide collection listing, and assigning an owner on create is admin-only.
-- **Identities travel as emails.** App users are scoped to their app, so the same person has a different user id in each one; a recorded user id with no email is used only when the file is imported back into the app it came from.
-- **Reads before writes.** The import resolves every owner, member, document and group first, decides `create`, `merge`, `skip` or `refused` per collection, and then applies grants, members and documents in that order. `--dry-run` stops after the plan and reports exactly what the real run would do.
-- **Matching is by name**, so a re-run is safe. Without `--overwrite` an existing name is skipped; with it the collection is merged, but only when its owner, collection type and context id match the file's — none of those can be changed after creation, so a mismatch is refused with the differing field named. A group grant already present at a different level is updated to the level the file records, and effective access follows it. Above 200 documents a collection-wide group change is refused whole by the server (`COLLECTION_FANOUT_LIMIT`) and reported as a `group` problem, the rest of the collection still merging. `--owner <userId-or-email>` gives every collection in the run one owner.
-- **Problems are per item** — the collection, the kind (`owner`, `collection`, `document`, `member`, `group`), the identity and the reason — on stderr and under `--json` in `problems`. The collection is still created with everything else; only a missing owner refuses one outright. Exit code 1 when any problem was reported, 0 otherwise; a skip is not a problem.
-- **Not carried:** collection ids (the server mints them; `--json` maps `sourceCollectionId` to `targetCollectionId`), the groups themselves, collection resource metadata, pending member invitations, and the `addedAt`/`grantedAt` timestamps. Create the target app's groups before importing, or their grants come back as `group` problems.
-
-#### Importing a root document
-
-A root document is the one document the server mints per user and points `AppUser.rootDocId` at. Its export is applied to the **target user's root document**, never restored under the exported id — that id is the source user's root and means nothing in another app:
-
-```bash
-# The target user is --owner when given, otherwise the owner recorded in metadata.json
-primitive documents import ./export-of-one-user --owner user@example.com
-
-# Merging into a root document that already holds the user's preferences needs --overwrite
-primitive documents import ./export-of-one-user --overwrite
-```
-
-- The user has **no** root document yet: import creates it through the same get-or-create sign-in uses and applies the exported state to it (reported as created).
-- The user **already has** one: `--overwrite` merges the export into it (reported as applied); without `--overwrite` the export is skipped and names the existing root id.
-- State, blobs and user-scoped aliases all land under the target root id, with blob ids preserved. The target root keeps its own id, title, tags and permissions.
-- Migrating several users: export each user into their own directory (`export-all --user-id`) and import one directory per run. `metadata.createdBy` records the owner's email, which is what maps each root to its owner in another environment. Two root exports resolving to the same user fail the run before anything is written.
-- A root export whose recorded owner is not a user of the target app is refused on its own, naming the owner; the rest of the run still imports.
-
-#### Bundle layout
-
-Every export writes one subdirectory per document under `documents/<document-id>/`. `export-all` additionally writes a top-level `manifest.json` (`version`, `exportedAt`, `sourceAppId`, `documentCount`, `documents` — the exported ids); a single `export` does not, and `import` falls back to discovering the `documents/` subdirectories directly when there is no manifest to read.
-
-```
-<output>/
-  manifest.json               # export-all only
-  collections.json            # collections export only
-  documents/
-    <document-id>/
-      metadata.json
-      permissions.json
-      document.yjs             # an ordinary document
-      chain.json               # a large document (documentFormat: 2), in place of document.yjs
-      snapshot/manifest.json   #   ...when the chain has a base
-      snapshot/<model>/<n>.ndjson.gz
-      epochs/<epoch>.yjs
-      current.yjs
-      blobs/index.json
-      blobs/<blob-id>.bin
-```
-
-| File | Fields | Restored by `import`? |
-|---|---|---|
-| `metadata.json` | `documentId`, `title`, `tags`, `documentFormat` (present and `2` only on a large document), `createdAt`, `createdBy`, `aliases` (`aliasScope`, `aliasKey` — user-scoped only) | `title` and `tags` when the document is created (an existing document keeps its own, even under `--overwrite`); `aliases` per `--aliases skip`\|`overwrite` when `--owner` resolves a target user |
-| `permissions.json` | `{ email, permission, grantedAt?, source?: "invitation", status?: "pending" }[]` | No — reference only |
-| `document.yjs` | The document's full state, one Yjs update | Yes, merged with `Y.applyUpdate` |
-| `chain.json` (large document only) | `version`, `documentFormat: 2`, `documentId`, `epoch` (the open epoch), `base` (`epoch`, `buildId`, `rows`, or `null`), `overlays` (`epoch`, `sealedAt`, oldest first), `current` (`epoch`, `file: "current.yjs"`) | Yes, driving the install; refuses up front if a file it names is missing |
-| `snapshot/manifest.json` | The base snapshot's manifest, chunk `path`s renumbered to address `snapshot/<model>/<n>.ndjson.gz`; each chunk entry also carries `model`, `rows`, `bytes`, `rawBytes`, `firstId`, `lastId`, `sha256` | Yes, with its chunk files, when `chain.base` is set |
-| `epochs/<epoch>.yjs`, `current.yjs` | One Yjs update each: a sealed overlay after the base, or the still-open epoch | Yes |
-| `blobs/index.json` | `{ blobId, filename, contentType, sha256, numBytes }[]`, one entry per `blobs/<blob-id>.bin` | Yes, re-uploaded under the original `blobId` |
-
-Both manifests in a bundle carry a `sha256`, encoded differently: `blobs/index.json`'s is **base64**, the same encoding the client uses for a blob's checksum; `snapshot/manifest.json`'s per-chunk `sha256` is **hex**, over that chunk's stored (gzip) bytes. Decode (or re-encode) before comparing one against the other — they are not interchangeable strings.
+- `--overwrite` merges ordinary document data; it does not guarantee imported values win. Large-document imports require an empty target.
+- IDs are preserved except for root documents, which import into the target user's root document.
+- Restore document sharing in the target app. Import documents before collections.
+- `collections import --dry-run` previews changes. Existing names are skipped without `--overwrite`; overwrite requires matching owner and type. A file that still carries `contextId` imports without it, with one note.
+- `collections import` matches by name. A name that more than one target collection has is ambiguous: that collection is refused as a `collection` problem naming every matching ID, with or without `--overwrite`, and nothing is written for it. A name repeated inside the file is refused for the second and later occurrences. A missing owner or an ambiguous target name refuses that collection outright.
 
 ## Admin CLI: Inspecting documents
 
-The `primitive` CLI also has commands for inspecting and managing documents from an operator or debugging session. Like export/import, these are admin operations, not used in application code. `--json` is available on every command for scripting.
-
 ```bash
-# List a user's documents (documentId, title, tags, permission, grantedAt).
-# `tags` is present on a row only when the document has at least one, the same
-# rule the app API's listings use.
-# --user-id is required — there is no app-wide document enumeration.
-primitive documents list --user-id <user-id>
-
-# Show one document's metadata — including its tags — and the caller's access
-# (permission, access source, link access)
 primitive documents get <document-id>
-
-# List the user-level permissions on a document (userId, email, permission, grantedAt)
-primitive documents permissions list <document-id>
-
-# Discover the models in a document and describe one model's fields and indexes
 primitive documents records models <document-id>
-primitive documents records describe <document-id> <model-name>
-
-# Query, get, count, and aggregate records in a model (--filter is JSON, or
-# --filter-file <path> for a JSON/TOML file; --limit caps at 100). `get` on a
-# missing id prints null at exit 0 — a miss is not an error.
-primitive documents records query <document-id> <model-name> --filter '{"status":"open"}' --limit 50
-primitive documents records get <document-id> <model-name> <record-id>
-primitive documents records count <document-id> <model-name>
-primitive documents records aggregate <document-id> <model-name> --op sum --field qty --group-by symbol
-
-# Dump every record grouped by model, and read summary statistics
-primitive documents dump <document-id>
-primitive documents stats <document-id>
-```
-
-`records models` and `records describe` read the document's discovered schema — the models a client has written into the document, with each field's type and whether it is indexed, unique, or required. A newly created document with no records yet reports no models.
-
-`records query` returns a page of records as `{ items, hasMore, nextCursor? }` — `--limit` caps at 100, and the reported `nextCursor` is passed back as `--cursor` for the next page; `records get` returns one record by id, or `null` at exit 0 when there is no such record; `records count` returns how many records match a `--filter`; `records aggregate` runs one `count`/`sum`/`avg`/`min`/`max` over the matching set, with `--field` required for all but `count` and `--group-by` (repeatable) for per-group rows. Under `--json` it prints the `{ result }` envelope: ungrouped, `result` is an object keyed by the operation (`{"result":{"count":2}}`, `{"result":{"sum_qty":100}}`); grouped, `result` nests by group value with a single operation flattened to a scalar — the same shape `databases records aggregate` returns. `--group-by` takes plain field names only: StringSet facet grouping is a database-only capability and is rejected here with a 400, as are the `sort` and `limit` aggregate options the database endpoint accepts. `dump` composes the whole document from paged reads (schema model names, then each model queried to exhaustion) grouped by model — it is not a single atomic snapshot; the paged path is the contract. It is always JSON on stdout with nothing else mixed in, so `primitive documents dump <doc> | jq .` parses. `stats` reports record, model, and blob counts, an approximate byte size, and the last-modified time. These read commands act through the caller's document permission (reader and above) or the console/super-admin token; there are no equivalent JS-client methods — application code reads document records through the local document APIs, not the server-side REST flow.
-
-The CLI can also write records. Writes take the same server-side path as collaborative edits — concurrent client edits merge automatically, and connected clients see the change live. Writing requires `read-write` or higher on the document, or the console/super-admin token; as with the reads, there are no equivalent JS-client methods.
-
-```bash
-# Create a document — prints the minted document id (add --json for the full response)
-primitive documents create "Quarterly Report"
-primitive documents create "Quarterly Report" --owner user@example.com
-
-# Create or replace a record (--id optional — a unique id is generated when omitted;
-# --upsert-on <field> updates the record whose field value matches instead)
-primitive documents records save <document-id> <model-name> --data '{"name":"gear","qty":5}'
-
-# Merge fields into an existing record
-primitive documents records patch <document-id> <model-name> <record-id> --data '{"qty":6}'
-
-# Delete a record (prompts unless -y; deleting a missing record is a no-op)
-primitive documents records delete <document-id> <model-name> <record-id> -y
-
-# Apply an ordered multi-model operations blob atomically
-primitive documents records bulk <document-id> --data-file ops.json -y
-
-# Delete the whole document — records, Yjs update history, blobs, aliases, permissions
-primitive documents delete <document-id> -y
-```
-
-`records bulk` reads `{ "operations": [{ "model", "action": "create" | "patch" | "delete", "id", "data", "precondition"? }, ...] }` (or a bare array) from `--data-file` and applies it all-or-nothing: any validation failure writes nothing. `data` carries the record fields — the same key `records save` / `records patch` take — and is required and non-empty on `create` and `patch`; `delete` takes none. Any other key in an operation is rejected with a 400 naming the operation index, so a mis-keyed payload fails loudly instead of writing an empty record. It reports `{ applied, added, updated, deleted }`, where `applied` counts operations that took effect — a `delete` of a missing id is a no-op contributing 0. Blobs are capped at 500 operations; `create` requires a caller-supplied, well-formed 26-character record id, while `records save` without `--id` generates one. `--data` and `--data-file` are interchangeable on `save` and `patch`; both are validated as JSON before any request is sent.
-
-A refused batch names **which** failure it was, so a sustained load can decide whether to retry: the command prints the server's stable code and status beside the sentence (`✗ … [DOCUMENT_UNAVAILABLE] (503)`) and under `--json` emits `{ "ok": false, "code", "status", "error" }`, exiting 1 either way. On a **large document** (`documentFormat: 2`), a batch refused because the document's object was momentarily unreachable — reset, evicted or overloaded mid-write — answers **503 `DOCUMENT_UNAVAILABLE`** ("The document is momentarily unreachable; retry the write") and the same batch a moment later usually lands; **500 `INTERNAL_ERROR`** means the write failed for a reason the server kept in its log, and retrying it alone is unlikely to help; a **400** or a **409 `CONDITION_NOT_MET`** is the batch itself and will fail the same way unchanged. Ordinary documents answer exactly the codes they always did on this route.
-
-`documents create` goes through the same `POST /documents` endpoint every client uses. Ownership follows the token: an app-user token — member, admin, or owner — always creates the document owned by the caller (`--owner` is ignored for those tokens); a super-admin or assigned-console-admin token acts through an admin shadow app user, which owns the document unless `--owner` names another user. `--owner` takes a user id or an email (resolved before anything is created); a user not in the app fails the command without creating a document.
-
-`documents delete` is the document-level verb, not a record one: the server runs the same cascade the client SDK's `documents.delete()` triggers — Yjs state and update history, blob records and objects, aliases, user and group permissions, invitations, and collection memberships. It prompts unless `-y` is passed and refuses a user's root document. Deletion is authorized by the server: the document's owner, the app owner, and super-admin or assigned-console-admin tokens delete directly; everyone else — including app-role admins — can delete only when a containing collection's `document.delete` rule allows it. Refusals are surfaced verbatim at exit 1.
-
-Grant and revoke a user's access to a document. `grant` takes either `--user-id` or `--email` plus a `--permission` level of `reader` or `read-write`; re-granting for the same user updates the level in place. `revoke` targets a user by id argument or `--email`, and prompts for confirmation unless `-y` is passed.
-
-```bash
-# Grant a user reader (or read-write) access
-primitive documents permissions grant <document-id> --user-id <user-id> --permission reader
-primitive documents permissions grant <document-id> --email user@example.com --permission read-write
-
-# Revoke a user's access (by id argument or --email)
-primitive documents permissions revoke <document-id> <user-id>
-primitive documents permissions revoke <document-id> --email user@example.com -y
+primitive documents records query <document-id> <model>
+primitive documents permissions list <document-id>
 ```
 
 ## Large Documents
 
-A **large document** (`documentFormat: 2`) keeps records in a persisted local store and in the server's own table rather than in memory, and holds only recent changes as a document; validated at 2 GB. Everything past creation is the ordinary document API. The sections below cover its read path, creation, which clients can open it, its limits, and the operator commands that snapshot and bulk-load one.
-
-**Large-document read path (format 2 only):**
-
-- A field read on an instance you already hold may return the previous value between a peer's update arriving and its fold settling. `find()` and `query()` always agree; await the client's projection barrier when you need the settled value.
-- `new Model({ id })` returns schema defaults until its first `await` (`find()` or `save()`). It is NOT a create: its first `save()` patches only the fields you set and preserves every untouched stored field.
-- If a change cannot be folded into the local store, the document goes read-refusing: reads and writes throw `FORMAT2_FOLD_BROKEN` (`error.code`) until the document is reconnected and catches up. Handle it by reconnecting, not by retrying the read.
-
-**Creating a large document.** `await client.documents.create({ title: "Ledger", documentFormat: 2 })` on JavaScript, `CreateDocumentOptions(title: "Ledger", documentFormat: 2)` on Swift, `primitive documents create "Ledger" --large` on the CLI. `createWithAlias` and `getOrCreateWithAlias` take the same option on BOTH clients, along with `tags` and `metadata`, each applied when the call creates the document — so a tagged large document behind an alias is one call, not a lookup plus a create plus a tag write. The returned metadata reports `documentFormat: 2` before the server commit lands, and `documents.get(id).documentFormat` reports it afterwards; omitting the option creates an ordinary document and sends nothing extra. On JavaScript a value that is neither `1` nor `2` — including the string `"2"` — is refused with `INVALID_ARGUMENT` before anything is created, and `localOnly: true` with `documentFormat: 2` is refused on both clients, at create and before any local state is written, with `LOCAL_ONLY_UNSUPPORTED_OPTION`, because a large document's records live in a store only the server's room opens. On `getOrCreateWithAlias` a stated format is also a statement about a document the alias already names: one that differs is refused with `DOCUMENT_FORMAT_MISMATCH` (409, naming the document and both formats) and creates nothing, one that agrees is echoed with `created: false`, and stating none leaves an existing binding answered as before. All three create routes refuse a top-level body key they do not read with 400 `VALIDATION_FAILED`, so a hand-built body must send only keys the route reads.
+Choose `documentFormat: 2` at creation for datasets validated at 2 GB. The format cannot change later. Configure persistent local storage, then use the ordinary document API.
 
 ```typescript
-  await client.documents.open(documentId);
+  const { metadata } = await client.documents.create({
+    title: "Ledger",
+    documentFormat: 2,
+  });
+  // The metadata the create resolves with reports the format it asked for,
+  // before the server commit has even landed.
+  const format: number | undefined = metadata.documentFormat;
 
-  const imported = new Task({ title: "Imported row", priority: 0 });
-  await imported.save({ targetDocument: documentId });
+  await client.documents.open(metadata.documentId);
 
-  const pending = await Task.query({ completed: false }, { documents: documentId });
+  // And the server agrees once the create has committed.
+  const info = await client.documents.get(metadata.documentId);
+  const stored: number | undefined = info.documentFormat;
 ```
 
+The same format option applies to `getOrCreateWithAlias`; use an alias to create one document safely across concurrent attempts.
 
-**Which clients can open a large document.** It needs a local database that outlives the session: a **Node** client opens one with no extra configuration, a **Swift** client opens one with its default on-disk store (`storageConfig: .sqlite(directory:)`; a client built with `.memory` is refused with `FORMAT2_STORAGE_UNAVAILABLE`), and a **browser** client needs the durable engine configured — `databaseConfig: { type: "opfs", options: { workerURL } }` (desktop Chrome, Firefox, Safari). Without that configuration a browser's engine holds data only for the life of the page, so opening a large document there is refused immediately with a typed `FORMAT2_STORAGE_UNAVAILABLE` error rather than opening a copy a reload would throw away. Ordinary documents are unaffected by this option either way. Under `opfs` ONE store holds every large document a signed-in user has open on that app and server, so an unscoped `query`/`queryOne`/`count`/`aggregate` spans all of them in one call with `sort`, `limit`, cursors and `include` intact, and `documents` narrows it; two users, or two apps, get two stores that share nothing. A model holding rows in an ordinary document AND a large one at once is the one scope no single statement can serve — `FORMAT2_QUERY_SCOPE`, scope it with `documents` to one kind.
+### Gotchas for large documents
 
-**Closing a large document keeps its local data.** An ordinary close keeps everything a large document stores locally — its records, its unacknowledged writes, the marks that say its query tables are current, and the projected query rows — so the next open re-projects nothing and is as cheap as a reload. A closed document is not part of an unscoped `query()`, `count()` or `aggregate()`: those read only the documents that are open. In a browser a close does not release the browser worker that holds the store, and neither does hiding the tab. What releases it is `client.destroy()`, the page's `freeze` or `pagehide` (a real close, or the browser freezing the page), and an evict that empties the pool.
+- An explicit format on `getOrCreateWithAlias` must match an existing document or the call fails with `DOCUMENT_FORMAT_MISMATCH`.
+- Offline writes expire after the configured window (7 days by default, configurable from 1 to 14 days). Sync before resuming writes. Handle `DOCUMENT_OFFLINE_WINDOW_EXPIRED`.
+- Queries must select ordinary documents or large documents, not both. Use `documents` to avoid `FORMAT2_QUERY_SCOPE`.
+- Nested collaborative values are rejected; store plain JSON field values.
+- Sync pending changes before eviction. Without `force`, eviction refuses to discard unsynced writes.
+- On `FORMAT2_FOLD_BROKEN`, reconnect to restore the local data before reading or writing.
 
-**Removing a large document's local data.** `documents.evict(id)`, `closeDocument(id, { evictLocal: true })` and `logout({ wipeLocal: true })` each remove what a large document stores locally: its records, its member index, the writes the server has not acknowledged, the marks saying its query tables are current, and the projected query rows. The rules are the same on every client. An evict of a document another tab still has open is refused for that document's local data — that tab keeps reading and writing and its unacknowledged writes stay in the log, one warning names it, and a later evict or wipe removes the store once no tab holds it. An evict without `force` is refused while the store holds unacknowledged writes and throws the same `has unsynced local changes (use force to override)` error an ordinary document's does; an evicting close skips the eviction on the same grounds; `{ force: true }` drops them. A document evicted while OPEN stays editable and its store is removed when it is closed, whatever that close's own options say. `logout({ wipeLocal: true })` reaches the signing-out user's large documents whether or not this session opened them, including one open at the moment of the logout and a store left behind by a client version that could not remove one, and never touches another user's, app's or server's. In a browser the OPFS directory holding the store is removed once it holds nothing else, so opening the document again fetches it from the server.
+For persistent browser storage, configure `databaseConfig: { type: "opfs", options: { workerURL, brokerURL } }`. `brokerURL` enables sharing across tabs. An unavailable store reports `FORMAT2_STORAGE_UNAVAILABLE`.
 
-**Reopening a large document costs what changed.** Its local store remembers the overlay state it last folded, so a reopen — after a close or a reload, on the OPFS engine and on Node alike — folds and projects only the records that changed in the overlay since the last fold, and when nothing changed it folds and projects nothing at all, whatever the document's size. A record created or re-created since the last fold is rebuilt from its model's overlay in memory before it is folded. In a browser, a tab running a newer version of the app refuses to open a large document through the worker an older tab started, with a typed `FORMAT2_STORE_OUTDATED` error ("the tab leading this store runs an older version of the app; reload it or close it"); reloading or closing the older tab ends it, the local data is untouched, and an older tab joining a newer worker is unaffected.
-
-**Opening one in several tabs (browser only).** A user's large documents share one browser store, whose worker allows one connection to its database. Add `brokerURL` beside `workerURL` in `databaseConfig.options` and every tab of the same app shares that one store: the first tab to open a large document becomes the leader FOR THAT USER — one leader however many documents are open — and holds the connection, later tabs reach it through a port a small broker hands over. Saves, reads and queries behave the same in every tab — a save committed in one tab is visible to `find()`/`query()` in another as soon as it settles — and closing the leader tab hands the connection to another open tab automatically, in one handover carrying every open large document, with nothing pending lost. Without `brokerURL`, a second tab opening the same large document is refused with a typed `FORMAT2_WORKER_OPEN_FAILED` error.
-
-**Limits.** Offline writes are bounded by a window — 7 days by default, `largeDocumentWindowDays` in `app.toml`'s `[app]` section (or `PUT /settings`), 1–14 days. A client away longer than the window goes read-only (reads keep serving, local writes are refused) until it syncs and catches up; the same window bounds how long the server keeps the change archives a returning client replays. Every refused write is reported the same way on both clients: `document:write-refused` (`DocumentWriteRefusedEvent`, carrying `documentId`, `model`, `recordId`, `error`) fires for every one of them, and wherever the call can throw it also throws that same error — `DocumentOfflineWindowError` on JavaScript (`save()`, `delete()`), `JsBaoError(.documentOfflineWindowExpired)` on Swift — with code `DOCUMENT_OFFLINE_WINDOW_EXPIRED` and `error.details` carrying `documentId`, `lastSyncAt`, `windowDays`, `overdueMs`. Subscribe once and handle it in one place; nothing fires for an accepted write, an ordinary document, or a refusal of another kind. ```typescript
-  client.on("document:write-refused", (event) => {
-    // `error.code` is `DOCUMENT_OFFLINE_WINDOW_EXPIRED`, and `error.details`
-    // carries `documentId`, `lastSyncAt`, `windowDays` and `overdueMs`.
-    console.warn(
-      `write refused on ${event.documentId}: ${event.model}/${event.recordId}`,
-      event.error.code,
-      event.error.details
-    );
-  });
-``` Composite field values (rich text, nested maps and arrays) are rejected at write time — a large document's fields hold plain JSON values only.
-
-**When the platform and your client disagree about the format.** Both clients
-record a document's format on their own local row at create time and open it by
-that; the platform resolves it independently and refuses to serve a document the
-two do not agree about rather than answering in the wrong shape. Two handshake
-refusals, and they are different things: `CLIENT_UPGRADE_REQUIRED` says this
-client BUILD cannot read any large document and closes the socket (4426), while
-`DOCUMENT_FORMAT_MISMATCH` refuses ONE document and leaves the connection alone —
-every other document on it keeps syncing. An open that was waiting on the network
-rejects with the typed error (`code: "DOCUMENT_FORMAT_MISMATCH"`, `details
-{ documentId, declared, actual }`; `JsBaoError(code: .documentFormatMismatch)` on
-Swift); an open served from cache, or a document already open, is closed under
-your app and the typed `document:format-mismatch` event carries the same fields.
-Local rows and unacknowledged writes are kept, `retainLocal: false` included. The
-refusal stands for the rest of that open cycle — no handshake, no update, and a
-reopen without a close first throws the same error — and a close or an eviction
-ends it. DIAGNOSE first: `declared` is what
-your client believed, `actual` what the platform resolved, and the server logs
-`Document format disagreement` with both. If your client's row is stale (an
-export and import, an old build) evicting the document and reopening clears it;
-if the PLATFORM is wrong, eviction is not a repair — it deletes the row that
-carries the declaration, so the next open declares nothing and may be served the
-wrong format silently. A records request states the same belief with
-`?documentFormat=1|2` (CLI: `--document-format <1|2>`; a server function:
-`ctx.doc(documentId, { documentFormat })`) and a disagreement is answered `409
-DOCUMENT_FORMAT_MISMATCH` before any table is read or written; stating nothing is
-answered exactly as before.
 
 ### Snapshotting a large document on demand
 
-A large document's epoch is sealed on its own at 1 MiB of overlay or 32,768 Yjs items (no sooner than 10 seconds after it opened, unless three times either limit), or a week old; a base snapshot is built every eight seals, or an hour after a seal no base covers yet. Ask for one sooner when you need a fresh base before a cold-load measurement, an audit, an export or a migration, or after a burst of writes a returning client would otherwise have to fold:
-
 ```bash
-# Seal the open epoch now and start the base build that seal arms
-primitive documents snapshots build <document-id>
-
-# ...and watch it: 0 verified, 1 failed, 124 --timeout, 130 Ctrl-C
-primitive documents snapshots build <document-id> --wait --timeout 600
+primitive documents snapshots build <document-id> --wait
+primitive documents snapshots list <document-id>
+primitive documents snapshots get <document-id> <build-id>
 ```
 
-It prints the epoch it sealed and the build id, which `documents snapshots get` then describes; `--json` prints the answer as received, with the build the wait settled on beside it. Giving up on the watching is never giving up on the build — **124** and **130** both leave it running, and only the build itself failing is **1**. Two answers are worth telling apart: an open epoch that carried nothing is **not** sealed and answers `{ sealed: false, reason: "empty", coveringBuildId }`, naming the completed base that already describes the document (`null` when none does yet); and asking again within a minute of the open epoch is refused with **429** `SNAPSHOT_TOO_SOON` and a `details.retryAfterMs`, leaving the epoch open, which is what stops a caller sealing in a loop. Unlike `snapshots list` and `snapshots get`, this takes the permission a bulk load takes — an app admin, or a document grant at `read-write` or above — so a reader who can list builds cannot ask for one. It refuses an ordinary document.
-
-The JS client carries the same call beside the inspection wrappers, returning exactly what the route answered:
-
-```ts
-const requested = await client.documents.snapshots.build(documentId);
-// { sealedEpoch, nextEpoch, buildId } — or { sealed: false, reason: "empty", coveringBuildId }
-if (!("sealed" in requested)) {
-  const build = await client.documents.snapshots.get(documentId, requested.buildId);
-}
-```
+Only verified snapshots are served to clients. Creating one requires document write access or app-admin authority. Stopping the CLI wait leaves the build running.
 
 ### Bulk-loading a large document
 
-A **large document** (`documentFormat: 2`) can hold far more records than an epoch overlay is a sensible way to write them through. Refreshing a dataset or mass-correcting records one `records save` at a time would force a seal and an archive every 1 MiB of overlay, with a base build every eight seals, and leave collaborative history nobody asked for. A **bulk load** is the other path: the rows go in as one artifact, nothing is visible until one atomic swap, and connected clients converge onto the result rather than reloading the whole document.
-
 ```bash
-# A directory of per-model line files: one record per line, either
-# `<id><tab><merge patch JSON>` or one JSON object carrying its own `id`.
-#   records/note.ndjson
-#   records/tag.ndjson.gz
 primitive documents ingest <document-id> --input ./records -y
-
-# An export of the same (or another) document re-loads as it stands
-primitive documents export <app-id> <document-id> --output ./export
-primitive documents ingest <document-id> --input ./export -y
-
-# Watch a session that is already running, or one started with --no-wait, and
-# see where its time went: per state, per stage, and its throughput
-primitive documents ingests list <document-id>
 primitive documents ingests get <document-id> <session-id>
 ```
 
-Two input layouts are accepted. A **plain** directory holds one `<model>.ndjson` (or `.ndjson.gz`) per model, one record per line. An **export** directory — what `primitive documents export` wrote, either at the directory itself or under `documents/<document-id>/` — is read as it stands, so a document can be re-loaded from its own export; the overlays and `current.yjs` beside the snapshot are named on stderr and skipped. A directory that is neither, that is both, or that is some other document's export is refused, naming what it held.
+Supply one `<model>.ndjson` or `<model>.ndjson.gz` file per model, or an export of the same document. Each line identifies a record and supplies a merge patch. `null` removes a field; `{"_deleted": true}` deletes the record.
 
-Each line is an RFC 7396 merge patch over the record: a value replaces a field, `null` unsets it, a StringSet field takes a whole array (`[]` is an empty set, `null` removes it), and `{"_deleted": true}` alone deletes the record. Only the document's EXISTING models and fields are accepted, and every line is checked against them on your machine before a session is opened — the first failure names the file and the line. A bulk load replaces records in a live document and cannot be undone, so it confirms unless `-y`. Exit codes: **0** completed, **1** failed or refused, **124** `--timeout` elapsed OR a session read that kept failing while waiting, **130** Ctrl-C (in all three of those the session keeps running). A session read that fails while waiting — a 5xx, a request timeout, a rate limit, a dropped connection — is retried rather than ending the wait, on a backoff that doubles from 1 second to 15, reported per attempt on stderr and reset by any read that answers. Only after ten minutes of unbroken silence does it stop watching, and it then exits **124** saying the load is still running on the server and naming the session and `documents ingests get` — never **1**. A read the server refuses outright (404, 403) is still terminal at **1**.
+**Gotchas:** loading changes live records and cannot be undone. All records become visible together. Ending the CLI wait does not stop the load. Handle `documentOfflineWritesResolved` when a load overlaps offline writes: writes to deleted records can be dropped, and other writes may need review.
 
-A session read that cannot be answered names its reason rather than failing generically: **`DOCUMENT_UNAVAILABLE`** (503) means the document was momentarily unreachable — its object was reset, evicted or overloaded — and the same read a moment later usually answers; **`INGEST_SESSION_READ_FAILED`** (500) means the room's own handler could not read the session ledger — whether asking again helps depends on why, and only the server log says, because the sentence deliberately carries no cause. A session that does not exist is `INGEST_SESSION_NOT_FOUND` (404). Each sentence is fixed, so the three are distinguishable from the output alone.
-
-`documents ingests get` walks a session through `uploading → committed → validating → staging → applying → finalizing → registering → complete`. On a very large document, `registering` removes the tables the swap moved aside a bounded amount at a time, over as many alarms as it needs, so it is normal for a session to sit there for a while: the **removed** figure in the progress row climbing between reads is how you tell it is advancing rather than stuck. If the bound turns out to be wrong for a document, the session stops with **`INGEST_REGISTER_STALLED`**, naming the table it could not finish — the bulk load itself has already landed and the document is correct, and the next ingest on that document clears the remains before it starts.
-
-Application code does not normally drive a bulk load — it is an operator or a server-side job. When it does, the JS client carries thin wrappers over the same eight routes, and the session view they return is the one `documents ingests get` prints:
-
-```ts
-const session = await client.documents.ingests.create(documentId);
-await client.documents.ingests.uploadChunk(documentId, session.sessionId, {
-  model: "note",
-  index: 0,
-  rows,
-  bytes: body.byteLength,
-  rawBytes,
-  sha256,
-  firstId,
-  lastId,
-  body, // gzipped ndjson, as a Blob or a Uint8Array
-});
-await client.documents.ingests.commit(documentId, session.sessionId);
-
-// Poll until it settles; `abort` gives a session up before the swap.
-const status = await client.documents.ingests.get(documentId, session.sessionId);
-```
-
-The session view reports where the time went in two kinds of number, and they are not interchangeable. The per-stage milliseconds in `timings.totals` (`manifestMs`, `readMs`, `decodeMs`, `copyMs`, `applyMs`, `reconcileMs`, `swapMs`, `sealMs`, `registerMs`, `totalMs`) are **wall** time: the server yields at both ends of each stage so the timer reads the work it encloses rather than the 0 a Durable Object's frozen clock gives it, and `timings.totals.bracketedTicks` says how many of `timings.ticks` managed it. Read a run where the two differ as degraded rather than averaging it with a fully bracketed one, and never read any of these as CPU time — they include the yield's own cost and any I/O inside the bracket.
-
-`timings.totals.counters` is the half that needs no clock at all. Keyed by the nine stage names (`manifest`, `read`, `decode`, `copy`, `apply`, `reconcile`, `swap`, `seal`, `register`), each carries `statements` (exact everywhere), `rowsRead` and `rowsWritten` taken from the database cursor's own counters — `null`, never `0`, where the host has none — and `rowsReturned`, which is a third figure: an aggregate answers one row after reading a million. Each stage's `byTarget` splits the same figures by the table the statement named (`records`, `members`, `claims`, `log`, `bookkeeping`, `other`), which is what tells you whether an apply stage went on the records fold, on StringSet index maintenance, or on unique-constraint claims.
-
-Connected clients do not reload the document when the swap lands. They keep serving reads throughout, re-fetch only the chunks the artifact actually touched, refold their own recent writes on top, and then report the result through `document:snapshot-load` with `mode: "converge"` and `chunksReused`. A write that was still unacknowledged when the bulk load landed is classified rather than replayed blindly: one on a record the load deleted is dropped and surfaced through `documentOfflineWritesResolved` with `reason: "bulkIngest"`, and one on a record it modified is applied and surfaced as ambiguous with the same reason.
-
-## Common Errors
+## Gotchas
 
 | Symptom                                         | Cause                                                                    | Fix                                                                                                  |
 | ----------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |

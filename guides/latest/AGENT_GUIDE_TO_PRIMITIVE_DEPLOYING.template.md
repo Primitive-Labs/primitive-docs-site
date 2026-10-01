@@ -1,6 +1,6 @@
 # Deploying Primitive apps to production
 
-This guide is the reference for shipping a Primitive app to production through its native distribution channel.
+Deploy the web template to its hosting environment, or distribute the native app through TestFlight and the App Store.
 
 {{#lang ts}}
 ## Web (Cloudflare Workers)
@@ -71,7 +71,7 @@ Passthrough arguments that would take over what the deploy already decided — `
 
 ### Adding environments
 
-The two axes grow separately.
+Configure deployment environments and Primitive environments independently.
 
 **Another deploy environment:**
 
@@ -92,7 +92,7 @@ VITE_EXPECTED_PRIMITIVE_ENV=prod
 
 Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too.
 
-Rules: absent (the default) keeps the axes fully independent; a value in the base `.env` is the default for every mode and `.env.<mode>` overrides it; an empty value cancels the check for that mode; a non-empty `VITE_EXPECTED_PRIMITIVE_ENV` in the process environment wins over the files, which is how a deliberate cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev PRIMITIVE_ENV=dev pnpm test --mode alpha`). The pure-env CI hatch — a build supplying both `VITE_APP_ID` and `VITE_API_URL` — resolves nothing and so skips the check; overriding only one of them does not, because the other half still comes from the resolved environment. `cf-deploy` reads `.env*` from the project root, so under a custom Vite `envDir` its `--check` will not see the declaration (a real deploy still fails inside the build).
+Use `VITE_EXPECTED_PRIMITIVE_ENV` when a mode contains backend-specific settings. A mode’s `.env` file overrides the base value; an empty value disables the check for that mode. A process environment value overrides the files. Builds supplied with both `VITE_APP_ID` and `VITE_API_URL` resolve no Primitive environment; `cf-deploy` rejects those overrides.
 
 ```toml
 [env.test]
@@ -131,9 +131,9 @@ The Team ID is the single setting required for device, TestFlight, and App Store
    bash scripts/regenerate-project.sh
    ```
 
-   That script is the one entry point for regeneration: it runs `scripts/codegen.sh` (models and the typed code generated from your server configuration — `xcodegen` can only list files that already exist, so a newly emitted one has to be on disk first), then `xcodegen generate`, and then re-copies the app's `Package.resolved` into the project container xcodegen just rewrote. `./run-ios.sh`, `./archive.sh` and the fastlane lanes all call it, so this step is only needed when you want the regeneration on its own. It requires xcodegen (`brew install xcodegen`) and fails with that instruction if it is missing.
+   The script generates model and server API types, regenerates the Xcode project, and synchronizes package revisions. Build scripts and Fastlane run it automatically. Install `xcodegen` with `brew install xcodegen`.
 
-   The generated sources are committed, so a regeneration that changes them is a diff to review and commit — including one produced by a release build. `./archive.sh` has no codegen policy of its own: it regenerates and builds like every other path.
+   Review and commit changes to generated sources, including changes from release builds.
 
 After that, device installs and archives both work.
 
@@ -143,7 +143,7 @@ After that, device installs and archives both work.
 ./run-ios.sh --device
 ```
 
-Requires a paired device over USB — verify with `xcrun devicectl list devices` (shows `paired`). The script auto-picks the first paired device, builds with `-allowProvisioningUpdates` (Xcode requests provisioning profiles for you), installs via `devicectl`, and launches with `--console` so `print` / NSLog stream to the terminal. Needs `DEVELOPMENT_TEAM` set (step 1).
+Connect a paired device over USB and set `DEVELOPMENT_TEAM`. Check pairing with `xcrun devicectl list devices`. The script builds, installs, and launches the app.
 
 ### 3. Set up Fastlane
 
@@ -190,7 +190,7 @@ You don't author the Fastfile — the template ships it, parameterized off `proj
 | `fastlane bump type:patch` | Bump the marketing + build version in `project.yml` and regenerate the xcodeproj (`major` / `minor` / `patch`) |
 | `fastlane status` | Print the app version, bundle ID, Team ID, signing certificates, and whether the API key is configured |
 
-Each build lane reads the Team ID from `project.yml` (it errors if unset — set `DEVELOPMENT_TEAM` in `project.yml`) and loads the API key from `fastlane/.env`. The iOS lanes sign entirely from that key: they fetch the Apple Distribution certificate and App Store provisioning profile from App Store Connect, pass the key to the archive via `xcargs`, and export with manual signing — no Apple ID in Xcode and no pre-existing certificate needed. (`fastlane mac beta` uses Xcode automatic signing, so it needs an Xcode account.) Every lane also runs `scripts/sync-xcode-pins.sh` first, copying the app's `Package.resolved` over Xcode's own copy of that pin, so an archive can't be built against a package revision `swift package update` has already moved past.
+The iOS lanes use the API key for signing and upload. The macOS beta lane requires an Xcode account for automatic signing. All build lanes use the app’s `Package.resolved` revisions.
 
 ### 6. Register the app on App Store Connect (one-time)
 
@@ -207,7 +207,7 @@ bundle exec fastlane bump type:patch      # bumps version + build, regenerates x
 bundle exec fastlane ios beta             # archives, exports, uploads
 ```
 
-Internal testers (added in the App Store Connect UI under TestFlight) get builds immediately — no review. External testers / groups need a one-time Beta App Review per major version. The first upload takes 10–20 min between Fastlane finishing and the build appearing in TestFlight (Apple processes the binary + export compliance); subsequent uploads ~5 min.
+Wait for App Store Connect to process the build, then assign testers. External testing may require Beta App Review.
 
 ### 8. Submit to the App Store
 
@@ -216,9 +216,9 @@ bundle exec fastlane bump type:minor
 bundle exec fastlane ios release
 ```
 
-`upload_to_app_store` uploads + submits for review. The lane sets `skip_metadata: true` / `skip_screenshots: true` — fill in description, screenshots, keywords, age rating, and privacy answers in App Store Connect before the build can be reviewed. Once metadata is complete and the build is processed, review typically takes 24–72 hours.
+The release lane uploads and submits the app for review. Complete metadata and screenshots in App Store Connect first; the lane skips their upload.
 
-### CI
+### Gotchas for CI
 
 Both `./run-ios.sh` and `bundle exec fastlane ios beta` run in GitHub Actions on a macOS runner. Base64-encode `api_key.p8` into a secret and decode it before the lane runs.
 
