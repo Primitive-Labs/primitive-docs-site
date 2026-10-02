@@ -138,9 +138,11 @@ primitive config diff
 
 ### Test cases
 
-A `<key>.tests/<case>.toml` filename identifies the case. Push changes before
-running tests: runners use registered server cases, not local files. Delete a
-case file and push with `--prune` to remove it.
+A `<key>.tests/<case>.toml` filename identifies the case. Reference the
+configuration and judge prompt by name — `configName`, `evaluatorPromptKey`,
+`evaluatorConfigName` — so the file works unchanged in every app. Push changes
+before running tests: runners use registered server cases, not local files.
+Delete a case file and push with `--prune` to remove it.
 
 ## Secrets and email
 
