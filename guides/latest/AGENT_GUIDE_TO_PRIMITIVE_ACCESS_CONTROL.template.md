@@ -67,7 +67,7 @@ delete = "user.userId == group.createdBy"
 primitive config push --only rule-set/team-management
 ```
 
-Bind via the type config: `primitive/<env>/group-type-configs/<type>.toml` / `primitive/<env>/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via its `ruleSetId` in TOML, where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
+Bind via the type config: `primitive/<env>/group-type-configs/<type>.toml` / `primitive/<env>/collection-type-configs/<type>.toml` (synced), or `client.groupTypeConfigs.create({ groupType, ruleSetId })` / `client.collectionTypeConfigs.create(...)`. A **blob bucket** attaches a rule set directly via `ruleSetName` in its TOML, where it governs member-level reads/writes — see the Blob Buckets guide for precedence semantics.
 
 Semantics:
 - **App owners/admins bypass rule sets entirely**; rules apply to regular members.

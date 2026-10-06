@@ -36,7 +36,7 @@ Buckets hold files independently of documents. Configure an access preset and a 
 
 ## Bucket configuration
 
-A bucket has a `ttlTier` and a `preset` (or a `ruleSetId` for a custom bucket). Configure via TOML sync (preferred), the CLI, or `createBucket` (see **Bucket admin** above).
+A bucket has a `ttlTier` and a `preset` (or a `ruleSetName` for a custom bucket). Configure via TOML sync (preferred), the CLI, or `createBucket` (see **Bucket admin** above).
 
 ```toml
 # primitive/dev/blob-buckets/avatars.toml
@@ -46,11 +46,11 @@ name = "User avatars"
 description = "Profile pictures"           # optional
 ttlTier = "permanent"                       # 1d | 3d | 14d | 28d | 180d | 365d | permanent
 preset = "authenticated"                    # public | authenticated | admin-only | personal-uploads
-# ruleSetId = "<rule-set-id>"               # optional; makes a `custom` bucket whose access
-                                            # is governed entirely by the rule set (see below)
+# ruleSetName = "<rule-set name>"           # instead of preset; makes a `custom` bucket whose
+                                            # access is governed entirely by the rule set (see below)
 ```
 
-The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `primitive/<env>/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetId`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
+The TOML root table is `[bucket]` (not `[blobBucket]`). The CLI's `primitive config` reads from `primitive/<env>/blob-buckets/<key>.toml`. Give a bucket a `preset` or a `ruleSetName`, not both. To change either later, edit the TOML and `primitive config push` again, or change it at runtime with `updateBucket` (see [Update a bucket's access](#update-a-buckets-access)).
 
 Scaffold and apply it:
 
@@ -72,7 +72,30 @@ Presets govern blob ops at the granularity of `read` (download/getMeta), `write`
 
 `public` is the only preset that serves **anonymous reads** — an unauthenticated request can `read`/`list` it directly (no signed URL needed).
 
-For access no preset expresses, set `ruleSetId` to make a `custom` bucket: the rule set is the authority for member access (resource type `blob_bucket`), evaluated per op (`read`/`write`/`list`/`delete`/`share`; in a configured rule set `list`/`share` fall back to `read` and `delete` to `write`). Admins/owners always pass; a missing/orphaned rule set denies closed. Rule CEL exposes `isAnonymous()` and `record.blobCreatedBy` (the uploader's id; null for bucket-level `list`).
+For access no preset expresses, set `ruleSetName` to make a `custom` bucket: the rule set is the authority for member access (resource type `blob_bucket`), evaluated per op (`read`/`write`/`list`/`delete`/`share`; in a configured rule set `list`/`share` fall back to `read` and `delete` to `write`). Admins/owners always pass; a missing/orphaned rule set denies closed. Rule CEL exposes `isAnonymous()` and `record.blobCreatedBy` (the uploader's id; null for bucket-level `list`).
+
+```toml
+# primitive/dev/rule-sets/bucket-access.toml
+[ruleSet]
+name = "bucket-access"
+resourceType = "blob_bucket"
+
+[rules.blob]
+read = "!isAnonymous()"
+write = "!isAnonymous()"
+delete = "record.blobCreatedBy == user.userId"
+```
+
+```toml
+# primitive/dev/blob-buckets/uploads.toml
+[bucket]
+key = "uploads"
+name = "Uploads"
+ttlTier = "permanent"
+ruleSetName = "bucket-access"               # the rule set's `name`, not its id
+```
+
+`config push` resolves `ruleSetName` to the rule set of that name in the target app, so a tree pushed into another app binds that app's rule set; an unknown name fails the push before the bucket is written. A bucket file that names its rule set by id (`ruleSetId`) still pushes, with a deprecation warning; `config pull` rewrites it to `ruleSetName`.
 
 ### Update a bucket's access
 
@@ -80,7 +103,7 @@ Change a bucket's access at runtime without recreating it (admin/owner only) wit
 
 {{ example: blobs/bucket-update }}
 
-From the CLI, a bucket's settings are TOML: `preset` switches the access model (clearing any attached rule set), `ruleSetId` attaches a rule set (making the bucket `custom`), and `name`/`description` are plain fields. `preset` and `ruleSetId` are mutually exclusive — a file declaring both is rejected, and moving off a rule set means setting a preset in the same push.
+From the CLI, a bucket's settings are TOML: `preset` switches the access model (clearing any attached rule set), `ruleSetName` attaches a rule set (making the bucket `custom`), and `name`/`description` are plain fields. `preset` and `ruleSetName` are mutually exclusive — a file declaring both is rejected, and moving off a rule set means setting a preset in the same push.
 
 ```bash
 primitive config set blob-bucket/avatars bucket.preset=admin-only

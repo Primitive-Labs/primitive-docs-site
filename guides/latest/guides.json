@@ -15,13 +15,13 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-09-30",
+    "stampedAt": "2026-10-04",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.4.1",
       "js-bao": "0.11.1",
       "primitive-admin": "1.1.0",
-      "primitive-app": "3.1.3"
+      "primitive-app": "3.2.0"
     }
   },
   "guides": [
@@ -688,6 +688,65 @@
       "prerequisites": [],
       "relatedGuides": [
         "server-functions"
+      ]
+    },
+    {
+      "topic": "agents",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.ts.md",
+      "description": "Agent sessions: typed tools, approvals, turn context and events, with web and Swift clients",
+      "keywords": [
+        "agent",
+        "agents",
+        "session",
+        "tool",
+        "tools",
+        "approval",
+        "turn context",
+        "event",
+        "ctx.agents",
+        "ctx.tool",
+        "client tool",
+        "task tool"
+      ],
+      "useCases": [
+        "Declaring an agent prompt with server and client tools",
+        "Creating an agent session from a server function",
+        "Checking a tool call's caller rights before acting",
+        "Approving or denying a client tool call",
+        "Sending a message and reading a live session view",
+        "Recording an event the agent reads on its next turn",
+        "Listing or deleting agent sessions as an app owner or admin"
+      ],
+      "concepts": [
+        "kind = \"agent\"",
+        "prompt.agent",
+        "ctx.agents.createSession",
+        "ctx.tool",
+        "ctx.tool.attachArtifact",
+        "turnContext",
+        "answeredBy",
+        "client.agents.sessions.open",
+        "AgentSessionView",
+        "AGENT_SESSION_ORIGIN_REFUSED"
+      ],
+      "prerequisites": [
+        "prompts",
+        "server-functions"
+      ],
+      "relatedGuides": [
+        "prompts",
+        "server-functions",
+        "documents"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.swift.md"
+        }
       ]
     },
     {

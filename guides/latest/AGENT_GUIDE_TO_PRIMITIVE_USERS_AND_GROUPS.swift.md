@@ -147,7 +147,15 @@ primitive users list --search "ali"
 # only owner cannot be disabled.
 primitive users disable <user-id> [-y]
 primitive users enable <user-id>
+
+# Set a user's display name and avatar, at creation or afterwards. Each
+# set-profile flag changes only its field; the user can still change their own
+# profile afterwards.
+primitive users create user@example.com --name "Ada Lovelace" --avatar-url https://example.com/ada.png
+primitive users set-profile <user-id> [--name <name>] [--avatar-url <url> | --clear-avatar]
 ```
+
+An app owner or admin sets the same profile over REST with `PATCH /app/{appId}/api/users/{userId}/profile` and a body of `{ name?, avatarUrl? }` (`avatarUrl` is an `http:` or `https:` URL; `null` clears it); a server function calls `ctx.api.users.setProfile({ userId, body: { name } })`. An invalid value answers 400 with code `INVALID_PROFILE`.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -202,7 +210,7 @@ The current authenticated user has its own namespace. Use it for "me"-scoped rea
   await client.me.clearCache()  // next get() hits the network
 ```
 
-`get()` is cache-backed; `update()` and `uploadAvatar()` clear that cache automatically. `get()` returns `{ userId, email, name, appRole, appId, avatarUrl? }` (null when signed out).
+`update()` accepts only an `http:` or `https:` avatar URL; any other scheme answers 400. `get()` is cache-backed; `update()` and `uploadAvatar()` clear that cache automatically. `get()` returns `{ userId, email, name, appRole, appId, avatarUrl? }` (null when signed out).
 
 ### Documents view
 

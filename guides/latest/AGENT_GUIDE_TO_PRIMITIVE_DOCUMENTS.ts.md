@@ -33,6 +33,7 @@ Await `open()` before reading or writing. Show a loading state while it runs, an
 #### Gotchas when opening
 
 - Queries span all open documents, so unnecessary opens also widen query results.
+- A record id is unique within its document only. Two open documents can each hold a record with the same id; an unscoped query returns both, so scope it with `documents` to read one document's records.
 - An open requiring server state can fail offline or time out. Handle the error code and retry `open()` when connectivity returns.
 - Open after authentication. A view or store being ready does not mean its documents are open.
 
@@ -45,13 +46,31 @@ List owned, directly shared, group-shared, and collection-shared documents separ
 **a. Documents they own** (`ownedDocuments` — created, or ownership transferred):
 
 ```typescript
-  // Paginated page — the unified { items, nextCursor } envelope, same shape as
-  // sharedDocuments():
-  const page = await client.me.ownedDocuments({
+  // One page — the unified { items, hasMore, nextCursor } envelope, same shape
+  // as sharedDocuments():
+  const first = await client.me.ownedDocuments({
     tag: "channel",
     returnPage: true,
   });
-  const { items, nextCursor } = page;
+
+  // Every page: read `GET /me/owned-documents` page by page. Don't loop on
+  // `ownedDocuments({ returnPage: true, cursor })` — each such call also starts
+  // a background refresh of the whole list. A page can be short or empty while
+  // `hasMore` is true, so loop on `hasMore`:
+  const owned: DocumentInfo[] = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+  while (hasMore) {
+    const params = new URLSearchParams({ tag: "channel", limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    const page: DocumentListPage = await client.makeRequest(
+      "GET",
+      `/me/owned-documents?${params.toString()}`
+    );
+    owned.push(...page.items);
+    hasMore = !!page.hasMore && !!page.nextCursor;
+    cursor = page.nextCursor;
+  }
 
   // (Without `returnPage`, the JS client returns a flat `DocumentInfo[]` for
   // convenience: `const owned = await client.me.ownedDocuments({ tag: "channel" })`.)
@@ -60,21 +79,25 @@ List owned, directly shared, group-shared, and collection-shared documents separ
 **b. Documents shared directly with them** (`sharedDocuments` — direct non-owner grants; group and collection shares use their own lists):
 
 ```typescript
-  const { items, nextCursor } = await client.me.sharedDocuments({
-    tag: "channel",
-    limit: 50,
-  });
+  let cursor: string | undefined;
+  let hasMore = true;
+  while (hasMore) {
+    const page = await client.me.sharedDocuments({
+      tag: "channel",
+      limit: 50,
+      cursor,
+    });
 
-  for (const doc of items) {
-    // Each row carries the base document fields (title, createdAt, …) plus the
-    // share extras (permission, grantedBy, source).
-    console.log(doc.title, doc.permission, doc.grantedBy);
-  }
+    for (const doc of page.items) {
+      // Each row carries the base document fields (title, createdAt, …) plus the
+      // share extras (permission, grantedBy, source).
+      console.log(doc.title, doc.permission, doc.grantedBy);
+    }
 
-  // `nextCursor` is an opaque pagination token — pass it back as `cursor` for the next page.
-  if (nextCursor) {
-    const next = await client.me.sharedDocuments({ cursor: nextCursor });
-    return next;
+    // `nextCursor` is an opaque pagination token — pass it back as `cursor`.
+    // A page can be short or empty while `hasMore` is true, so loop on `hasMore`.
+    hasMore = !!page.hasMore && !!page.nextCursor;
+    cursor = page.nextCursor;
   }
 ```
 
@@ -653,7 +676,7 @@ const { data } = await Tag.query({});
 | `number`    | Numeric values               | `indexed: true`, `default: 0`  |
 | `boolean`   | True/false                   | `default: false`               |
 | `date`      | ISO-8601 strings             | `indexed: true`                |
-| `stringset` | Collection of strings (tags); never `unique` | `maxCount: 20` |
+| `stringset` | Set of strings (tags), read back sorted; never `unique` | `maxCount: 20` |
 
 ### Field Options
 
@@ -806,7 +829,7 @@ name = "name_parent_unique"
 fields = ["name", "parentId"]
 ```
 
-After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`).
+After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`). A composite constraint is enforced the same way whether a record is written by a client, a server function, a workflow, or the CLI. Server functions and `primitive documents records bulk` write by a constraint with a bulk `upsert` operation (`{ action: "upsert", constraint, data }`) — see the Server Functions guide.
 
 **Wrong** — these TOML shapes are silently rejected or fail at codegen:
 
@@ -837,6 +860,8 @@ Model "posts": field "tags" is a stringset and cannot be unique. A unique constr
 **If your schema already declares one:** remove `unique = true` from the stringset field, or the stringset field from the constraint, and regenerate — an app whose generated models declare it throws at startup after upgrading js-bao. A constraint a document already recorded is ignored by the server (records sharing a member all save; every other field is unchanged), so nothing stored is lost.
 
 ### Working with StringSets
+
+A stringset holds each value once. Reads return its values sorted by Unicode code point (`"Z"` before `"a"`), not in insertion order — sort a copy yourself to display them another way.
 
 ```typescript
   // Add/remove tags
@@ -1500,7 +1525,7 @@ Build your share dialog on `client.documents.*`. Three reads fill it and three w
 | People with access | `documents.getPermissions(documentId)` → `DocumentPermissionEntry[]` (`userId`, `email`, optional `name`, `permission`) |
 | Invited, not signed up yet | `documents.listPendingInvitations(documentId)` → `PendingInvitationEntry[]` (`email`, `permission`, `invitationId`, `expiresAt`) |
 | Groups with access | `documents.listGroupPermissions(documentId)` |
-| What one user may do | `documents.validateAccess(documentId, { userId })` → `{ hasAccess, permission?, accessSource?, appRole? }` — with no options it answers the current user; decide content writes on `permission`, never `appRole` |
+| What one user may do | `documents.validateAccess(documentId, { userId })` → `{ hasAccess, permission?, accessSource?, appRole? }` — with no options it answers the current user; decide content writes on `permission`, never `appRole`. On a just-created document it waits for the create to reach the server; offline, or after 30 s, it rejects `PENDING_CREATE`. A document the server doesn't hold rejects 404 `NOT_FOUND` |
 | Invite / change a level | `documents.updatePermissions(documentId, { userId \| email, permission })` |
 | Remove a person, cancel an invite | `documents.removePermission(documentId, { userId })` / `{ email }` |
 | Share with a group | `documents.grantGroupPermission(documentId, { groupType, groupId, permission })` |
@@ -1570,6 +1595,29 @@ async function revoke(target: { userId: string } | { email: string }): Promise<v
 `documentUrl` has to be a URL your app actually routes to. A recipient who is already a member gets the `document-share` email, whose link is the `documentUrl` you sent, verbatim — a path you invented lands them on your Not Found page. The scaffolded template routes `/`, `/login`, `/logout`, the OAuth callback and `/invite/accept`, and everything else falls to the catch-all, so add the document's own route (`src/router/routes.ts`) and build the URL from it, or send a page you already have. (A recipient who is not a member yet is a different email: the deferred `document-share-deferred` template carries a tokenized accept URL composed from the app's `baseUrl`, which the template does route.)
 
 Both lists are point-in-time reads, not live queries: re-run `refresh()` after every write, and after the user accepts an invitation elsewhere. The owner row cannot be removed — hand the document over with `documents.transferOwnership(documentId, newOwnerId)` instead. The full surface, including batch grants and access requests, is in [Quick Reference](#quick-reference) above.
+
+### Checking one user's access
+
+`documents.validateAccess` answers what the current user — or one named user — may do with a document: `hasAccess`, and when there is access the `permission` level and `accessSource`. Gate content writes on `permission`, never on the app role.
+
+```typescript
+  const { metadata } = await client.documents.create({ title: "Q3 plan" });
+
+  // Waits for the new document to reach the server, then answers.
+  const mine = await client.documents.validateAccess(metadata.documentId);
+  // mine.hasAccess === true, mine.permission === "owner"
+
+  // Ask about another user instead of the caller.
+  const theirs = await client.documents.validateAccess(metadata.documentId, {
+    userId,
+  });
+  const canEdit =
+    theirs.permission === "read-write" || theirs.permission === "owner";
+```
+
+A just-created document is saved on the device first and reaches the server a moment later. Asked about it in that window, `validateAccess` waits for the create to commit and then answers, so the creator gets `owner`. Offline at the call, going offline during the wait, or no commit within 30 s ends the call with a pending-create error instead; ask again once the device is back online. A document the server doesn't hold — deleted or never created, indistinguishably — fails with 404 `NOT_FOUND`.
+
+The pending-create failure is a `JsBaoError` with `code === "PENDING_CREATE"` and `details.documentId`.
 
 ### Handling Invitations
 
@@ -1696,7 +1744,7 @@ Pass `null` to clear `thumbnailBlobId` or `metadata`.
 
 Delete a document (it must be closed first, or pass `forceCloseIfOpen: true`) — see the compiled call below. Root documents cannot be deleted. Deletion requires **direct `owner` permission** on the document or the app `owner` or `admin` role — group-derived permission never qualifies, and `read-write` editors can delete records and content but not the document itself.
 
-The one exception: if the caller is neither the owner nor an app owner, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Collection Rule Sets](#collection-rule-sets) — so deletion never widens past owner/app-owner unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
+The one exception: if the caller is not the document's owner or an app owner or admin, the platform falls back to checking every collection the document belongs to and allows the delete if **any** one collection's `document.delete` CEL rule passes. That rule defaults to `"false"` (deny) — see [Collection Rule Sets](#collection-rule-sets) — so deletion never widens past the owner and app owners and admins unless an app explicitly configures it. Because that rule is evaluated per collection, adding a document to a collection can extend who is able to delete it; configure `document.add` and `document.delete` together with that reach in mind.
 
 ```typescript
   // Must be closed first
@@ -1877,14 +1925,14 @@ Collections use the same rule-set pipeline as groups — a `CollectionTypeConfig
 | `collection.edit` / `delete` | `user.userId == collection.createdBy` | Creator only |
 | `collection.get` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member (direct or via `CollectionGroupPermission`) |
 | `document.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
-| `document.delete` | `"false"` | Denied. Unlike every other write op above, NOT creator-only — an app must explicitly configure this op to let a non-owner/non-app-owner delete a member document at all |
+| `document.delete` | `"false"` | Denied. Unlike every other write op above, NOT creator-only — an app must explicitly configure this op to let a caller who is not the document's owner or an app owner or admin delete a member document at all |
 | `document.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
 | `member.add` / `remove` | `user.userId == collection.createdBy` | Creator only |
 | `member.list` | `user.userId == collection.createdBy \|\| hasCollectionAccess(collection.collectionId)` | Creator or collection member |
 
 A non-creator reader/writer removing their own membership via `member.remove` is denied (403) unless the rule set grants it.
 
-`document.delete` is distinct from `document.remove`: `remove` only detaches a document from this collection, while `delete` authorizes destroying the whole document (`client.documents.delete`) when the caller isn't the document's owner or the app owner — the delete endpoint checks every collection containing the document and allows the delete if any one collection's `document.delete` rule passes. Because that check runs per collection, granting `document.add` on a collection can extend who is able to delete documents placed in it — configure `document.add` and `document.delete` together with that reach in mind.
+`document.delete` is distinct from `document.remove`: `remove` only detaches a document from this collection, while `delete` authorizes destroying the whole document (`client.documents.delete`) when the caller isn't the document's owner or an app owner or admin — the delete endpoint checks every collection containing the document and allows the delete if any one collection's `document.delete` rule passes. Because that check runs per collection, granting `document.add` on a collection can extend who is able to delete documents placed in it — configure `document.add` and `document.delete` together with that reach in mind.
 
 **CEL context**, beyond the identity context:
 
@@ -2042,10 +2090,22 @@ primitive documents export-all --user-id <user-id> --output ./export
 primitive documents import ./export --owner user@example.com
 ```
 
+The bundle holds documents only: users, their profiles (display name, avatar), memberships and roles are not in it. `--owner` must name a user who exists in the target app, so recreate users first. `users list --json` prints one page (50 by default, at most 100 with `--limit`); re-run with `--cursor <nextCursor>` until `hasMore` is `false`, then create each user on the target:
+
+```bash
+primitive users list --json --limit 100 --cursor <next-cursor>   # source app
+primitive users create user@example.com --role member --name "Ada Lovelace" --avatar-url https://example.com/ada.png
+primitive users set-profile <user-id> --name "Ada Lovelace"      # user already in the target app
+```
+
 ### Gotchas when importing
 
+- An avatar uploaded in the source app is not carried and `users list` shows no URL for it; the user uploads it again.
+- An export that can't read a document in full names it and exits non-zero. `export-all` still exports the rest and leaves the failed IDs out of `manifest.json`; export again before importing.
 - `--overwrite` merges ordinary document data; it does not guarantee imported values win. Large-document imports require an empty target.
-- IDs are preserved except for root documents, which import into the target user's root document.
+- A document that fails doesn't stop the run. It is listed under `failed` in `--json` output with `status` `failed` (nothing written) or `incomplete` (exists, missing data or blobs), and the command exits 1. Re-run the same command without `--overwrite` to finish it; fully imported documents are skipped, not merged again. This includes an ordinary root-document export, reported in `rootDocuments` with `action` `completed` (an `--overwrite` merge is `applied`); a root holding its user's own data is skipped without `--overwrite`. An existing large root is skipped; `--overwrite` installs into it while it is empty.
+- A large-document export's `current.yjs` holds only writes made since the server last archived the document's changes, and is empty right after an archive. The records are in `snapshot/` and `epochs/`; import the whole directory.
+- IDs are preserved except for root documents, which import into the target user's root document. The formats must match: a large root export installs into an empty large root (created when the target app sets `rootDocumentFormat = 2`), an ordinary one merges into an ordinary root, and a mismatch is refused with nothing written.
 - Restore document sharing in the target app. Import documents before collections.
 - `collections import --dry-run` previews changes. Existing names are skipped without `--overwrite`; overwrite requires matching owner and type. A file that still carries `contextId` imports without it, with one note.
 - `collections import` matches by name. A name that more than one target collection has is ambiguous: that collection is refused as a `collection` problem naming every matching ID, with or without `--overwrite`, and nothing is written for it. A name repeated inside the file is refused for the second and later occurrences. A missing owner or an ambiguous target name refuses that collection outright.
@@ -2081,16 +2141,22 @@ Choose `documentFormat: 2` at creation for datasets validated at 2 GB. The forma
 
 The same format option applies to `getOrCreateWithAlias`; use an alias to create one document safely across concurrent attempts.
 
+To create each user's root document as a large document, set `rootDocumentFormat = 2` under `[app]` in `app.toml`. It applies to root documents created afterwards; existing roots keep their format. `documents.getRoot()` then reports `documentFormat: 2`, and `openRoot()` needs the same persistent storage as any large document.
+
 ### Gotchas for large documents
 
 - An explicit format on `getOrCreateWithAlias` must match an existing document or the call fails with `DOCUMENT_FORMAT_MISMATCH`.
-- Offline writes expire after the configured window (7 days by default, configurable from 1 to 14 days). Sync before resuming writes. Handle `DOCUMENT_OFFLINE_WINDOW_EXPIRED`.
-- Queries must select ordinary documents or large documents, not both. Use `documents` to avoid `FORMAT2_QUERY_SCOPE`.
+- Offline writes expire after the configured window (7 days by default, configurable from 1 to 14 days). Sync before resuming writes. Handle `DOCUMENT_OFFLINE_WINDOW_EXPIRED`. The window is a server rule, not a guarantee the device keeps the writes.
+- Queries must select ordinary documents or large documents, not both. Use `documents` to avoid `FORMAT2_QUERY_SCOPE`. A large root document counts as a large document.
 - Nested collaborative values are rejected; store plain JSON field values.
 - Sync pending changes before eviction. Without `force`, eviction refuses to discard unsynced writes.
 - On `FORMAT2_FOLD_BROKEN`, reconnect to restore the local data before reading or writing.
 
-For persistent browser storage, configure `databaseConfig: { type: "opfs", options: { workerURL, brokerURL } }`. `brokerURL` enables sharing across tabs. An unavailable store reports `FORMAT2_STORAGE_UNAVAILABLE`.
+For persistent browser storage, configure `databaseConfig: { type: "opfs", options: { workerURL, brokerURL } }`. `brokerURL` enables sharing across tabs. An unavailable store reports `FORMAT2_STORAGE_UNAVAILABLE`. With `rootDocumentFormat = 2`, every browser client needs this configuration, or `openRoot()` fails with that code; the `opfs` engine still loads `sql-wasm.wasm`, so keep serving it.
+
+The client asks the browser to keep that storage when it first opens a large document. `(await client.getLargeDocumentStorage()).persistence` reports `persisted`, `granted`, `declined` or `unsupported`; it is absent before the first large document opens. On `declined` or `unsupported` the local copy, unsynced writes included, is best-effort: the browser may clear it under storage pressure, and Safari clears it after seven days without a visit.
+
+To save many records, start the saves together and await them together (`Promise.all`): saves started together are stored in one write. A resolved save survives a closed or crashed tab; a power cut can lose the most recent unsynced saves. A browser store written by a newer client library does not open in an older one, so reload tabs left open across a deploy.
 
 
 ### Snapshotting a large document on demand

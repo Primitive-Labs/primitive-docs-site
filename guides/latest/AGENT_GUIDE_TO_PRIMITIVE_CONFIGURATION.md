@@ -81,6 +81,10 @@ Edit `app.toml` and use `primitive config push --only app`. Its sections are
 `[app]`, `[auth]`, `[cors]`, and `[invitations]`. `[app].name` and `[app].mode`
 are required. See the authentication guide for sign-in settings.
 
+`[app].protected = true` marks an app as live with real users. Only the app's
+console owner can set or clear it; a push from anyone else that would change
+it fails with `PROTECTED_FLAG_OWNER_ONLY`.
+
 Removing a managed setting clears it or restores its default. Keep explicit
 values when a feature must stay disabled, especially
 `emailSignInEnabled = false`.
@@ -105,8 +109,9 @@ remote changes. `diff --json` is available for automation.
 
 Keep `.sync-state.json` committed with configuration. If an external deletion
 leaves an entry pointing to a missing object, remove that object’s state entry
-before pushing to recreate it. Pull also reconciles state but overwrites
-server-backed files; preserve local edits first.
+before pushing to recreate it. Pull also reconciles state and rewrites every
+file that differs from the server; preserve local edits first. A file `diff`
+reports as in sync keeps its bytes, comments and key order included.
 
 ### Deletion and availability
 
@@ -156,7 +161,11 @@ Delete an override and prune it to restore the built-in template.
 
 ## CI authentication
 
-Log in non-interactively with a refresh token on stdin:
+For a CI job, create a CI session from your own login with
+`primitive auth sessions create --name <name> --scope <list> --app <ids>`,
+then run the CLI with the printed token in `PRIMITIVE_TOKEN`; no credentials
+file is needed. To log in as yourself without a browser, pipe a refresh token
+on stdin:
 
 ```bash
 primitive token --refresh | primitive -e <env> login --token-stdin

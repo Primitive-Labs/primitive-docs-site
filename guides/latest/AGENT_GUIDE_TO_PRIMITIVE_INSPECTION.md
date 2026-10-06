@@ -32,6 +32,7 @@ primitive functions logs <function-id> --follow           # tail new invocations
 # The other log views
 primitive integrations logs <integration-id>           # outbound calls: status, timing, actor
 primitive integrations logs <integration-id> --run <run-id>   # just the calls one run made
+primitive integrations logs <integration-id> --run <run-id> --step <name>   # one step of that run
 primitive analytics events                             # app activity events
 
 # Blob storage
@@ -53,6 +54,7 @@ primitive documents records get <document> <model-name> <record-id>
 primitive documents records count <document> <model-name> [--filter '{...}']
 primitive documents records aggregate <document> <model-name> --op <count|sum|avg|min|max>
 primitive documents dump <document-id>                 # every model's records as JSON
+primitive documents stats <document-id>                # counts and size; `sizeBasis` says what the size measures
 primitive documents export <document-id>               # dump a document's contents
 
 # Metadata
@@ -121,9 +123,9 @@ Outcome mapping, by source:
 
 The `function-log` source is a server function's invocation records. Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind` (`http`, `webhook`, `cron`, `function`, `manual`), `runtime` (`request` or `task`), `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated`, `logsUnavailable` and `contentSuppressed`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId` (the invocation id), the `runId` of a trigger fire or task run, and the attributed `userId`. Records are kept seven days and outlive an archived function.
 
-The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test`, `workflow` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`. Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a workflow step, `functionId` for a server function, and `runId` for either one's run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
+The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test`, `workflow` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`, plus `stepAttempt` for a call made inside a function's `step.do` (which run of the body, from 1; it restarts after the task pauses, exactly as the function log's attempt does). Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a workflow step or a function step, `functionId` for a server function, and `runId` for either one's run. A function step also carries `correlation.stepOccurrence`, which use of the step name it was (from 0), so `runId`, `stepId` and `stepOccurrence` together identify one step of the run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
 
-Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
+Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run`/`--step` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
 
 Not in the shared shape: `functions runs --json` prints the run rows as `{ items, nextCursor }` (each row adds `runtime`), and `functions runs steps --json` prints one run's full trace under `items`, never paged.
 

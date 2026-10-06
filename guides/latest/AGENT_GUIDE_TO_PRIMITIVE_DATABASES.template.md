@@ -199,7 +199,7 @@ Follow `nextCursor` (`cursor` argument) for a group larger than one page.
 - **`save`** is an upsert: it creates the record, or merges `data` into the existing one. `ifNotExists: true` makes it insert-only (an existing id fails with `409`). `upsertOn: "<field>"` resolves the target by that field's value instead of by id.
 - **`patch`** merges `data` into an existing record; a missing record fails with `404`.
 - **`delete`** removes one record by id.
-- **`stringSets`** on `save`/`patch` seeds `stringset` fields: `{ tags: ["a", "b"] }`.
+- **`stringSets`** on `save`/`patch` seeds `stringset` fields: `{ tags: ["a", "b"] }`. A stringset stores each value once and reads back sorted by Unicode code point, not in the order you sent.
 
 ### Conditional writes (compare-and-swap)
 

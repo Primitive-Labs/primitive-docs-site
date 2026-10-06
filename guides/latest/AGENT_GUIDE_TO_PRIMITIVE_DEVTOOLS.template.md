@@ -607,4 +607,5 @@ agent-invoked check, not a gate the Linux CI enforces.
 
 - `Server-Timing: total;dur=<milliseconds>` reports server-side request duration.
 - Authenticated app responses use `Cache-Control: no-store`; avatar responses are publicly cacheable.
+- The clients send every request with the HTTP cache bypassed, so concurrent identical reads run in parallel. A direct `fetch` to the app API should pass `cache: "no-store"`; in the default cache mode a browser queues concurrent requests for one URL, one round trip each.
 - Blob downloads support `ETag` and conditional `If-None-Match` requests. Keep the original body yourself if reusing it after a `304`.

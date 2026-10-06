@@ -94,6 +94,7 @@ and push with `--prune` to delete it. See
 [Test Case Identity](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md).
 
 Verification types include substring `contains`, regex pattern, JSON subset, and LLM-as-judge.
+A run cut off at `maxTokens` fails its `Output complete` check.
 
 Use `primitive prompts preview` to inspect rendered text without a model call.
 Use `primitive prompts execute` for an admin test. `execute` can run a disabled
@@ -114,14 +115,17 @@ not modify the provider request.
 | `systemPrompt` | Instructions to the model. |
 | `userPromptTemplate` | Template rendered from input variables. |
 | `temperature`, `topP` | Sampling settings. |
-| `maxTokens` | Output token limit. |
+| `maxTokens` | Output token limit, sent to both providers; see [Reasoning budget](#reasoning-budget). An answer that reaches it carries `truncated: true`. |
 | `outputFormat` | Text or JSON output. |
 | `outputSchema` | Configuration-level schema; function result validation uses the prompt-level schema. |
 | `reasoningEffort`, `reasoningBudget` | Alternative reasoning controls; choose one. |
 | `strictOutput` | OpenRouter strict schema output; requires a compatible model and prompt output schema. |
 
 Chat keys go under `[configs.chat]`. A decisions configuration uses
-`[configs.decisions]` with `questions`. The prompt’s `kind` selects the block
+`[configs.decisions]` with `questions`. An agent configuration uses `[configs.agent]`
+with the chat keys above less `userPromptTemplate`, `outputFormat` and `outputSchema` — see
+[Agents](AGENT_GUIDE_TO_PRIMITIVE_AGENTS.md) for `kind = "agent"`'s own prompt-level
+contract (tools, events, turn context). The prompt's `kind` selects the block
 and is fixed at creation. Use `primitive config fields prompt` for field types.
 
 ## Typed output
@@ -404,9 +408,70 @@ a `400` at test-case create and update.
 ## Reasoning budget
 
 Choose `reasoningEffort` or `reasoningBudget` on a named configuration, then
-compare its test results and `metrics.reasoningTokens`. Support depends on the
-model. A numeric budget may become an effort level on models without native
-token budgets; measure actual usage instead of assuming an exact cap.
+compare its test results and `metrics.reasoningTokens`. A numeric budget may
+become an effort level on models without native token budgets; measure actual
+usage instead of assuming an exact cap.
+
+Each setting is translated per provider and model family:
+
+| Provider / family | `reasoningEffort` | `reasoningBudget` |
+| --- | --- | --- |
+| `openrouter` | `reasoning.effort`; `none` → `reasoning: { enabled: false }` | `reasoning.max_tokens` |
+| `gemini` 3.x | `thinkingConfig.thinkingLevel`; `none` refused | Refused; use `reasoningEffort` |
+| `gemini` 2.5 | `none` only → `thinkingBudget: 0` | `thinkingConfig.thinkingBudget` |
+| `gemini` 2.0 and earlier | Refused | Refused |
+
+`config push` refuses only those combinations. Which values a model accepts is
+the provider's call (see its model documentation): an unsupported value fails
+each run with the provider's message, `upstreamStatus: 400` and
+`PROMPT_UPSTREAM_REJECTED`.
+
+`maxTokens` bounds the completion differently per provider:
+
+- **Gemini** — sent as `generationConfig.maxOutputTokens`, which bounds
+  reasoning tokens and the answer together. A reasoning-enabled config can
+  spend the whole budget thinking before any answer text; the run reports
+  `truncated: true`, and with `outputFormat = "json"` it fails as
+  `PROMPT_OUTPUT_TRUNCATED`. Size `maxTokens` for the reasoning you expect
+  plus the answer, and check `metrics.reasoningTokens` against it.
+- **OpenRouter** — sent as `max_tokens`.
+
+## Retrying a failed call
+
+`ctx.prompts.run` returns a failure envelope instead of throwing, so calling
+it inside `step.do` does not retry it — only a thrown error does.
+`stepPolicy.llm` sets `retries: 0` on purpose: a retried timeout would bill
+the same generation twice (see [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md)
+for `stepPolicy`). To retry a transient failure, call the prompt inside
+`step.do` with your own `retries`, and throw only when the failure is worth
+another attempt — `upstreamStatus` 408, 429, 502, 503, or 504, or
+`errorCode: "PROMPT_UPSTREAM_TIMEOUT"`:
+
+```ts
+const RETRYABLE_UPSTREAM_STATUSES = [408, 429, 502, 503, 504];
+
+const result = await step.do(
+  "summarize",
+  { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
+  async () => {
+    const r = await ctx.prompts.run("summarizer", { variables: { text } });
+    if (
+      !r.success &&
+      (r.errorCode === "PROMPT_UPSTREAM_TIMEOUT" ||
+        RETRYABLE_UPSTREAM_STATUSES.includes(r.upstreamStatus ?? 0))
+    ) {
+      throw new Error(r.error ?? "prompt upstream failure"); // retry
+    }
+    return r; // not retryable — return the failure
+  }
+);
+if (!result.success) throw new Error(result.error ?? "prompt failed");
+```
+
+Return the failure for anything else — a shape failure
+(`PROMPT_OUTPUT_NOT_JSON`, `PROMPT_OUTPUT_SCHEMA_VIOLATION`), a refused
+config, or a provider error with no `upstreamStatus` — so a non-transient
+failure is not retried for no benefit.
 
 ## Gotchas
 
@@ -414,9 +479,17 @@ token budgets; measure actual usage instead of assuming an exact cap.
 - Check `success` before reading `parsed`. Shape failures return
   `PROMPT_OUTPUT_NOT_JSON` or `PROMPT_OUTPUT_SCHEMA_VIOLATION`; the model call
   still occurred and may be billed.
+- An answer that stopped at `maxTokens` carries `truncated: true` on either
+  arm. A cut-off text answer is still `success: true` with partial `output`; a
+  cut-off JSON answer, or an empty completion at the limit, fails with
+  `PROMPT_OUTPUT_TRUNCATED`. Raise `maxTokens` instead of rewording the prompt.
+  On Gemini, reasoning tokens count against the same limit: leave headroom or
+  set a reasoning budget.
 - Provider failures include `upstreamStatus` when available. A timeout uses
-  `PROMPT_UPSTREAM_TIMEOUT`. Retry transient failures only within the remaining
-  function budget.
+  `PROMPT_UPSTREAM_TIMEOUT`; a request the provider refused (`upstreamStatus`
+  400, such as a reasoning level the model does not support) uses
+  `PROMPT_UPSTREAM_REJECTED` — fix the configuration, do not retry. See
+  [Retrying a failed call](#retrying-a-failed-call).
 - Declare `[prompt.outputSchema]` for typed function output. A configuration’s
   schema does not replace that validation contract.
 - Removing optional configuration fields clears their values. Omitting a

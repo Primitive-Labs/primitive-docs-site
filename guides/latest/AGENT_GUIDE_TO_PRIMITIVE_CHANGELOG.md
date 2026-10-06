@@ -6,13 +6,86 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ## Unreleased
 
+### Server functions
+
+- `client.functions.listRuns` lists the task runs the signed-in user started, filtered by function, status or document, and `listRunSteps` lists one run's steps, in both clients.
+- A document `batch`, `ctx.api.documents.records.bulk` and `primitive documents records bulk` accept an `upsert` operation that addresses a record by a declared unique constraint, compound or single-field: the record holding those values gets only the supplied fields, and a missing one is created. The result's new `upserted` list gives each upsert's record `id` and whether it was `created`.
+- A task run that shows no progress for 30 minutes is ended `failed` with the new `errorCode` `FUNCTION_STALLED`, so polling a run never needs a timeout of its own. A step's own `timeout` and retry delay extend the wait, and sleeps, event waits and retry delays never count.
+- A task run's `slice` block adds `lastProgressAt`, `openStep`, `openStepStartedAt` and `parkedAt` in both clients, and `primitive functions runs` shows a `LAST PROGRESS` column.
+- An integration call made inside a server function's `step.do` names its step in `primitive integrations logs`: a STEP column, `--step <name>` to filter, and `correlation.stepId`, `correlation.stepOccurrence` and `detail.stepAttempt` under `--json`.
+- **Breaking:** `ctx.api.documents.blobs.uploadWithoutId` is removed from `primitive-functions`; it only ever answered 405. Upload with `ctx.api.documents.blobs.upload` and a `blobId` you choose. The server no longer serves `PUT /documents/{documentId}/blobs` without an id.
+- A server function lists what a named member holds, page by page: `ctx.api.documents.listOwnedByUser`, `ctx.api.documents.listSharedWithUser` and `ctx.api.collections.listForUser`, each taking a `userId`. Over REST they are `GET /users/{userId}/owned-documents`, `/shared-documents` and `/collections`, for an app owner or admin.
+- **Fixed:** A webhook delivery signed with a newly created `{{secrets.KEY}}` signing secret verifies right away, instead of being refused with `401` for up to a minute.
+- **Fixed:** `primitive functions codegen --lang swift` leaves unchanged output files untouched, so an Xcode build no longer recompiles the whole app every time.
+
+### Large documents
+
+- The JavaScript client asks the browser to keep a large document's local copy when it first opens one, and `client.getLargeDocumentStorage()` reports the browser's answer as `persistence`.
+- **Fixed:** A large document's stats report the exact size of its stored records, with `sizeBasis` saying what the size measures, instead of a figure that dropped after each snapshot.
+- **Fixed:** A JavaScript client that held a large document across a server archive no longer re-sends the archived writes, which made the document's export and storage grow.
+- **Fixed:** In the Swift client, opening a large document the device has never held resolves only once its records are queryable, instead of reporting `isSynced` with no rows; an `openDocument` that waits on the network always resolves or throws `.networkTimeout` within `availabilityWait`, and `setLogLevel(.debug)` traces each open.
+
+### Documents
+
+- An app admin, in-app or console, can delete any document of the app directly with `documents.delete`, as an app owner already could.
+- **Fixed:** A compound unique constraint holds across writers: a record saved by a server function, a workflow, the REST API or the CLI now blocks a client save of the same values, and the reverse.
+- **Fixed:** `me.sharedDocuments()` no longer skips documents when paging with a small `limit`. A page can now be short or empty while `hasMore` is `true`; keep following `nextCursor`.
+- **Fixed:** The dev tools' Document and Blob explorers and the Swift `PrimitiveAppState.fetchDocuments()` list every owned and shared document, not only the first page of each.
+
+### Collections
+
+- **Breaking:** Collection `contextId` is removed from the API, rules, both clients and the CLI; bind a collection to an outside entity with `initialMetadata` on create and read it in rules as `md.self.<category>.<key>`.
+- **Breaking:** Collection names are labels, not unique within an app, so creating or renaming a collection never answers a name `409`, and `primitive collections import` refuses a name that more than one target collection carries.
+- **Fixed:** A collection's `documentCount` stays accurate when documents are added to or removed from it at the same time.
+- **Fixed:** Deleting or unsharing a collection shared with a group, removing a document from it, and revoking a document's group grant no longer fail with `403` on older grants.
+
+### Users and groups
+
+- `groups.create` accepts `initialMetadata` in both clients, `ctx.api.groups.create` and `primitive groups create --initial-metadata`, and a group rule set can gate the create on it, as collections do.
+
 ### Locks
 
 - A server function waits for a named lock with `ctx.locks.acquire`, or runs code under it with `ctx.locks.withLock`, and the JavaScript and Swift clients' blocking `acquire` waits on the server through the acquire route's new `waitMs`.
 
-### Server functions
+### Prompts
 
-- **Breaking:** `ctx.api.documents.blobs.uploadWithoutId` is removed from `primitive-functions`; it only ever answered 405. Upload with `ctx.api.documents.blobs.upload` and a `blobId` you choose. The server no longer serves `PUT /documents/{documentId}/blobs` without an id.
+- A prompt run whose answer stopped at the configuration's `maxTokens` carries `truncated: true`, on success and on failure, from `ctx.prompts.run`, the member execute route and `primitive prompts execute`. A cut-off JSON answer, or a completion that used the whole limit and returned nothing, fails with the new `errorCode` `PROMPT_OUTPUT_TRUNCATED` instead of `PROMPT_OUTPUT_NOT_JSON` or `PROMPT_OUTPUT_SCHEMA_VIOLATION`; raise `maxTokens`. `primitive prompts execute` prints a warning, and a prompt test run cut off at the limit fails its `Output complete` check.
+- **Breaking:** `config push` refuses a prompt `[[configs]]` entry that writes chat keys at its root or marks the live config with `isActive`, so move those keys under `[configs.chat]` and write `active = true`.
+- **Fixed:** OpenRouter chat configurations now send `maxTokens` to the provider, so a configuration that sets it is capped at that many output tokens.
+- **Fixed:** `config push` no longer refuses a reasoning setting because of which values a particular model supports; the provider decides. A value the model refuses fails the run with the provider's message, `upstreamStatus: 400` and the new `errorCode` `PROMPT_UPSTREAM_REJECTED`, from `ctx.prompts.run`, the member execute route and `primitive prompts execute`. A provider `400` on any prompt run carries that code.
+
+### Sign-in and sessions
+
+- **Breaking:** `magicLinkRequest`, `otpRequest` and their routes are removed, and the auth and app config report only `emailSignInEnabled`; start email sign-in with `emailSignInRequest`.
+
+### API and clients
+
+- **Breaking:** The database CEL context, deprecated in the last release, is removed: `getCelContext`/`updateCelContext` and the database `metadata` methods in both clients, `primitive databases cel-context` and `databases create --cel-context`/`--metadata`, the `databases/{databaseId}/metadata` routes, and `celContext`/`metadata` on database responses. A rule that still references `database.celContext` or `$database.metadata` is refused when saved.
+- **Breaking:** List responses drop the deprecated `cursor` alias and the `grants`, `admins`, `apps`, `documents` and `databases` array keys, so read rows from `items` and page with `nextCursor`.
+- **Breaking:** The deprecated `admin-data/*` database record routes and `ctx.api.databases.adminData` in `primitive-functions` are removed; use the `records/*` routes and `ctx.api.databases.records`.
+- **Breaking:** The deprecated `primitive databases permissions grant` and `revoke` commands and the JavaScript client's `databases.grantPermission` and `revokePermission` are removed; use `primitive databases permissions add-manager` / `remove-manager`, or `ctx.api.databases.addManager` / `revokePermission` from a server function.
+- **Breaking:** The JavaScript client removes `FunctionWaitForResult`, `documents.createOffline`, `waitForSync` and `updateLocalSnapshotFlag` (use `FunctionRunSettled`, `documents.create` and `waitForInitialSync`), and both clients drop `user_created_at_epoch_s` from analytics event input.
+- **Breaking:** In the Swift client, an HTTP call made while the client is offline throws `JsBaoError` with code `.offline` without sending the request, as the JavaScript client does, so code that detects a missing network by catching `JsBaoNetworkError` must also catch `.offline`.
+- **Fixed:** The JavaScript client bypasses the browser's HTTP cache on every request, so concurrent reads of the same resource no longer wait on one another.
+
+### Configuration and CLI
+
+- **Scoped CLI logins and admin step-ups.** `primitive login --scope <list> [--app <ids>]` asks for a session limited to those scopes and pinned to those apps, granted only after you approve it on a console page that names them. `--scope admin` asks for a 15-minute step-up held beside your login; a command refused for lacking `admin` retries once with it, and `primitive logout` ends it too. `primitive token --scope <list> [--app <ids>] [--ttl <d>]` prints a narrower token for a script or agent, with no browser unless the request is wider than your login. `primitive whoami` shows the session's kind, scope and pinned apps and any step-up, and `primitive auth sessions list` shows `step-up` sessions and `pending` approvals.
+- **CI sessions.** `primitive auth sessions create --name <name> --scope <list> --app <ids> [--ttl <d>]` creates a named admin token for a CI job once you approve it in the browser, and prints it once. It is pinned to its apps, never holds `admin`, and lives 90 days unless `--ttl` says otherwise, at most 1 year. Run the CLI with it in `PRIMITIVE_TOKEN`, with no credentials file; it works on the admin and app APIs and WebSocket connections within its scope and pins. `primitive auth sessions list` shows it with its name, and once revoked its token fails on its next request.
+- **Protected apps.** `protected = true` under `[app]` in `app.toml` marks an app as live with real users; `config push` applies it, and `primitive apps get`, `GET /settings`, the admin app object and the web-admin dashboard show it. Only the app's console owner can set or clear it: anyone else's change — a console admin's, or any app-user token's — is refused with `403 PROTECTED_FLAG_OWNER_ONLY` and nothing is applied, while a body carrying the current value saves as before. A value that is not a boolean is a `400`. A pulled `app.toml` always states the flag; a file without the line pushes `false`.
+- **Root documents as large documents.** `rootDocumentFormat = 2` under `[app]` in `app.toml` creates each new user's root document as a large document; omit it, or set `1`, for an ordinary root. Existing root documents keep their format. `GET /settings` and the admin app object report it, and a value other than `1`, `2` or empty is refused with `400 INVALID_ROOT_DOCUMENT_FORMAT`.
+- `primitive documents import` installs a large root-document export into the target user's large root document, and refuses a root export whose format differs from the target root's, naming both, before writing anything for it. The admin root-document routes report `documentFormat: 2` for a large root.
+- **Breaking:** Database, collection and group type configs name their rule set with `ruleSetName` in TOML; `config push` refuses a `ruleSetId` line there.
+- **Breaking:** A blob bucket's `accessPolicy` is removed from bucket TOML, the bucket API and both clients and is refused with `400 RETIRED_REQUEST_KEY`, so set `preset` (`public`, `authenticated` or `admin-only`) instead.
+- **Breaking:** A prompt or integration test case names its configuration and judge prompt only by `configName`, `evaluatorPromptKey` and `evaluatorConfigName`, and `config push` refuses a case file that carries `configId`, `evaluatorPromptId` or `evaluatorConfigId`.
+- **Deprecated:** `ruleSetId` in a blob bucket's TOML; name the rule set with `ruleSetName`, which `config push` resolves in the app you push to, so the same files work in every environment.
+- **Fixed:** `config pull` leaves a file untouched when `config diff` reports it in sync, so its comments, key order and explicit defaults survive the pull. Files that differ from the server are still rewritten, and the pull summary reports how many files were written and how many were left unchanged.
+- **Fixed:** `primitive documents export` and `export-all` no longer report success when a document's permissions, pending invitations, aliases or blob list can't be read. A 404 still means "none"; a transient failure is retried, and any other failure names the document and exits non-zero. `export-all` exports the remaining documents and lists the failed ones. A document with more than one page of blobs now exports all of them, not just the first page.
+
+### Starter templates
+
+- **Breaking:** The Vue template's `pnpm cf-deploy` refuses a bare environment name; name both environments with `--deploy-env` and `--primitive-env`.
+- **Fixed:** The dev tools overlay keeps its own colors and fonts instead of taking on the app's theme.
 
 ## 2026-09-30
 

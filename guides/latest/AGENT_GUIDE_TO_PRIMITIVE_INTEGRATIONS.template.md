@@ -72,7 +72,15 @@ before using the result.
 primitive integrations test <integration-id> --path /current
 primitive integrations logs <integration-id>
 primitive integrations logs <integration-id> --run <run-id>
+primitive integrations logs <integration-id> --run <run-id> --step <name>
 ```
+
+A call made inside a function's `step.do` names its step: the STEP column, and
+under `--json` `correlation.stepId`, `correlation.stepOccurrence` (which use
+of the name, from 0) and `detail.stepAttempt` (which run of the body, from 1).
+The attempt is the function log's own count, so it restarts at 1 after the
+task pauses. A step name is recorded with secret values redacted; it is
+dropped when a declared secret cannot be loaded or the name exceeds 256 bytes.
 
 Create regression cases in `integrations/<key>.tests/<case>.toml` and push
 before running them. `inputVariables` contains the request object as JSON text:

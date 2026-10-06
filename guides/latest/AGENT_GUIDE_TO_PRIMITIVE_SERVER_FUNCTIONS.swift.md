@@ -5,7 +5,9 @@ point and access rule in `functions/<key>.toml`, then deploy with
 `primitive config push`.
 
 Choose `functions.invoke` for a result in the request or `functions.start` for
-a background task. Webhooks use requests; cron schedules start tasks.
+a background task. Webhooks use requests; cron schedules start tasks. `invoke`
+has a wall-clock budget — 5 000 ms by default, 30 000 ms at most — so work that
+can exceed 30 000 ms has to be a task.
 
 ## The config file
 
@@ -89,7 +91,7 @@ uses an HTTP error. Use `invocationId` to locate its log.
 | `contextDocId` | The document the invocation concerns. |
 | `meta` | Caller metadata, up to 1 KB. |
 | `timeoutMs` | Request deadline: 5 000 ms default, 30 000 ms maximum. |
-| `runKey` | Deduplicates task starts; ignored by request invocations. |
+| `runKey` | Deduplicates task starts; ignored by request invocations. A *failed* run keeps its key — retry with a new one. |
 
 ### The access gate
 
@@ -156,6 +158,58 @@ and `step.waitForEvent` is unavailable.
 Check `status` before reading a result. Failed runs resolve with
 `status: "failed"`; inspect `error.code` and `error.message`.
 
+Do not build a staleness timeout around a run. One that shows no progress for
+30 minutes is ended with `FUNCTION_STALLED`. The 30 minutes start once the open
+step's own `timeout` and next retry delay have passed; sleeps, event waits and
+retry delays never count.
+
+### Finding a user's runs
+
+List the signed-in user's task runs with `functions.listRuns`, and one run's
+recorded steps, oldest first, with `functions.listRunSteps`:
+
+```swift
+  // Every run this user started against the document, a page at a time.
+  let page = try await client.functions.listRuns(
+    options: FunctionRunListOptions(contextDocId: documentId, limit: 20)
+  )
+  for run in page.items {
+    print(run.functionKey ?? "", run.runId, run.status, run.startedAt ?? "")
+  }
+  if let cursor = page.nextCursor {
+    // Same filters, plus the cursor, for the next page.
+    _ = try await client.functions.listRuns(
+      options: FunctionRunListOptions(contextDocId: documentId, cursor: cursor)
+    )
+  }
+
+  // One function's runs that are still in flight.
+  let running = try await client.functions.listRuns(
+    options: FunctionRunListOptions(functionKey: "order-sync", status: "running")
+  )
+
+  // What a run has done so far, oldest step first.
+  if let first = running.items.first {
+    let steps = try await client.functions.listRunSteps(runId: first.runId)
+    for step in steps.items { print(step.stepId ?? "", step.status) }
+  }
+```
+
+| Option | Use |
+| --- | --- |
+| `contextDocId` | Runs started against this document. |
+| `functionKey` | One function's runs; matched exactly. |
+| `status` | `queued`, `running`, `completed`, `failed`, `terminated` or `missing`. |
+| `limit` | Page size: 50 by default, 200 at most. |
+| `cursor` | The previous page's `nextCursor`, sent with the same filters. |
+| `forward` | `true` reverses the order. |
+
+The list holds only the caller's own runs, never trigger-started ones. It is in
+storage order, not start order: most recently updated first, or, with
+`contextDocId`, by status and then newest first. Sort by `startedAt` for start
+order. Over REST, `GET functions/runs` answers `400` for an unknown query
+parameter.
+
 ### Step discipline
 
 The engine re-executes your handler from the top on every resume and replays
@@ -177,18 +231,40 @@ Choose how the task exposes its result:
 - **Return output.** Read it with `getStatus`, `waitFor`, or
   `primitive functions runs wait`. Results remain on the run for 45 days.
 - **Save state.** Write records or notifications inside a step for results the
-  app should retain.
+  app should retain. Return what the step wrote — `{ wrote: true, recordId }`
+  or `{ wrote: false, reason }` — so the run's output states the outcome
+  without a second lookup.
 - **Send a live message.** Use `ctx.users.send` for connected clients. Pair it
   with saved state when offline clients need the result later.
 
-Task completion does not automatically send a WebSocket message.
+Task completion does not automatically send a WebSocket message, and there is
+no feature that pushes a run's settlement to the client — the three options
+above are it.
+
+- **For "the task's write landed":** don't poll run status for this. A client
+  with the context document open already has a
+  [subscription](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#subscribe-to-changes) on
+  the model the task writes; that callback fires when the write syncs in, same
+  as any other write to an open document.
+- **For "the run finished":** call `ctx.users.send(ctx.user.userId, …)` as the
+  run's last step, after the work it reports on has committed — a connected
+  starter gets it immediately. It never fires for a platform failure
+  (`ENGINE_*`, `FUNCTION_STALLED`, a reset that exhausts retries), so keep
+  `waitFor` as the fallback that still answers when the send doesn't happen.
 
 ### Run error codes
 
 A failed run carries a **code** beside its message: `run.errorCode` on the run
 row, and `error.code` on the function run status both clients read. It is a
 closed set the platform owns, so you can branch on it rather than matching
-prose.
+prose — and it has no slot for an outcome your own code expects.
+
+For that, return a typed result instead of throwing — `{ ok: false, code,
+message }`, shaped however the app needs — and read it from `output` like any
+other result. Throwing is for what the handler did not expect: an uncaught
+throw settles the run `FUNCTION_THREW`. Inside `step.do`, throw only when the
+failure should spend one of the step's retries; a returned failure result is
+never retried.
 
 For a terminal `ENGINE_*` failure, start a new run with a new `runKey` if the
 work should be retried. Keep side effects idempotent because the failed run
@@ -206,6 +282,7 @@ may have completed some work. Report repeated platform failures.
 | `OUTPUT_TOO_LARGE` | The output exceeds the 1 MiB platform ceiling. | Page the result, or write it to a database and return a handle. |
 | `FUNCTION_DELETED` | The function was hard-deleted while the run was starting. | Nothing to retry: the stored bundle the run pinned is gone. |
 | `FUNCTION_RUNTIME_REFUSED` | The code refused the runtime it was handed (`assertRuntime`), or a request invocation's `step` was asked for a wait its budget cannot cover. | Call it the other way — `invoke` for a request, `start` for a task. |
+| `FUNCTION_STALLED` | The run showed no progress for 30 minutes past its open step's own `timeout` and retry delay, so the platform ended it. The message names the step. | Give the step's awaits a timeout of their own, or split the step. A step that needs longer sets its own `timeout` in `step.do`. Start a new run with a new `runKey` if the work still needs doing. |
 | `ENGINE_ISOLATE_EVICTED` | The execution environment was reset. | Retry with a new run key and idempotent steps. |
 | `ENGINE_CODE_UPDATED` | A platform update interrupted execution and retries were exhausted. | Retry with a new run key and idempotent steps. |
 | `ENGINE_STORAGE_ERROR` | Task storage failed. | Retry with a new run key and idempotent steps. |
@@ -284,8 +361,11 @@ Use steps to divide work and `step.sleep` when the task needs to wait. For
 CPU-heavy work, a sleep longer than five minutes starts a fresh slice after
 hibernation. Output limits and `outputSchema` apply to the final result.
 
-The run status includes a `slice` block with timing and refresh counts.
-`functions runs` shows the count in `REFRESHES`.
+The run status includes a `slice` block with timing, refresh counts and
+progress: `lastProgressAt` is when the run last did something, such as
+starting or finishing a step; `openStep` and `openStepStartedAt` name the step
+it is inside (`charge#0` is the first `step.do("charge", …)`); `parkedAt` is
+set while it waits. `functions runs` shows `REFRESHES` and `LAST PROGRESS`.
 
 ### Deleting a function with live runs
 
@@ -350,8 +430,10 @@ Declare `integration:<key>` in capabilities, then call
 supplies credentials and restricts the destination, methods, and paths.
 
 Check the response’s `errorCode` before using `body`. Calls are bounded by the
-function’s remaining time. See [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md)
-for configuration and examples.
+function’s remaining time. Each call is logged with its run and, inside
+`step.do`, its step (`primitive integrations logs <integration-id> --run <run-id> --step <name>`).
+See [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md) for configuration
+and examples.
 
 ## Running a prompt
 
@@ -518,11 +600,55 @@ Use registered queries to share validated database operations. See the
 and `batch`. A document batch applies one model’s operations atomically. Use
 `ctx.api.documents.records.bulk` for multiple models.
 
-### A member's root document and user-scoped aliases
+To sync external rows, use `{ action: "upsert", constraint, data }`: `constraint`
+names a declared unique constraint (`<model>_<field>_unique` for a `unique`
+field), and `data` carries its fields. The holder gets only the supplied
+fields; a missing record is created. The result's `upserted` lists `{ index,
+model, id, created }` per upsert. `data` must not carry `id`, and a constraint
+over `id` is refused (400).
+
+### A member's documents, collections and aliases
 
 Triggered functions have no caller. Pass `userId` explicitly to
 `ctx.api.users.getRootDocument` and user-scoped alias operations. A root
 lookup can return `rootDocId: null`; it does not create a document.
+`ctx.api.users.setProfile({ userId, body: { name, avatarUrl } })` sets a
+member's display name and avatar (`avatarUrl` is an `http:` or `https:` URL;
+`null` clears it).
+
+List what a named member holds:
+
+| Call | Answers |
+| --- | --- |
+| `ctx.api.documents.listOwnedByUser({ userId })` | Owned documents (`me.ownedDocuments()` rows); `includeRoot: true` adds the root document. |
+| `ctx.api.documents.listSharedWithUser({ userId })` | Documents shared directly with the member (`me.sharedDocuments()` rows). |
+| `ctx.api.collections.listForUser({ userId })` | Collections the member belongs to, with `permission`. |
+
+All take `limit` and `cursor`; the document lists take `tag`. A non-member
+throws 404.
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await ctx.api.documents.listOwnedByUser({ userId, cursor });
+  for (const doc of page.items) await ctx.api.documents.delete({ documentId: doc.documentId });
+  cursor = page.hasMore ? page.nextCursor : undefined;
+} while (cursor);
+```
+
+Gotchas:
+
+- **Loop on `hasMore`.** A page can be short or empty while `hasMore` is
+  `true`; stopping on an empty page leaves documents unlisted.
+- **No capability gates these calls.** Any caller the function's `access` rule
+  admits can list any member's holdings, so keep such a function admin-only or
+  trigger-only.
+- **Shared means direct, applied grants.** `listSharedWithUser` excludes the
+  root document, group- or collection-only access, and an email share not yet
+  applied to the member; it never applies one. `me.sharedDocuments()` applies
+  pending email shares when the member lists their own.
+- **`ctx.api.collections.list()` is the invoking user's.** It answers nothing
+  on a trigger; use `listForUser`.
 
 ### A function may be a document's first writer
 
@@ -628,7 +754,9 @@ primitive functions runs steps <function-id> <run-id>
 ```
 
 Logs include output, errors, version, and timing, with step and attempt labels
-where applicable. Owners and admins can read them for seven days.
+where applicable. The attempt counts body runs since the task last paused and
+restarts at 1 after a pause; integration calls made in the body carry the same
+attempt. Owners and admins can read them for seven days.
 
 A shortened record ends with
 `… truncated: the platform's per-record cap dropped later lines`.
