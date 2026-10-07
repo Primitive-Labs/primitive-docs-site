@@ -80,6 +80,20 @@ Configure deployment environments and Primitive environments independently.
 
 **Another Primitive environment:** `primitive env add alpha --api-url ... --app-id ...`, then name it with `--primitive-env alpha`. Nothing in `wrangler.toml` or `.env.*` changes.
 
+### Preview a branch against a child app
+
+A [child app](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#child-apps) (`primitive apps children create feature-x`) is a copy of the parent app for one branch. Upload a preview version of the worker under an alias instead of deploying, to run that branch's front end against it:
+
+```bash
+pnpm cf-deploy --deploy-env production --primitive-env feature-x --preview-alias feature-x
+```
+
+This uploads the version with the child's app ID, prints the preview URL (`https://feature-x-my-app-prod.your-subdomain.workers.dev`), and adds that origin to the child's preview origins, so its CORS and email sign-in checks accept it. The live worker is untouched; running the same command again after a change keeps the same alias URL. `--check` prints the upload and the registration without running them.
+
+- Against a committed environment, `--preview-alias` registers nothing — add the origin to `[cors].allowedOrigins` and `[auth].emailRedirectUris` in that environment's `app.toml` and push to sign in from it there.
+- If registering the preview origin fails, the upload still succeeds; the command prints the registration to run by hand.
+- A deploy to a child **without** `--preview-alias` prints a warning and proceeds anyway — it replaces the live worker of that deploy environment for everyone.
+
 ### Pinning a deploy environment to a Primitive environment
 
 Opt-in, for apps whose `.env.<mode>` keys are only correct against one backend (per-environment resource IDs and the like). Declare the pairing in that mode's file:
@@ -89,7 +103,7 @@ Opt-in, for apps whose `.env.<mode>` keys are only correct against one backend (
 VITE_EXPECTED_PRIMITIVE_ENV=prod
 ```
 
-Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too.
+Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too. A child app's machine-local environment pairs with the mode that declares its parent: under `VITE_EXPECTED_PRIMITIVE_ENV=prod`, a child of `prod` runs and a child of `dev` is refused.
 
 Use `VITE_EXPECTED_PRIMITIVE_ENV` when a mode contains backend-specific settings. A mode’s `.env` file overrides the base value; an empty value disables the check for that mode. A process environment value overrides the files. Builds supplied with both `VITE_APP_ID` and `VITE_API_URL` resolve no Primitive environment; `cf-deploy` rejects those overrides.
 

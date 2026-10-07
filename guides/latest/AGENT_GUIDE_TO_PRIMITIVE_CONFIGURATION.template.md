@@ -17,6 +17,49 @@ Confirm the target with `primitive env show`. Each environment binds an API URL
 and app ID in `primitive/config.json`. Select it with `--env <name>` or
 `PRIMITIVE_ENV`; `primitive env use <name>` saves a machine-local selection.
 
+## Child apps
+
+A child app is a copy of the current environment's app — its `mode`, settings
+and (unless `--no-secrets`) secrets — owned by whoever creates it and deleted
+automatically once idle (7–30 days, 30 by default; it's warned by email
+first). Use one per developer per branch.
+
+```bash
+primitive apps children create feature-x   # create, register, select, push the tree
+primitive apps children list                # this app's children
+primitive apps children get feature-x       # one child, and its local status
+primitive apps children delete feature-x --yes
+```
+
+`create` takes `--branch <name>` (default: the checkout's current git
+branch), `--idle-days <n>` (7–30), `--no-secrets`, and `--no-use`. It fails
+closed: a create that errors on the server leaves no child behind.
+
+A child is registered on this machine as a machine-local environment named by
+its slug, sharing its parent's `primitive/<env>/` tree but keeping its own
+sync-state baseline and snapshot backups — `config pull`, `push`, and `diff`
+on a child never touch the parent's committed state. With a child selected,
+those three commands act on the child itself, but every `apps children`
+command acts on its **parent**, so running `create` again makes a sibling,
+not a grandchild. A pull on a child never writes `[app].name`, so a branch
+merged back into the parent's tree keeps the parent's name.
+
+A teammate attaches a child another admin created with
+`primitive env use feature-x`. A name that is already a committed environment
+or an existing local entry is just selected, as usual; otherwise `env use`
+looks the name up as a child slug of the current environment's app, and if
+found, registers it, copies the login, and selects it in one step. It
+refuses an unknown slug, and refuses a known one only when that child's app
+id is already registered here under a different name.
+
+`primitive apps list` shows parent apps only; `--all` includes children.
+Deleting a parent with children is refused, naming them;
+`primitive apps delete <app-id> --with-children` deletes each child, then the
+parent, stopping before the parent on the first child it can't delete.
+
+See the deploying guide's [Preview a branch against a child app](AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.md#preview-a-branch-against-a-child-app)
+for previewing a child's front end.
+
 ## Authoring
 
 ```bash

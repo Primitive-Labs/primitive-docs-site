@@ -190,6 +190,36 @@ Declared `events` are recorded by a member (`POST .../events`) or
 starts a turn; it reaches the model in a later turn's history, in arrival order. A repeated
 `eventId` with the same payload records nothing further; a different payload is refused.
 
+## Limits and history
+
+`[prompt.agent]` lowers three limits, never raises them: `maxSteps` (model rounds per turn,
+max 25), `waitLimitSeconds` (how long a paused call may wait, max 604800) and `maxRowBytes`
+(JSON bytes of one conversation row, max 262144). A tool result or client answer that would
+take its row past `maxRowBytes` is not written and the turn fails `AGENT_TURN_ROW_TOO_LARGE`
+— keep tool output small and attach the bulk with `ctx.tool.attachArtifact`.
+
+`[prompt.agent.history]` selects what the model sees of earlier turns; without it, the model
+sees all of them. One key only — `config push` refuses a table with both:
+
+```toml
+[prompt.agent.history]
+maxHistoryChars = 40000     # whole earlier turns drop, oldest first, until the rest fits
+```
+
+```toml
+[prompt.agent.history]
+function = "advisor-history"
+```
+
+The history function is a hook like `turnContext.function`, run as the turn's initiator
+before every model call with `input.variables`, `input.timezone`, `input.locale` and the
+candidate `input.messages`. Return `{ messages: [...] }`: each entry is `{ messageId }` for
+a message you were given (sent in the order you list them) or `{ text }` for text of your
+own, such as a summary of what you dropped. An empty list, an unknown `messageId` or any
+other shape fails the turn `AGENT_TURN_HISTORY_INVALID`; a thrown error fails it
+`AGENT_TURN_HISTORY_FAILED`. Whichever way it is selected, a history that still does not fit
+the model's context fails the turn `AGENT_HISTORY_TOO_LARGE`.
+
 ## Create a session from a server function
 
 ```ts
@@ -279,6 +309,8 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | `AGENT_CALL_ANSWERED` | A second answer to a call that already has one. |
 | `AGENT_TURN_STALE` | `cancel`/an answer named a `turnId` that is no longer active. |
 | `AGENT_ARTIFACT_TOO_LARGE` | `ctx.tool.attachArtifact` over 4 MiB of JSON. |
+| `AGENT_TURN_ROW_TOO_LARGE` | A tool result or client answer would make its row larger than `maxRowBytes`; the turn fails. |
+| `AGENT_HISTORY_TOO_LARGE` | The selected history does not fit the model's context; add or tighten `[prompt.agent.history]`. |
 | `AGENT_SESSION_DOCUMENT_MISSING` | The session's document was deleted directly; every operation but delete answers this. |
 
 ## Gotchas

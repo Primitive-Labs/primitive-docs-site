@@ -6,6 +6,21 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ## Unreleased
 
+### Agents
+
+- An agent is a prompt of `kind = "agent"` declared in TOML and shipped with `config push`: it names the server functions and client tools the model may call, the events members record, its turn context and its limits, with model settings on a `[configs.agent]` configuration.
+- A server function creates a session with `ctx.agents.createSession` from a signed-in member's call, and members then use it through `client.agents.sessions` in the JavaScript and Swift clients: `open` returns a live view of the conversation with `onChange`, and `send`, `answer`, `recordEvent`, `cancel`, `rename`, `addMember` and `removeMember` act on it.
+- A tool can require a person's approval or be answered by the member's client, pausing the turn until the first valid answer, and `ctx.tool.attachArtifact` keeps an app-only value beside the call that the model never sees.
+- A turn's context — a server function's return or the send's own `context`, validated against the agent's schema — renders as `turn.*` in the system prompt, with the send's timezone and language as `turn.timezone` and `turn.locale`; an agent selects what the model sees of earlier turns with a history function or `maxHistoryChars`.
+- App owners and admins list, inspect and delete any member's sessions with `primitive agent-sessions list`, `get` and `delete`.
+
+### Child apps
+
+- `primitive apps children create <slug>` creates a child app of the current environment's app for a branch — a copy of its settings and, unless `--no-secrets`, its secrets — pushes the tree into it and selects it as a machine-local environment that `config pull`, `push`, `diff`, `pnpm dev` and the deploy scripts resolve with no other setup; `apps children list`, `get` and `delete` manage it, another parent admin attaches it with `primitive env use <slug>`, and `primitive apps list --all` includes children.
+- Every admin of the parent uses a child's admin and app APIs without an invitation; only the child's owner or the parent's console owner deletes it, and `primitive apps delete <app-id> --with-children` deletes an app's children before the app.
+- A child is deleted after `--idle-days` (7–30, default 30) without a config push, an interactive sign-in or a person-started function invocation; its owner is emailed at least seven days before, and any such activity renews it.
+- `pnpm cf-deploy --deploy-env <env> --primitive-env <child> --preview-alias <name>` in the Vue template uploads a preview version of the worker under that alias with the child's app id, prints its URL and registers the origin on the child, so its CORS and email sign-in checks accept it while the live worker is untouched.
+
 ### Server functions
 
 - `client.functions.listRuns` lists the task runs the signed-in user started, filtered by function, status or document, and `listRunSteps` lists one run's steps, in both clients.
@@ -20,17 +35,28 @@ User-visible changes in each production release of the Primitive platform, newes
 
 ### Large documents
 
+- **Breaking:** In the browser, a tab left open across this release must reload before it can open a large document again: the local store now commits many saves together, so a burst such as an import finishes much faster, and an older client library's open is refused with no local data lost; do not downgrade the client library past this release for large documents.
 - The JavaScript client asks the browser to keep a large document's local copy when it first opens one, and `client.getLargeDocumentStorage()` reports the browser's answer as `persistence`.
+- Node clients apply a large document's writes faster: the statements a save runs are compiled once per executor and reused.
 - **Fixed:** A large document's stats report the exact size of its stored records, with `sizeBasis` saying what the size measures, instead of a figure that dropped after each snapshot.
 - **Fixed:** A JavaScript client that held a large document across a server archive no longer re-sends the archived writes, which made the document's export and storage grow.
 - **Fixed:** In the Swift client, opening a large document the device has never held resolves only once its records are queryable, instead of reporting `isSynced` with no rows; an `openDocument` that waits on the network always resolves or throws `.networkTimeout` within `availabilityWait`, and `setLogLevel(.debug)` traces each open.
+- **Fixed:** Two documents that each hold a record with the same id keep their own records in the client's local query tables, so a `count()` or `query()` scoped to one of them no longer comes back short; a local store written by an earlier release is rebuilt on its next open and keeps every row.
+- **Fixed:** Writes to a large document no longer stall while it is being imported or its snapshot is built, and a Swift client whose write is refused just after the document's epoch moves catches up and keeps writing instead of stopping with `FORMAT2_RELOAD_REQUIRED`.
+- **Fixed:** A record save through the REST API, a server function, a workflow or the CLI that lands just as a large document's epoch rotates is planned again on the new epoch instead of failing with `save record failed`.
 
 ### Documents
 
+- **Breaking:** `documents.validateAccess` on a document the server does not hold — deleted, never existed, or in another app — answers `404 NOT_FOUND` in both clients instead of `DOCUMENT_DELETED`; on a document whose create has not yet reached the server it waits for the commit and answers `owner`, failing with `PENDING_CREATE` when the device is offline or the create has not landed within 30 seconds.
 - An app admin, in-app or console, can delete any document of the app directly with `documents.delete`, as an app owner already could.
 - **Fixed:** A compound unique constraint holds across writers: a record saved by a server function, a workflow, the REST API or the CLI now blocks a client save of the same values, and the reverse.
 - **Fixed:** `me.sharedDocuments()` no longer skips documents when paging with a small `limit`. A page can now be short or empty while `hasMore` is `true`; keep following `nextCursor`.
 - **Fixed:** The dev tools' Document and Blob explorers and the Swift `PrimitiveAppState.fetchDocuments()` list every owned and shared document, not only the first page of each.
+- **Fixed:** A document listing fetched for a user who has since signed out is dropped instead of being kept for the next signed-in user, in both clients.
+
+### Models and queries
+
+- **Breaking:** A `stringset` field's values are returned sorted by Unicode code point, each value once, from every surface — model reads, queries, server reads, the CLI and the Swift client, in documents, large documents and databases — rather than in the order they were added; sort a copy to display another order.
 
 ### Collections
 
@@ -42,6 +68,7 @@ User-visible changes in each production release of the Primitive platform, newes
 ### Users and groups
 
 - `groups.create` accepts `initialMetadata` in both clients, `ctx.api.groups.create` and `primitive groups create --initial-metadata`, and a group rule set can gate the create on it, as collections do.
+- An app owner or admin sets a user's display name and avatar, at creation or later: `primitive users create --name --avatar-url`, `primitive users set-profile <user-id> --name|--avatar-url|--clear-avatar`, `ctx.api.users.setProfile` from a server function, and `name`/`avatarUrl` when adding a user by email. An avatar URL written this way or by `me.update` must be an `http:` or `https:` URL; any other scheme is refused with `400` and nothing is written.
 
 ### Locks
 
@@ -53,10 +80,12 @@ User-visible changes in each production release of the Primitive platform, newes
 - **Breaking:** `config push` refuses a prompt `[[configs]]` entry that writes chat keys at its root or marks the live config with `isActive`, so move those keys under `[configs.chat]` and write `active = true`.
 - **Fixed:** OpenRouter chat configurations now send `maxTokens` to the provider, so a configuration that sets it is capped at that many output tokens.
 - **Fixed:** `config push` no longer refuses a reasoning setting because of which values a particular model supports; the provider decides. A value the model refuses fails the run with the provider's message, `upstreamStatus: 400` and the new `errorCode` `PROMPT_UPSTREAM_REJECTED`, from `ctx.prompts.run`, the member execute route and `primitive prompts execute`. A provider `400` on any prompt run carries that code.
+- **Fixed:** `primitive prompts execute`, the console's prompt test and the evaluator use a system prompt or user template larger than 25 KB (stored offloaded) instead of running without it.
 
 ### Sign-in and sessions
 
 - **Breaking:** `magicLinkRequest`, `otpRequest` and their routes are removed, and the auth and app config report only `emailSignInEnabled`; start email sign-in with `emailSignInRequest`.
+- **Fixed:** Clearing an app's `googleClients` or `passkeyRpConfig` from the console no longer brings back Google client or passkey values set before those maps existed.
 
 ### API and clients
 
@@ -73,19 +102,23 @@ User-visible changes in each production release of the Primitive platform, newes
 - **Scoped CLI logins and admin step-ups.** `primitive login --scope <list> [--app <ids>]` asks for a session limited to those scopes and pinned to those apps, granted only after you approve it on a console page that names them. `--scope admin` asks for a 15-minute step-up held beside your login; a command refused for lacking `admin` retries once with it, and `primitive logout` ends it too. `primitive token --scope <list> [--app <ids>] [--ttl <d>]` prints a narrower token for a script or agent, with no browser unless the request is wider than your login. `primitive whoami` shows the session's kind, scope and pinned apps and any step-up, and `primitive auth sessions list` shows `step-up` sessions and `pending` approvals.
 - **CI sessions.** `primitive auth sessions create --name <name> --scope <list> --app <ids> [--ttl <d>]` creates a named admin token for a CI job once you approve it in the browser, and prints it once. It is pinned to its apps, never holds `admin`, and lives 90 days unless `--ttl` says otherwise, at most 1 year. Run the CLI with it in `PRIMITIVE_TOKEN`, with no credentials file; it works on the admin and app APIs and WebSocket connections within its scope and pins. `primitive auth sessions list` shows it with its name, and once revoked its token fails on its next request.
 - **Protected apps.** `protected = true` under `[app]` in `app.toml` marks an app as live with real users; `config push` applies it, and `primitive apps get`, `GET /settings`, the admin app object and the web-admin dashboard show it. Only the app's console owner can set or clear it: anyone else's change — a console admin's, or any app-user token's — is refused with `403 PROTECTED_FLAG_OWNER_ONLY` and nothing is applied, while a body carrying the current value saves as before. A value that is not a boolean is a `400`. A pulled `app.toml` always states the flag; a file without the line pushes `false`.
-- **Root documents as large documents.** `rootDocumentFormat = 2` under `[app]` in `app.toml` creates each new user's root document as a large document; omit it, or set `1`, for an ordinary root. Existing root documents keep their format. `GET /settings` and the admin app object report it, and a value other than `1`, `2` or empty is refused with `400 INVALID_ROOT_DOCUMENT_FORMAT`.
+- **Root documents as large documents.** `rootDocumentFormat = 2` under `[app]` in `app.toml` creates each new user's root document as a large document; omit it, or set `1`, for an ordinary root. Existing root documents keep their format. `GET /settings` and the admin app object report it, and a value other than `1`, `2` or empty is refused with `400 INVALID_ROOT_DOCUMENT_FORMAT`, and a child app copies it from its parent.
 - `primitive documents import` installs a large root-document export into the target user's large root document, and refuses a root export whose format differs from the target root's, naming both, before writing anything for it. The admin root-document routes report `documentFormat: 2` for a large root.
 - **Breaking:** Database, collection and group type configs name their rule set with `ruleSetName` in TOML; `config push` refuses a `ruleSetId` line there.
 - **Breaking:** A blob bucket's `accessPolicy` is removed from bucket TOML, the bucket API and both clients and is refused with `400 RETIRED_REQUEST_KEY`, so set `preset` (`public`, `authenticated` or `admin-only`) instead.
 - **Breaking:** A prompt or integration test case names its configuration and judge prompt only by `configName`, `evaluatorPromptKey` and `evaluatorConfigName`, and `config push` refuses a case file that carries `configId`, `evaluatorPromptId` or `evaluatorConfigId`.
-- **Deprecated:** `ruleSetId` in a blob bucket's TOML; name the rule set with `ruleSetName`, which `config push` resolves in the app you push to, so the same files work in every environment.
+- **Breaking:** `config push` refuses `ruleSetId` in a blob bucket's TOML; name the rule set with `ruleSetName`, which push resolves in the app you push to, and `config pull` rewrites a file that still carries the id.
 - **Fixed:** `config pull` leaves a file untouched when `config diff` reports it in sync, so its comments, key order and explicit defaults survive the pull. Files that differ from the server are still rewritten, and the pull summary reports how many files were written and how many were left unchanged.
 - **Fixed:** `primitive documents export` and `export-all` no longer report success when a document's permissions, pending invitations, aliases or blob list can't be read. A 404 still means "none"; a transient failure is retried, and any other failure names the document and exits non-zero. `export-all` exports the remaining documents and lists the failed ones. A document with more than one page of blobs now exports all of them, not just the first page.
+- **Fixed:** `primitive documents import` retries a transient failure, reports each document that failed as failed or incomplete and continues with the rest, exiting non-zero at the end; re-running it completes a document a previous run left without its state or some of its blobs, large documents included, and skips those already whole.
+- **Fixed:** `primitive users set-role <user-id> <role>` works in its documented two-argument form instead of exiting with a missing-argument error.
+- **Fixed:** `config push` of an `[invitations]` or `largeDocumentWindowDays` edit no longer leaves `config diff --only app` reporting drift, because the settings write answers with every field a read returns.
 
 ### Starter templates
 
 - **Breaking:** The Vue template's `pnpm cf-deploy` refuses a bare environment name; name both environments with `--deploy-env` and `--primitive-env`.
 - **Fixed:** The dev tools overlay keeps its own colors and fonts instead of taking on the app's theme.
+- **Fixed:** In the Swift app layer, signing in after a sign-out in the same process no longer shows a false "could not connect" error or keeps the previous account's profile and documents.
 
 ## 2026-09-30
 

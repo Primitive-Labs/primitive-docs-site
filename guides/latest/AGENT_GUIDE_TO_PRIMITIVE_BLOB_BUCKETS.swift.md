@@ -140,7 +140,7 @@ ttlTier = "permanent"
 ruleSetName = "bucket-access"               # the rule set's `name`, not its id
 ```
 
-`config push` resolves `ruleSetName` to the rule set of that name in the target app, so a tree pushed into another app binds that app's rule set; an unknown name fails the push before the bucket is written. A bucket file that names its rule set by id (`ruleSetId`) still pushes, with a deprecation warning; `config pull` rewrites it to `ruleSetName`.
+`config push` resolves `ruleSetName` to the rule set of that name in the target app, so a tree pushed into another app binds that app's rule set; an unknown name fails the push before the bucket is written. `config push` refuses a bucket file that names its rule set by id (`ruleSetId`) and points to `ruleSetName`; `config pull` rewrites such a file.
 
 ### Update a bucket's access
 

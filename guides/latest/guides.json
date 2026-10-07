@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-10-04",
+    "stampedAt": "2026-10-07",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.4.1",
