@@ -251,6 +251,9 @@ Cursors are **opaque** base64 tokens — never parse or construct one. A cursor 
     sort: AggregateSort(field: "count", direction: -1),
     limit: 10
   ))
+  // One row per group: ["group": ["category": …], "count": …, "avg_priority": …, "sum_estimatedHours": …]
+  let busiest = stats.first
+  let workHours = stats.first { $0["group"]?["category"] == "work" }?["sum_estimatedHours"]
 
   // Grouping by a stringset field counts per member value (facet):
   let tagCounts = try Task.aggregate(AggregateOptions(
@@ -258,13 +261,14 @@ Cursors are **opaque** base64 tokens — never parse or construct one. A cursor 
     operations: [AggregateOperation(type: .count)]
   ))
 
-  // Group by whether the set contains a value (membership) — rows carry
-  // a "has_tags_urgent" key of "true" / "false":
+  // Group by whether the set contains a value (membership):
   let urgentSplit = try Task.aggregate(AggregateOptions(
     groupBy: [.stringSetMembership(field: "tags", contains: "urgent")],
     operations: [AggregateOperation(type: .count)]
   ))
 ```
+
+Each row holds the `groupBy` values under `group`, as stored, and each operation's value beside it under `count` or `<type>_<field>`. A membership entry's key in `group` is `has_<field>_<value>` (`has_tags_urgent`), its value `"true"` or `"false"`. Two `groupBy` entries that would share a key in `group` (the same field twice, or a field named like a membership key) throw `Ambiguous aggregation group keys` before anything is read.
 
 Grouping by a `stringset` field counts per member value (facet); a membership `groupBy` entry groups by whether the set contains one specific value. Only one stringset facet field is allowed per aggregation, and a facet can't be mixed with other `groupBy` entries — unsupported mixes degrade (the facet is dropped or the result is empty) rather than throw.
 
@@ -810,7 +814,7 @@ name = "name_parent_unique"
 fields = ["name", "parentId"]
 ```
 
-After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`). A composite constraint is enforced the same way whether a record is written by a client, a server function, a workflow, or the CLI. Server functions and `primitive documents records bulk` write by a constraint with a bulk `upsert` operation (`{ action: "upsert", constraint, data }`) — see the Server Functions guide.
+After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`). Both kinds are enforced the same way whether a record is written by a client, a server function, or the CLI. A constraint added to a model that already has records is enforced against the records already in the document: on any of those paths, a write of a value an existing record holds is refused (`UniqueConstraintViolationError` on the client). Check existing data for duplicates before adding one. Server functions and `primitive documents records bulk` write by a constraint with a bulk `upsert` operation (`{ action: "upsert", constraint, data }`) — see the Server Functions guide.
 
 **Wrong** — these TOML shapes are silently rejected or fail at codegen:
 
@@ -1409,7 +1413,6 @@ Collections used to carry a `contextId` field, read in rules as `collection.cont
 
 - **Rules.** A collection rule set that reads `collection.contextId` (any selector form, `.?contextId` and `["contextId"]` included) or `md.self.attrs.contextId` is refused at save, and so by `primitive config push`, with an error naming the replacement. A rule set saved before the removal that still reads it is **denied** for every operation, whatever its shape — `!has(collection.contextId) || …` denies rather than allowing. Rewrite it to read `md.self.<category>.<key>`. `group.contextId` in group rule sets is unaffected.
 - **Creation code.** `collections.create()` / `collections.update()` with `contextId` is a 400, whatever the value, before anything is created. Pass `initialMetadata: { <category>: { <key>: <value> } }` on the create.
-- **Workflow steps.** A `collection.create` step carrying `contextId` fails the run naming `initialMetadata`; `primitive config push` refuses the key. Set `initialMetadata` on the step; templates resolve inside it.
 - **CLI import.** `collections export` writes no `contextId`; an older `collections.json` still imports, without the field, with one note counting the collections that carried it.
 - **Existing collections.** The platform does not copy stored values across, and once the removal is deployed no API returns them. Before that release is deployed, define the category and copy each value — for every collection `primitive collections list --all --json` lists with a `contextId`:
 

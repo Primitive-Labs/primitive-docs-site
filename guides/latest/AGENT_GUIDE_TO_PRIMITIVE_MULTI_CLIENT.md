@@ -26,7 +26,7 @@ The command creates one app and repository. Selecting both platforms creates `we
 ### Gotchas
 
 - **One git repository, at the root.** No `.git` inside a client.
-- **One `.primitive/`, at the root.** A client never has its own project config, credentials, or sync tree.
+- **One `primitive/`, at the root.** The project config (`config.json`) and each environment's exported server config live there, shared by every client. `.primitive/` holds machine-local CLI state (credentials, the selected environment) and is gitignored. A client owns neither.
 - **No root `package.json` and no workspace file.** The clients are independent projects sitting side by side, not a monorepo — each installs, builds, tests and deploys on its own.
 - **No symlinks.** Every shared file is read in place by path.
 

@@ -267,7 +267,7 @@ Run the same groups in Node with `pnpm test`. The template includes these files:
   `Cannot find package 'ws'`.
 - Script: `"test": "pnpm codegen && vitest run"`.
 
-The backend is selected from `primitive/config.json`. Override it for one run:
+The backend is selected from `primitive/config.json`: the `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL` and `VITE_WS_URL` from it. Never write those keys into a `.env` file; the deploy refuses them. Override it for one run:
 
 ```bash
 PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" PRIMITIVE_ENV=alpha pnpm test

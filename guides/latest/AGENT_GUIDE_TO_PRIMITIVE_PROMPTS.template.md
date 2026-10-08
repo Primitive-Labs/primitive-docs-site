@@ -94,7 +94,8 @@ and push with `--prune` to delete it. See
 [Test Case Identity](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md).
 
 Verification types include substring `contains`, regex pattern, JSON subset, and LLM-as-judge.
-A run cut off at `maxTokens` fails its `Output complete` check.
+A run cut off at `maxTokens` fails its `Output complete` check. A case on an agent prompt
+seeds a conversation instead; see [Test an agent](AGENT_GUIDE_TO_PRIMITIVE_AGENTS.md).
 
 Use `primitive prompts preview` to inspect rendered text without a model call.
 Use `primitive prompts execute` for an admin test. `execute` can run a disabled
@@ -127,6 +128,7 @@ with the chat keys above less `userPromptTemplate`, `outputFormat` and `outputSc
 [Agents](AGENT_GUIDE_TO_PRIMITIVE_AGENTS.md) for `kind = "agent"`'s own prompt-level
 contract (tools, events, turn context). The prompt's `kind` selects the block
 and is fixed at creation. Use `primitive config fields prompt` for field types.
+`ctx.prompts.run` refuses an agent prompt by name — it runs only through the sessions API.
 
 ## Typed output
 

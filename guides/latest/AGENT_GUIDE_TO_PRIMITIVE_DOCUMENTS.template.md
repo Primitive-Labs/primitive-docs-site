@@ -228,6 +228,8 @@ Cursors are **opaque** base64 tokens — never parse or construct one. A cursor 
 
 {{ example: documents/aggregate }}
 
+Each row holds the `groupBy` values under `group`, as stored, and each operation's value beside it under `count` or `<type>_<field>`. A membership entry's key in `group` is `has_<field>_<value>` (`has_tags_urgent`), its value `"true"` or `"false"`. Two `groupBy` entries that would share a key in `group` (the same field twice, or a field named like a membership key) throw `Ambiguous aggregation group keys` before anything is read.
+
 Grouping by a `stringset` field counts per member value (facet); a membership `groupBy` entry groups by whether the set contains one specific value. Only one stringset facet field is allowed per aggregation, and a facet can't be mixed with other `groupBy` entries — unsupported mixes degrade (the facet is dropped or the result is empty) rather than throw.
 
 ### Subscribe to changes
@@ -478,24 +480,9 @@ import { Todo } from "@/models";
 
 ### Registering a Model at Runtime
 
-The `models` list a client is built with is fixed for that client. When the shape is only known later — a plugin type, a tenant-supplied schema, an import that defines its own columns — register it on the running client:
+The `models` list a client is built with is fixed for that client. When the shape is only known later — a plugin type, a tenant-supplied schema, an import that defines its own columns — define a class that extends `BaseModel` (imported from `js-bao`), attach its schema with `attachAndRegisterModel`, and register it on the running client:
 
-```typescript
-import { defineModelSchema, createModelClass } from "js-bao";
-
-const Tag = createModelClass({
-  schema: defineModelSchema({
-    name: "tag",
-    fields: {
-      id: { type: "id", autoAssign: true, indexed: true },
-      name: { type: "string", indexed: true },
-    },
-  }),
-});
-
-await client.registerModel(Tag);
-const { data } = await Tag.query({});
-```
+{{ example: documents/register-model-runtime }}
 
 - Documents the client already has open are initialized for the model, so saves and queries against them work as soon as the call resolves.
 - Scoped to the client it is called on; each client registers its own class.
@@ -750,7 +737,7 @@ name = "name_parent_unique"
 fields = ["name", "parentId"]
 ```
 
-After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`). A composite constraint is enforced the same way whether a record is written by a client, a server function, a workflow, or the CLI. Server functions and `primitive documents records bulk` write by a constraint with a bulk `upsert` operation (`{ action: "upsert", constraint, data }`) — see the Server Functions guide.
+After codegen, single-field constraints get an auto-generated runtime name of `<modelName>_<fieldName>_unique` (e.g. `users_email_unique`); composite constraints use the `name` you declared (e.g. `name_parent_unique`). Both kinds are enforced the same way whether a record is written by a client, a server function, or the CLI. A constraint added to a model that already has records is enforced against the records already in the document: on any of those paths, a write of a value an existing record holds is refused (`UniqueConstraintViolationError` on the client). Check existing data for duplicates before adding one. Server functions and `primitive documents records bulk` write by a constraint with a bulk `upsert` operation (`{ action: "upsert", constraint, data }`) — see the Server Functions guide.
 
 **Wrong** — these TOML shapes are silently rejected or fail at codegen:
 
@@ -944,27 +931,25 @@ const result = await Article.query({}, {
 
 ### Aggregations
 
-Group and calculate statistics — see [Aggregation](#aggregation) above for the compiled call. `groupBy` must name at least one field: an empty `groupBy` throws `Invalid aggregation configuration`, so reach for [`Model.count(filter)`](#counting-records) when you want a plain total. The result is therefore always a **nested object keyed by group values** (not an array), one level per `groupBy` entry, and the leaf under the last group value depends on which operations you asked for.
-
-**A lone operation** — the leaf collapses to that operation's bare value, for `count`, `sum`, `avg`, `min` and `max` alike, so there is no `{ count: n }` or `{ sum_estimatedHours: n }` wrapper to read through. The collapse itself holds for **every** `groupBy` type, a plain indexed field included (not just the stringset facets below) — but a stringset facet computes `count` and nothing else, so only `count` has a value to collapse there:
+Group and calculate statistics — see [Aggregation](#aggregation) above for the compiled call. `aggregate` answers an array of **rows, one per group**: each row holds the `groupBy` values under `group`, as stored (a record without the field gives `null`, numbers stay numbers), and each operation's value beside it, keyed `count`, `sum_<field>`, `avg_<field>`, `min_<field>` or `max_<field>`. `groupBy` must name at least one field: an empty `groupBy` throws `Invalid aggregation configuration`, so reach for [`Model.count(filter)`](#counting-records) when you want a plain total.
 
 ```typescript
 const listId = "01M12A5DJ7DW4Z1BVDVVTZ1CXN";
-const counts = (await TodoItem.aggregate({
+const counts = await TodoItem.aggregate({
   groupBy: ["listId"],              // a plain indexed string field
   operations: [{ type: "count" }],
   filter: { completed: false },
-})) as Record<string, number>;      // narrow before indexing — see below
+});
 // Returns:
-// { "01M12A5DJ7DW4Z1BVDVVTZ1CXN": 4, "01M12A84FEBE3MXTWVC4DHZRXW": 3 }
+// [
+//   { group: { listId: "01M12A5DJ7DW4Z1BVDVVTZ1CXN" }, count: 4 },
+//   { group: { listId: "01M12A84FEBE3MXTWVC4DHZRXW" }, count: 3 },
+// ]
 
-const open = counts[listId] ?? 0;   // ✅ the count itself
-// counts[listId]?.count            // ❌ always undefined — renders 0
+const open = counts.find((row) => row.group.listId === listId)?.count ?? 0;
 ```
 
-`aggregate` is typed `Record<string, any> | Record<string, any>[]`, so the scaffolded (strict) TypeScript app rejects indexing the result directly: `counts[listId]` on that union is `TS7053: Element implicitly has an 'any' type`. Assert the leaf shape on the call before you read a group out of it — `as Record<string, number>` for any single operation, `as Record<string, { count: number; sum_estimatedHours: number }>` for the operation-keyed leaves below.
-
-**Two or more operations** — the leaf is an object keyed by operation. Operation result keys are `count`, `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`:
+Every operation keeps its key, a lone one included, so a row always reads `row.count` or `row.sum_estimatedHours`. Several operations sit side by side in one row:
 
 ```typescript
 const stats = await Task.aggregate({
@@ -976,13 +961,11 @@ const stats = await Task.aggregate({
   ],
 });
 // Returns:
-// {
-//   work:     { count: 8, avg_priority: 2.5, sum_estimatedHours: 40 },
-//   personal: { count: 3, avg_priority: 1.0, sum_estimatedHours: 6 },
-// }
+// [
+//   { group: { category: "work" },     count: 8, avg_priority: 2.5, sum_estimatedHours: 40 },
+//   { group: { category: "personal" }, count: 3, avg_priority: 1,   sum_estimatedHours: 6 },
+// ]
 ```
-
-A lone `sum`, `avg`, `min`, or `max` collapses exactly as a lone `count` does — read it as `result[group]`, not as `result[group].sum_estimatedHours`:
 
 ```typescript
 const hours = await Task.aggregate({
@@ -990,19 +973,13 @@ const hours = await Task.aggregate({
   operations: [{ type: "sum", field: "estimatedHours" }],
 });
 // Returns:
-// {
-//   work:     40,
-//   personal: 6,
-// }
+// [
+//   { group: { category: "work" },     sum_estimatedHours: 40 },
+//   { group: { category: "personal" }, sum_estimatedHours: 6 },
+// ]
 ```
 
-That rule holds on **every surface**, so an aggregation you declare once reads the same wherever you run it: these model statics, the document HTTP aggregate (`POST /app/{appId}/api/documents/{documentId}/records/{model}/aggregate`) and the `primitive documents records aggregate` CLI, database aggregates and registered `aggregate` operations, workflow pipeline steps, and `connectDoDb` model bindings. HTTP and the CLI's `--json` deliver it inside the usual `{ result }` envelope:
-
-```json
-{ "result": { "work": 40, "personal": 6 } }
-```
-
-Multi-field `groupBy` produces deeper nesting (one level per field) and applies the same leaf rule. Group values become object keys, so a numeric field's values are stringified:
+A multi-field `groupBy` puts one key per field in `group`:
 
 ```typescript
 const byCategoryAndPriority = await Task.aggregate({
@@ -1010,23 +987,39 @@ const byCategoryAndPriority = await Task.aggregate({
   operations: [{ type: "count" }],
 });
 // Returns:
-// {
-//   work:     { "1": 2, "3": 5 },
-//   personal: { "2": 1 },
-// }
+// [
+//   { group: { category: "work", priority: 1 },     count: 2 },
+//   { group: { category: "work", priority: 3 },     count: 5 },
+//   { group: { category: "personal", priority: 2 }, count: 1 },
+// ]
 ```
 
-**StringSet facet aggregation** — grouping by a `stringset` field counts per member value, with the same leaf rule:
+Rows come back in `sort` order, and a call that matches no records answers `[]`. The same rows come back on every surface: the document HTTP aggregate (`POST /app/{appId}/api/documents/{documentId}/records/{model}/aggregate`) and the `primitive documents records aggregate` CLI, database aggregates, server functions and `connectDoDb` model bindings. HTTP and the CLI's `--json` deliver them inside the usual `{ result }` envelope, and an ungrouped server-side aggregate is one row with an empty `group`:
+
+```json
+{ "result": [{ "group": { "category": "work" }, "sum_estimatedHours": 40 }, { "group": { "category": "personal" }, "sum_estimatedHours": 6 }] }
+```
+
+**StringSet facet aggregation** — grouping by a `stringset` field counts per member value, keyed by the field:
 
 ```typescript
 const tagCounts = await Task.aggregate({
   groupBy: ["tags"],                // "tags" is a stringset field
   operations: [{ type: "count" }],
 });
-// Returns: { "work": 15, "urgent": 8, "personal": 5 }
+// Returns:
+// [
+//   { group: { tags: "work" },     count: 15 },
+//   { group: { tags: "urgent" },   count: 8 },
+//   { group: { tags: "personal" }, count: 5 },
+// ]
 ```
 
-Only one stringset facet field is allowed per aggregation. A facet aggregation computes `count` only — asking it for a `sum`/`avg`/`min`/`max` returns `undefined` for that operation rather than a number, so group by a plain indexed field when you need one. To check membership of a specific value across records, use a `StringSetMembership` groupBy entry: `{ field: "tags", contains: "urgent" }`.
+Only one stringset facet field is allowed per aggregation. A facet aggregation computes `count` only — asking it for a `sum`/`avg`/`min`/`max` returns `null` for that operation rather than a number, so group by a plain indexed field when you need one. To check membership of a specific value across records, use a `StringSetMembership` groupBy entry: `{ field: "tags", contains: "urgent" }`. Its key in `group` is `has_<field>_<contains>` (`has_tags_urgent`), and its value is `"true"` or `"false"`.
+
+**Gotchas**
+
+- Two `groupBy` entries that would share a key in `group` — the same field twice, or a field named like a membership's `has_…` key — throw `Ambiguous aggregation group keys: '<key>' names more than one groupBy level` before anything is read. Rename or drop one of them.
 
 ### useJsBaoDataLoader Pattern
 
@@ -1852,7 +1845,6 @@ Collections used to carry a `contextId` field, read in rules as `collection.cont
 
 - **Rules.** A collection rule set that reads `collection.contextId` (any selector form, `.?contextId` and `["contextId"]` included) or `md.self.attrs.contextId` is refused at save, and so by `primitive config push`, with an error naming the replacement. A rule set saved before the removal that still reads it is **denied** for every operation, whatever its shape — `!has(collection.contextId) || …` denies rather than allowing. Rewrite it to read `md.self.<category>.<key>`. `group.contextId` in group rule sets is unaffected.
 - **Creation code.** `collections.create()` / `collections.update()` with `contextId` is a 400, whatever the value, before anything is created. Pass `initialMetadata: { <category>: { <key>: <value> } }` on the create.
-- **Workflow steps.** A `collection.create` step carrying `contextId` fails the run naming `initialMetadata`; `primitive config push` refuses the key. Set `initialMetadata` on the step; templates resolve inside it.
 - **CLI import.** `collections export` writes no `contextId`; an older `collections.json` still imports, without the field, with one note counting the collections that carried it.
 - **Existing collections.** The platform does not copy stored values across, and once the removal is deployed no API returns them. Before that release is deployed, define the category and copy each value — for every collection `primitive collections list --all --json` lists with a `contextId`:
 

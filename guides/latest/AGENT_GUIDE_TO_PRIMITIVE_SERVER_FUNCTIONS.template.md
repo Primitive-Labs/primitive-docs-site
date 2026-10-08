@@ -316,6 +316,50 @@ Content writes require `permission` of `read-write` or `owner`. `appRole`
 alone is not a document grant. Omitting `body.userId` checks the app’s own
 access, not the caller’s.
 
+### Which user a call is about
+
+A call about one user takes `userId`. Omitted, it means the caller
+(`ctx.user`). A run with no caller — cron, a webhook, `--as system`, or a task
+started from one — must name the user, or the call throws
+`FUNCTION_SUBJECT_REQUIRED` (400):
+
+```ts
+// A cron fire has no caller: name the member.
+const { unreadCount } = await ctx.api.notifications.unreadCount({ userId: member.userId });
+const page = await ctx.api.collections.list({ userId: member.userId });
+```
+
+| Calls | `userId` |
+| --- | --- |
+| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `ctx.agents.*`; user-scoped alias calls | Optional; defaults to the caller |
+| `collections.listForUser`, `documents.listOwnedByUser`, `documents.listSharedWithUser`, `groups.listUserMemberships`, `users.getRootDocument` | Required |
+| `documents.requestAccess` | None: always the caller |
+| App-wide reads (`databases.list`, `groups.list`, `users.list`) | None |
+| Calls that hand something to a user (`notifications.send`, `users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
+
+Naming a user other than the caller, with an optional or a required `userId`:
+
+| Run | `userId` omitted | Another member |
+| --- | --- | --- |
+| No caller | `FUNCTION_SUBJECT_REQUIRED` | Allowed |
+| Invoked by an app owner or admin | The caller | Allowed |
+| Invoked by any other member | The caller | `SUBJECT_USER_FORBIDDEN` (403) |
+| A tool, context or history run, and anything it starts | The initiator | `SUBJECT_USER_FORBIDDEN` (403) |
+
+The role is read at each call, so a task sees a role change made while it
+slept. A named user who is not a member throws `SUBJECT_USER_NOT_FOUND` (404)
+on the optional-`userId` calls; the required-`userId` reads and the alias
+calls keep their own not-found answers.
+
+Gotchas:
+
+- **Writes toward a named user are not restricted.** `users.setProfile`,
+  `notifications.send` and `ctx.channels.authorize` accept any member, so a
+  tool that passes a model-supplied user id to them changes that user's data.
+  Check the id before passing it.
+- **`ctx.channels.authorize` keeps its own code.** With no caller and no
+  `userId` it throws `FUNCTION_CHANNEL_GRANTEE_REQUIRED`.
+
 ## `ctx.api` — the platform from inside a function
 
 Use typed `ctx.api` methods for app services. Methods take an options object
@@ -327,7 +371,8 @@ Direct internet `fetch` calls are denied. Missing capabilities return
 `FUNCTION_HIGH_BLAST_GRANT_MISSING`.
 
 A single `$in` or `$nin` list is limited to 1 000 values
-(`QUERY_IN_LIST_TOO_LARGE`). Split larger lists across queries.
+(`QUERY_IN_LIST_TOO_LARGE`). How to split a longer list depends on the
+operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#filter-operators).
 
 ## Capabilities
 
@@ -499,8 +544,10 @@ Use registered queries to share validated database operations. See the
 
 ### The typed document handle
 
-`ctx.doc(id).model(name)` supports `query`, `count`, `save`, `patch`, `delete`,
-and `batch`. A document batch applies one model’s operations atomically. Use
+`ctx.doc(id).model(name)` supports `query`, `count`, `aggregate`, `save`,
+`patch`, `delete`, and `batch`; `aggregate` resolves to the row array itself
+(the route's `result`), every other call answers the route's own shape. A
+document batch applies one model’s operations atomically. Use
 `ctx.api.documents.records.bulk` for multiple models.
 
 To sync external rows, use `{ action: "upsert", constraint, data }`: `constraint`
@@ -512,9 +559,9 @@ over `id` is refused (400).
 
 ### A member's documents, collections and aliases
 
-Triggered functions have no caller. Pass `userId` explicitly to
-`ctx.api.users.getRootDocument` and user-scoped alias operations. A root
-lookup can return `rootDocId: null`; it does not create a document.
+Triggered functions have no caller, so name the member (see
+[Which user a call is about](#which-user-a-call-is-about)). A root lookup
+can return `rootDocId: null`; it does not create a document.
 `ctx.api.users.setProfile({ userId, body: { name, avatarUrl } })` sets a
 member's display name and avatar (`avatarUrl` is an `http:` or `https:` URL;
 `null` clears it).
@@ -543,15 +590,13 @@ Gotchas:
 
 - **Loop on `hasMore`.** A page can be short or empty while `hasMore` is
   `true`; stopping on an empty page leaves documents unlisted.
-- **No capability gates these calls.** Any caller the function's `access` rule
-  admits can list any member's holdings, so keep such a function admin-only or
-  trigger-only.
+- **No capability gates these calls.** A run with no caller, or one an app
+  owner or admin invoked, can list any member's holdings, so keep such a
+  function admin-only or trigger-only.
 - **Shared means direct, applied grants.** `listSharedWithUser` excludes the
   root document, group- or collection-only access, and an email share not yet
   applied to the member; it never applies one. `me.sharedDocuments()` applies
   pending email shares when the member lists their own.
-- **`ctx.api.collections.list()` is the invoking user's.** It answers nothing
-  on a trigger; use `listForUser`.
 
 ### A function may be a document's first writer
 

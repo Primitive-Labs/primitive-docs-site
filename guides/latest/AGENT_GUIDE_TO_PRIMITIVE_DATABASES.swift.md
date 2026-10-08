@@ -263,12 +263,15 @@ const { result } = await tasks.aggregate({
     limit: 10,
   },
 });
-// result: { open: { count: 12, sum_estimatedHours: 40 }, done: { … } }
+// result: [
+//   { group: { status: "open" }, count: 12, sum_estimatedHours: 40 },
+//   { group: { status: "done" }, count: 30, sum_estimatedHours: 95 },
+// ]
 ```
 
-Operation types: `count`, `sum`, `avg`, `min`, `max` (`field` required except for `count`). Result keys are fixed — `count`, and `<type>_<field>` for the rest — and `sort.field` names one of them or a `groupBy` field. Ungrouped (`groupBy: []`), the result is flat, keyed by operation.
+Operation types: `count`, `sum`, `avg`, `min`, `max` (`field` required except for `count`). `result` holds one row per group, in `sort` order: the `groupBy` values under `group` (as stored — a missing field is `null`), and each operation's value beside it under a fixed key, `count` or `<type>_<field>`, even when it is the only operation. `sort.field` names one of those keys or a `groupBy` field. A membership entry `{ field: "tags", contains: "urgent" }` is keyed `has_tags_urgent` in `group`, with `"true"` or `"false"`. Ungrouped (`groupBy: []`), `result` is exactly one row with an empty `group`; grouped with no matching records, it is `[]`. Two `groupBy` entries that would share a key in `group` are a `400` (`Ambiguous aggregation group keys`).
 
-With **exactly one** operation there is no key to read through: each group's value is that operation's bare value (`{ open: 120 }` for a lone `sum`). Two or more keep the keys above, and an ungrouped result is keyed by operation whatever the count. This is the one rule on every surface that aggregates a database or document model server-side — here, the documents twin, the CLI, workflow pipeline steps, and the js-bao JavaScript library's model statics (`Model.aggregate` on Yjs-backed documents). The Swift client's local `aggregate` is a different API: it answers with the raw SQL rows, one per group, and does no nesting or collapsing.
+These are the same rows on every surface that aggregates a database or document model — here, the documents twin, the CLI, and the js-bao JavaScript library's model statics (`Model.aggregate`).
 
 ## Access
 

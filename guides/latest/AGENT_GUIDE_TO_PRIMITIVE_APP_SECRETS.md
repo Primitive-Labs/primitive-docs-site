@@ -1,8 +1,9 @@
 # Agent Guide to Primitive App Secrets
 
 Use app secrets for credentials and config vars for non-secret settings.
-Values belong to one app/environment. Secrets are set separately from the
-configuration tree; vars are stored in `vars.toml`.
+Values belong to one app/environment, and deleting the app deletes its
+secrets. Secrets are set separately from the configuration tree; vars are
+stored in `vars.toml`.
 
 ## Set and reference a secret
 
