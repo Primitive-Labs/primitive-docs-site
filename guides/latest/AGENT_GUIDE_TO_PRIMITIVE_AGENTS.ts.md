@@ -152,18 +152,43 @@ discriminated `oneOf` becomes `anyOf`. Name a property, don't leave a tool's sch
 ### Every tool function checks rights on its first line
 
 A tool call runs as the system, with the turn's initiator in `ctx.user` and the session in
-`ctx.tool` (set only when `ctx.trigger.kind === "tool"`). In a call about one user it may name
+`ctx.tool` (set only when `ctx.trigger.kind === "tool"`). The function's `access` gate still
+runs first, against that same initiator. In a call about one user it may name
 only the initiator (`SUBJECT_USER_FORBIDDEN` otherwise), and so may anything it starts. The model chooses when to call a
 tool and with what arguments, and the SAME function can also be invoked directly over HTTP —
-so check the caller's current rights before doing anything else, reading the session's
+so check the caller's current rights again before doing anything else, reading the session's
 `variables` for whatever the check needs:
+
+```toml
+# primitive/dev/functions/cashflow.toml
+[function]
+key = "cashflow"
+entry = "functions/cashflow/index.ts"
+access = "!isAnonymous()"   # the gate checks the turn's initiator; household membership is the body's own check below
+
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema.properties.month]
+type = "string"   # optional YYYY-MM; defaults to the current month
+
+[function.outputSchema]
+type = "object"
+required = ["income", "spending"]
+
+[function.outputSchema.properties.income]
+type = "number"
+
+[function.outputSchema.properties.spending]
+type = "number"
+```
 
 ```ts
 // functions/cashflow/index.ts
 import { defineFunction } from "primitive-functions";
 
 export default defineFunction(async (_input, ctx) => {
-  if (ctx.trigger.kind !== "tool") throw new Error("cashflow only runs as an agent tool");
+  if (ctx.trigger.kind !== "tool" || !ctx.tool) throw new Error("cashflow only runs as an agent tool");
   const { householdId } = ctx.tool.variables as { householdId: string };
 
   await assertHouseholdMember(ctx.user!.userId, householdId); // check rights FIRST
@@ -181,12 +206,33 @@ participantUserIds }`, `variables` (grant nothing by themselves), and
 A `task` tool is the same function, started durably instead of synchronously — same
 `ctx.tool`, same first-line check:
 
+```toml
+# primitive/dev/functions/advisor-report.toml
+[function]
+key = "advisor-report"
+entry = "functions/advisor-report/index.ts"
+access = "!isAnonymous()"
+
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema.properties.month]
+type = "string"   # optional YYYY-MM; defaults to the current month
+
+[function.outputSchema]
+type = "object"
+required = ["summary"]
+
+[function.outputSchema.properties.summary]
+type = "string"
+```
+
 ```ts
 // functions/advisor-report/index.ts
 import { defineFunction } from "primitive-functions";
 
 export default defineFunction(async (_input, ctx) => {
-  if (ctx.trigger.kind !== "tool") throw new Error("advisor-report only runs as an agent tool");
+  if (ctx.trigger.kind !== "tool" || !ctx.tool) throw new Error("advisor-report only runs as an agent tool");
   const { householdId } = ctx.tool.variables as { householdId: string };
 
   await assertHouseholdMember(ctx.user!.userId, householdId); // check rights FIRST
@@ -206,11 +252,19 @@ turn, and never enters the document. With no `function`, a send's own `context` 
 validated against the schema instead — declaring both on one agent is a contradiction a send
 with a client `context` is refused for.
 
+```toml
+# primitive/dev/functions/advisor-snapshot.toml
+[function]
+key = "advisor-snapshot"
+entry = "functions/advisor-snapshot/index.ts"
+access = "!isAnonymous()"
+```
+
 ```ts
 // functions/advisor-snapshot/index.ts
-export default defineFunction(async (input, ctx) => {
+export default defineFunction(async (input: { variables: { householdId: string } }, ctx) => {
   if (ctx.trigger.kind !== "context") throw new Error("advisor-snapshot only runs as turn context");
-  const { householdId } = input.variables as { householdId: string };
+  const { householdId } = input.variables;
   return { plan: await currentPlan(householdId) };
 });
 ```

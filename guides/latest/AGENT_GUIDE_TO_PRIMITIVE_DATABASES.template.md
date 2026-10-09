@@ -464,6 +464,7 @@ A **database type** is a named configuration shared by every database of that ty
 - **`[models.*]` schema** — optional model declarations: types `ctx.db` and drives indexes (see [Schema](#schema))
 - **Triggers** — computed fields evaluated server-side before each save
 - **`timestamps`** — created/modified stamps on every save and patch
+- **`autoPopulatedFields`** — fields filled from CEL values (the writer, the database's metadata) on save and patch
 - **`[metadata]` manifest** — resource metadata categories the type's trigger CEL may read
 - **Rule set attachment** — who may edit or delete the type's config
 
@@ -540,6 +541,20 @@ timestamps = { create = "createdAt", update = "modifiedAt" }
 - If a model has both a trigger and `timestamps`, the trigger fires after the stamp, so a trigger that sets the same field wins.
 
 Use `timestamps` for plain audit times; use triggers when the rule depends on the record's data (`completedAt` only when `status == "done"`).
+
+### Auto-populated fields
+
+`autoPopulatedFields` on the `[type]` config fills fields from CEL values evaluated for the writer. A plain string fills on create; a table sets `on` to `["create"]`, `["update"]` or both.
+
+```toml
+[type]
+databaseType = "project"
+autoPopulatedFields = { ownerId = "user.userId", editedBy = { value = "user.userId", on = ["update"] }, tier = "md.self.config.tier" }
+```
+
+- Values see `user.*` (the user the write is attributed to — a function's caller), the membership functions, `database.id`, `md.self.*` (the database's own metadata) and declared `secrets`/`vars`.
+- A `create` value fills when the write inserts the record; an `update` value when it changes an existing one (a `patch`, or a `save` of a record that exists). Each `save` and `patch` in a batch counts, and a batch `save` that inserts after an earlier `delete` of the same id is a create.
+- A value fills only a field that is absent or `null` in the submission. A value that does not evaluate leaves its field unset; the write still succeeds.
 
 ## Managing databases
 

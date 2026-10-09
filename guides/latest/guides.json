@@ -1012,7 +1012,7 @@
     {
       "topic": "configuration",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md",
-      "description": "Backend configuration as code — TOML sync loop, directory map, environments, headless CI auth",
+      "description": "Configuration as code — TOML sync loop, environments, admin scopes, protected apps, CI sessions",
       "keywords": [
         "configuration",
         "config",
@@ -1027,14 +1027,21 @@
         "secrets",
         "tokens",
         "CI",
-        "config as code"
+        "config as code",
+        "scope",
+        "step-up",
+        "protected",
+        "PRIMITIVE_TOKEN",
+        "sessions",
+        "admin token"
       ],
       "useCases": [
         "Setting up the config directory for an app",
         "Pushing function/prompt/integration/database-type changes to the server",
         "Managing dev/staging/prod environments from one repo",
         "Storing app secrets referenced as {{ secrets.KEY }}",
-        "Authenticating the CLI in CI pipelines"
+        "Authenticating the CLI in CI pipelines",
+        "Choosing the scope and pins of a login, a step-up or a CI session, and changing a protected app"
       ],
       "relatedGuides": [
         "app-secrets",
