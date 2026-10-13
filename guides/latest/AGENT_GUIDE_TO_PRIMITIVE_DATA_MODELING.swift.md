@@ -15,7 +15,7 @@ How to choose between **documents** and **databases**, and how to combine them. 
 | Offline | Yes — reads/writes work offline, sync resumes on reconnect (`offline: true` on the client) | No — every call requires the network |
 | Access control | Whole-document grant: `reader`, `read-write`, `owner` | The function's `access` gate (who may call) and its code (which rows) |
 | Per-record access for end users | Not possible — anyone with the doc gets everything | Yes — the function filters what each caller sees |
-| Practical size | ~10 MB per ordinary document (soft); a large document (`documentFormat: 2`) is validated at 2 GB | ~5 GB per database (one isolated instance each) |
+| Practical size | ~10 MB per ordinary document (soft); a large document (`documentFormat: 3`) holds far more | ~5 GB per database (one isolated instance each) |
 | Server-enforced fields | Client-controlled | Yes — `timestamps`, per-model triggers, and the function's own code |
 | Server logic | Server functions read and write document records (`ctx.doc(id)`; see [The typed document handle](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-document-handle)) | Server functions, plus `timestamps` and per-model triggers |
 | Aggregates / multi-step reads | Client-side over local data | `aggregate` and `count` on the typed handle; several models in one function call |
@@ -73,7 +73,7 @@ Use when each workspace is a sharing unit and every member of that workspace nee
 
 ### Document — past the size threshold (large document)
 
-Use when a workspace document's dataset will exceed ~10 MB and every member still needs all of it — multi-year records, imports. Create it with `documentFormat: 2` (`primitive documents create <title> --large` on the CLI) instead of splitting the data across documents or moving it to a database. Past creation it is the same document API: open it, then read and write through the same model classes — offline writes, live collaboration and permissions behave exactly as they do on an ordinary document. Creating one, which clients can open it, its limits and its read path: [Large Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#large-documents).
+Use when a workspace document's dataset will exceed ~10 MB and every member still needs all of it — multi-year records, imports. Create it with `documentFormat: 3` (`primitive documents create <title> --format 3` on the CLI) instead of splitting the data across documents or moving it to a database. Past creation it is the same document API: open it, then read and write through the same model classes — offline writes, live collaboration and permissions behave exactly as they do on an ordinary document. Creating one, which clients can open it, its limits and its read path: [Large Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#large-documents).
 
 ### Database — a function scoped to its caller
 

@@ -61,6 +61,9 @@ a version. It preserves authored sources for `config pull`.
 - Push executes module-level code while collecting the manifest; only push a
   tree you trust to run locally.
 - A failed function build can leave other configuration changes applied.
+- An agent whose tool names a function that failed to build or typecheck, and
+  that the app does not hold (never pushed, or archived), is not pushed. Its
+  failure row names that function as the cause; fix the function first.
 
 ## Invoking
 

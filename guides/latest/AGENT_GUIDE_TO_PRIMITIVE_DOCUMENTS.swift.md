@@ -266,11 +266,29 @@ Cursors are **opaque** base64 tokens — never parse or construct one. A cursor 
     groupBy: [.stringSetMembership(field: "tags", contains: "urgent")],
     operations: [AggregateOperation(type: .count)]
   ))
+
+  // Group a date field by calendar month (.quarter and .year work the same way):
+  let monthly = try Task.aggregate(AggregateOptions(
+    groupBy: ["category", .datePeriod(field: "dueDate", period: .month)],
+    operations: [
+      AggregateOperation(type: .count),
+      AggregateOperation(type: .sum, field: "estimatedHours"),
+    ],
+    filter: ["dueDate": ["$gte": "2026-01-01", "$lte": "2026-12-31"]],
+    sort: AggregateSort(field: "dueDate_month", direction: 1)
+  ))
+  // One row per category and month: ["group": ["category": "work", "dueDate_month": "2026-03"], "count": …, "sum_estimatedHours": …]
 ```
 
-Each row holds the `groupBy` values under `group`, as stored, and each operation's value beside it under `count` or `<type>_<field>`. A membership entry's key in `group` is `has_<field>_<value>` (`has_tags_urgent`), its value `"true"` or `"false"`. Two `groupBy` entries that would share a key in `group` (the same field twice, or a field named like a membership key) throw `Ambiguous aggregation group keys` before anything is read.
+Each row holds the `groupBy` values under `group`, as stored, and each operation's value beside it under `count` or `<type>_<field>`. A membership entry's key in `group` is `has_<field>_<value>` (`has_tags_urgent`), its value `"true"` or `"false"`. Two `groupBy` entries that would share a key in `group` (the same field twice, or a field named like a membership or period key) throw `Ambiguous aggregation group keys` before anything is read.
 
 Grouping by a `stringset` field counts per member value (facet); a membership `groupBy` entry groups by whether the set contains one specific value. Only one stringset facet field is allowed per aggregation, and a facet can't be mixed with other `groupBy` entries — unsupported mixes degrade (the facet is dropped or the result is empty) rather than throw.
+
+A period `groupBy` entry (the `monthly` call) groups a `date` or `string` field by `month`, `quarter` or `year`. Its key in `group` is `<field>_<period>` (`dueDate_month`) and its value a string that sorts chronologically: `"2026-03"`, `"2026-Q1"` or `"2026"`. A record whose field is missing or doesn't start `YYYY-MM` groups under `null`. With a date-range `filter`, the first and last periods hold only in-range rows; a period with no rows has no row, so fill chart gaps yourself. Any other field type throws before anything is read. Period entries work in model `aggregate()` calls on documents only: database aggregates refuse them with a 400, so group database records by the stored date and bucket them in your code.
+
+**Gotchas**
+
+- A period is read from the stored value, with no time-zone conversion. A timestamp stored as a UTC ISO string buckets by its UTC date: an expense at 11:30 PM Pacific on March 31 (`2026-04-01T06:30:00.000Z`) counts in April. To bucket by the user's calendar, store the local date (`"2026-03-31"`) in the field you group by.
 
 ### Subscribe to changes
 
@@ -1508,10 +1526,10 @@ primitive users set-profile <user-id> --name "Ada Lovelace"      # user already 
 
 - An avatar uploaded in the source app is not carried and `users list` shows no URL for it; the user uploads it again.
 - An export that can't read a document in full names it and exits non-zero. `export-all` still exports the rest and leaves the failed IDs out of `manifest.json`; export again before importing.
-- `--overwrite` merges ordinary document data; it does not guarantee imported values win. Large-document imports require an empty target.
-- A document that fails doesn't stop the run. It is listed under `failed` in `--json` output with `status` `failed` (nothing written) or `incomplete` (exists, missing data or blobs), and the command exits 1. Re-run the same command without `--overwrite` to finish it; fully imported documents are skipped, not merged again. This includes an ordinary root-document export, reported in `rootDocuments` with `action` `completed` (an `--overwrite` merge is `applied`); a root holding its user's own data is skipped without `--overwrite`. An existing large root is skipped; `--overwrite` installs into it while it is empty.
-- A large-document export's `current.yjs` holds only writes made since the server last archived the document's changes, and is empty right after an archive. The records are in `snapshot/` and `epochs/`; import the whole directory.
-- IDs are preserved except for root documents, which import into the target user's root document. The formats must match: a large root export installs into an empty large root (created when the target app sets `rootDocumentFormat = 2`), an ordinary one merges into an ordinary root, and a mismatch is refused with nothing written.
+- `--overwrite` merges ordinary document data; it does not guarantee imported values win.
+- A document that fails doesn't stop the run. It is listed under `failed` in `--json` output with `status` `failed` (nothing written) or `incomplete` (exists, missing data or blobs), and the command exits 1. Re-run the same command without `--overwrite` to finish it; fully imported documents are skipped, not merged again. This includes an ordinary root-document export, reported in `rootDocuments` with `action` `completed` (an `--overwrite` merge is `applied`); a root holding its user's own data is skipped without `--overwrite`.
+- An export of a format-2 large document is refused with nothing written. Load its row chunks into a record-log document with `primitive documents ingest <document-id> --input <export-dir>`.
+- IDs are preserved except for root documents, which import into the target user's root document. An ordinary root export merges into an ordinary root.
 - Restore document sharing in the target app. Import documents before collections.
 - `collections import --dry-run` previews changes. Existing names are skipped without `--overwrite`; overwrite requires matching owner and type. A file that still carries `contextId` imports without it, with one note.
 - `collections import` matches by name. A name that more than one target collection has is ambiguous: that collection is refused as a `collection` problem naming every matching ID, with or without `--overwrite`, and nothing is written for it. A name repeated inside the file is refused for the second and later occurrences. A missing owner or an ambiguous target name refuses that collection outright.
@@ -1527,38 +1545,77 @@ primitive documents permissions list <document-id>
 
 ## Large Documents
 
-Choose `documentFormat: 2` at creation for datasets validated at 2 GB. The format cannot change later. Configure persistent local storage, then use the ordinary document API.
+Choose `documentFormat: 3` at creation (CLI: `primitive documents create "Ledger" --format 3`, or `--large`) for a dataset that outgrows an ordinary document. The format cannot change later. Configure persistent local storage, then use the ordinary document API.
 
 ```swift
   let result = try await client.documents.create(
-    options: CreateDocumentOptions(title: "Ledger", documentFormat: 2)
+    options: CreateDocumentOptions(title: "Ledger", documentFormat: 3)
   )
   let documentId = result.metadata?["documentId"]?.stringValue
-  // The format the create recorded locally, before the server commit lands.
-  let format = result.metadata?["documentFormat"]?.numberValue
-  _ = format
-
   if let documentId {
-    // Open before querying or writing, as with any document.
     _ = try await client.documents.open(documentId)
   }
 ```
 
-The same format option applies to `getOrCreateWithAlias`; use an alias to create one document safely across concurrent attempts.
+The same format option applies to `createWithAlias` and `getOrCreateWithAlias`; use an alias to create one document safely across concurrent attempts.
 
-To create each user's root document as a large document, set `rootDocumentFormat = 2` under `[app]` in `app.toml`. It applies to root documents created afterwards; existing roots keep their format. `documents.getRoot()` then reports `documentFormat: 2`, and `openRoot()` needs the same persistent storage as any large document.
+To create each user's root document as a large document, set `rootDocumentFormat = 3` under `[app]` in `app.toml`. It applies to root documents created afterwards; existing roots keep their format. `documents.getRoot()` then reports `documentFormat: 3`, and `openRoot()` needs the same persistent storage as any large document.
+
+Format 2, the earlier large-document format, is no longer served: asking for it, or opening a document created with it, fails with `DOCUMENT_FORMAT_UNSUPPORTED`.
 
 ### Gotchas for large documents
 
 - An explicit format on `getOrCreateWithAlias` must match an existing document or the call fails with `DOCUMENT_FORMAT_MISMATCH`.
-- Offline writes expire after the configured window (7 days by default, configurable from 1 to 14 days). Sync before resuming writes. Handle `DOCUMENT_OFFLINE_WINDOW_EXPIRED`. The window is a server rule, not a guarantee the device keeps the writes.
+- Offline writes expire after the configured window (7 days by default, configurable from 1 to 14 days). Sync before resuming writes. The window, and every other reason a write can come back, are in [Write refusals](#write-refusals) below.
+- Concurrent writes merge per field, not per record: two clients editing different fields of the same record both keep their change, and an upsert that lands on a record another client already created merges its fields in rather than making a second record — even when both created it offline, apart.
+- A write — one record, or several saved together in a transaction — must fit in 1 MiB of JSON; see [Write refusals](#write-refusals).
 - Queries must select ordinary documents or large documents, not both. Use `documents` to avoid `FORMAT2_QUERY_SCOPE`. A large root document counts as a large document.
 - Nested collaborative values are rejected; store plain JSON field values.
 - Sync pending changes before eviction. Without `force`, eviction refuses to discard unsynced writes.
-- On `FORMAT2_FOLD_BROKEN`, reconnect to restore the local data before reading or writing.
 
 
 Use an on-disk store. An in-memory store cannot open a large document and reports `FORMAT2_STORAGE_UNAVAILABLE`.
+
+### Write refusals
+
+A write the platform or the client itself cannot keep is handed back on the `document:write-refused` event instead of disappearing silently; the record has already reverted to its last confirmed state. The event carries the first affected record (`model`, `recordId`), every handed-back write with its values, in the order it was made (`writes` — redo them from here), and, for a key collision, the record that kept the key (`conflictingRecord`). `error.code` says why:
+
+| Code | Why |
+|---|---|
+| `DOCUMENT_CONSTRAINT_VIOLATED` | Another client's write took a unique key first. |
+| `DOCUMENT_OFFLINE_WINDOW_EXPIRED` | The client reconnected after its offline window closed. |
+| `DOCUMENT_EPOCH_FROZEN` | A write was made further back than the offline window now reaches. |
+| `DOCUMENT_EPOCH_BUDGET` | This client's local write budget is full (below). |
+| `DOCUMENT_ENTRY_TOO_LARGE` | A single write's JSON is over 1 MiB. |
+| `DOCUMENT_ENTRY_INVALID` | A reserved field name (see [Reserved Field Names](#reserved-field-names)), or a number outside what the platform stores exactly (an integer past ±2^53). |
+| `DOCUMENT_STORE_PURGED` | The local store was evicted or wiped before the write reached the server. |
+| `WRITE_ACCESS_DENIED` | The client's permission on the document dropped below write. |
+
+```swift
+  for await event in client.stream(for: DocumentWriteRefusedEvent.self) {
+    guard let first = event.writes?.first else { continue }
+    if event.error.code == .documentConstraintViolated, let conflicting = event.conflictingRecord {
+      ui.showConflict(
+        model: first.model,
+        recordId: first.recordId,
+        message: "\(conflicting) already holds that key"
+      )
+    } else {
+      ui.showConflict(model: first.model, recordId: first.recordId, message: event.error.message)
+    }
+  }
+```
+
+**Local write budget:** each client tracks how many writes it has made or seen since it last reconnected. Once that reaches the platform's rotation size, writing further is refused locally with `DOCUMENT_EPOCH_BUDGET` — before anything is sent — until the client reconnects.
+
+### Inspecting a record-log document
+
+```bash
+primitive documents inspect <document-id>
+primitive documents inspect <document-id> --refused <session-id>
+```
+
+Reports the document's write progress, writers, and any bulk load in progress. `--refused` pages through a bulk load's refused rows, each with its code and, for a key collision, the record that kept the key.
 
 ### Snapshotting a large document on demand
 
@@ -1579,5 +1636,9 @@ primitive documents ingests get <document-id> <session-id>
 
 Supply one `<model>.ndjson` or `<model>.ndjson.gz` file per model, or an export of the same document. Each line identifies a record and supplies a merge patch. `null` removes a field; `{"_deleted": true}` deletes the record.
 
-**Gotchas:** loading changes live records and cannot be undone. All records become visible together. Ending the CLI wait does not stop the load. Handle `documentOfflineWritesResolved` when a load overlaps offline writes: writes to deleted records can be dropped, and other writes may need review.
+By default (`--mode merge`) a load only adds or changes the records its input names. `--mode refresh` also deletes every record of the input's models that the load's accepted rows don't name; an explicitly empty model's file deletes all of that model's records.
+
+Writes made while a load runs are not lost. By default (`--reserve-epoch open`) the load reserves its place in the write order before applying any rows, so a client's write made any time after the load starts keeps winning over a conflicting row from it. `--reserve-epoch commit` reserves that place later, once the input finishes validating: a write made before that point loses to the load, and one made after still wins.
+
+**Gotchas:** loading changes live records and cannot be undone. All records become visible together. Ending the CLI wait does not stop the load. A row the load can't apply is skipped and reported, not retried — list them with `documents inspect --refused`.
 
