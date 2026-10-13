@@ -99,6 +99,10 @@ no `outputSchema` on an agent: the final answer is text; anything structured is 
 `ctx.prompts.run` refuses an agent prompt by name — do not add tools or history to a
 `chat`/`decisions` prompt to work around that.
 
+`answeredBy` decides who may answer, supersede or cancel the active turn: the default,
+`"initiator"`, admits only the member whose message started the turn (plus the owner, for
+cancel); `"participants"` admits the owner or any participant.
+
 ## Tools
 
 | Declared as | Schemas from | Runs |
@@ -148,6 +152,11 @@ Gemini's JSON Schema subset refuses `$ref`, `allOf`, `not`, conditionals,
 `{ type: "object", properties: {} }`; it silently drops `additionalProperties: false` and
 `$schema`/`$id`/`$comment` (not a refusal); a string `const` becomes an `enum`; a
 discriminated `oneOf` becomes `anyOf`. Name a property, don't leave a tool's schema empty.
+
+If a tool's input must refer to one of the turn's earlier calls (e.g. "which of these
+results to show"), don't design it around the call's id: the model cannot reliably quote a
+`call_<ULID>` back and will invent one (e.g. `"c1"`). Have it name the earlier call by its
+1-based position in the turn, or by a key your own app put in that call's input.
 
 ### Every tool function checks rights on its first line
 
@@ -269,10 +278,12 @@ export default defineFunction(async (input: { variables: { householdId: string }
 });
 ```
 
-Declared `events` are recorded by a member (`POST .../events`) or
-`ctx.agents.recordEvent(sessionId, event)` from a function the member invoked. An event never
-starts a turn; it reaches the model in a later turn's history, in arrival order. A repeated
-`eventId` with the same payload records nothing further; a different payload is refused.
+Declared `events` are recorded by a member (`POST .../events`, `authorKind: "user"`) or
+`ctx.agents.recordEvent(sessionId, event)` from a function the member invoked (`authorKind:
+"app"`). An event never starts a turn; it reaches the model in a later turn's history, in
+arrival order. Identify an event by its `kind`, not by `authorKind` — either path can record
+the same kind. A repeated `eventId` with the same payload records nothing further; a
+different payload is refused.
 
 ## Limits and history
 
@@ -362,6 +373,11 @@ session's document and returns a live view.
 {{ example: agents/open-session }}
 
 {{ example: agents/send-message }}
+
+A send's `timezone` and `locale` render as `turn.timezone` and `turn.locale` for its turn and
+reach the context function's `input`. With no `turnContext.function`, the send also carries
+`context`, validated against the schema (`AGENT_SESSION_CONTEXT_NOT_ALLOWED`,
+`AGENT_SESSION_CONTEXT_INVALID`); a failed message keeps it for a retry.
 
 A turn pauses on an approval or a client tool that takes an answer, surfacing every call of
 one model response together. Find a pending call from the view's parts (`tool_call`, state
@@ -493,7 +509,9 @@ primitive agent-sessions delete <session-id>
 `list` marks the listed user's unread sessions with `•` in its `UNREAD` column. `get` never
 copies the conversation's rows — those are read by opening `documentId` with
 `primitive documents records query`. The CLI has no send/answer/cancel/events/members/rename
-— those are the clients' (a recorded principle-11 deferral).
+— those are the clients' (a recorded principle-11 deferral). A client signed in as an app
+owner or admin reads the kept turn contexts from `get()`'s `turnContexts`; a member's `get()`
+never carries them.
 
 ## Error codes
 
@@ -509,6 +527,9 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | `AGENT_SESSION_PARTICIPANT_ONLY` | A viewer tried to send, upload a file or record an event. |
 | `AGENT_SESSION_MEMBER_ONLY` | An app owner or admin who is not in the session tried to mark it read. |
 | `AGENT_SESSION_RATE_LIMITED` | Past the send limit. `details.retryAfter` names the wait in seconds. |
+| `AGENT_SESSION_NOT_FOUND` | The caller is not a member (and not an app owner or admin), or the id doesn't exist. |
+| `AGENT_SESSION_CONTEXT_NOT_ALLOWED` | A send's `context` for an agent with no turn context, or one a `function` fills. |
+| `AGENT_SESSION_CONTEXT_INVALID` | A send's `context` fails `turnContext.schema`, or a required one is missing. `details.errors` lists each path. |
 | `AGENT_CALL_ANSWERED` | A second answer to a call that already has one. |
 | `AGENT_TURN_STALE` | `cancel`/an answer named a `turnId` that is no longer active. |
 | `AGENT_ARTIFACT_TOO_LARGE` | `ctx.tool.attachArtifact` over 4 MiB of JSON. |
