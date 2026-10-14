@@ -28,7 +28,7 @@ Secret management lists names and summaries, never values.
 | Integration | `{{secrets.KEY}}` in `defaultHeaders` or `staticQuery`; resolved into the outgoing request. |
 | Function | `ctx.secret("KEY")`, with `secret:KEY` in its capabilities. |
 | Webhook | Whole `{{secrets.KEY}}` reference in `signingSecret`. |
-| CEL | `secrets.KEY`, after declaring `secrets = ["KEY"]` on the owning configuration. |
+| CEL | `secrets.KEY`, after declaring `secrets = ["KEY"]` on the owning database type, group type, collection type or metadata category config. Not in a function's `access` gate. |
 
 Prefer integration references when the secret is an API credential. Read it
 in function code only when the function needs the value itself, such as when
@@ -52,7 +52,8 @@ API_HOST = "https://api.example.com"
 
 Reference `{{vars.KEY}}` in integration headers or query parameters, or read
 it with `ctx.configVar("KEY")`. For CEL, declare `vars = ["KEY"]` on the
-owning configuration before reading `vars.KEY`.
+owning database type, group type, collection type or metadata category config
+before reading `vars.KEY`; a function's `access` gate has no `vars`.
 
 ## Gotchas
 

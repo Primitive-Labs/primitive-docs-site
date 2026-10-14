@@ -455,7 +455,7 @@ primitive databases export <id> --output ./out
 primitive databases import ./out --overwrite [--dry-run] [--batch-size 5000] [--stop-on-error]
 ```
 
-`databases import` writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
+`databases import` reads every file of the export before it writes anything, so a malformed export fails without creating a database. It writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
 
 ## Database Types
 

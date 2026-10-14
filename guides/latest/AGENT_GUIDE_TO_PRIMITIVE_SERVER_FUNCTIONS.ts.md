@@ -47,7 +47,9 @@ primitive functions invoke greet --input '{"name":"Ada"}'
 
 Return JSON data. Read `ctx.runtime` for `request` or `task`, and
 `ctx.trigger.kind` to identify what started the function. `ctx.user` is the
-original caller, or `null` for a trigger or system invocation.
+original caller, or `null` for a trigger or system invocation. Call
+`assertTrigger(ctx, kind)` first to refuse every other trigger and narrow `ctx`
+to that one — a tool function starts with `assertTrigger(ctx, "tool")`.
 
 ## Pushing
 
@@ -95,9 +97,10 @@ uses an HTTP error. Use `invocationId` to locate its log.
 
 ### The access gate
 
-`access` controls member HTTP calls. Owners and admins bypass it. Webhooks,
-cron, and nested starts do not evaluate it; use `access = "false"` for a
-function intended only for these paths.
+`access` controls member HTTP calls and an agent's tool, context and history
+calls, which it evaluates as the turn's initiator. Owners and admins bypass it.
+Webhooks, cron, and nested starts do not evaluate it; use `access = "false"`
+for a function intended only for these paths, never for one an agent calls.
 
 Function operations use app authority, not the caller’s data permissions.
 Check document access explicitly when acting on a caller-supplied ID.
@@ -356,6 +359,15 @@ progress: `lastProgressAt` is when the run last did something, such as
 starting or finishing a step; `openStep` and `openStepStartedAt` name the step
 it is inside (`charge#0` is the first `step.do("charge", …)`); `parkedAt` is
 set while it waits. `functions runs` shows `REFRESHES` and `LAST PROGRESS`.
+
+### A function an agent uses
+
+Archive, hard delete (including `config push --prune`) and a schema change an
+agent cannot take are refused with `409 FUNCTION_USED_BY_AGENT` while a
+non-archived agent names the function; `details.agents` lists each agent and
+its uses. Change the agent in the same push (push applies it first), or retire
+it. If the changed agent also names a function the push creates, run
+`primitive config push --only function/<new-function-key>` first, then the push.
 
 ### Deleting a function with live runs
 

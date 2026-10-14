@@ -2235,7 +2235,7 @@ primitive documents snapshots list <document-id>
 primitive documents snapshots get <document-id> <build-id>
 ```
 
-Only verified snapshots are served to clients. Creating one requires document write access or app-admin authority. Stopping the CLI wait leaves the build running.
+A snapshot is a segment, the base a far-behind client or an export starts from. `--wait` waits until it is `complete` or `failed`; stopping the wait leaves it running. Starting one requires document write access or app-admin authority.
 
 ### Bulk-loading a large document
 

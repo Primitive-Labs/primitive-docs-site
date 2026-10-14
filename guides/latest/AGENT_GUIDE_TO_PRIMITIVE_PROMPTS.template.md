@@ -120,7 +120,7 @@ not modify the provider request.
 | `outputFormat` | Text or JSON output. |
 | `outputSchema` | Configuration-level schema; function result validation uses the prompt-level schema. |
 | `reasoningEffort`, `reasoningBudget` | Alternative reasoning controls; choose one. |
-| `strictOutput` | OpenRouter strict schema output; requires a compatible model and prompt output schema. |
+| `strictOutput` | OpenRouter strict schema output; requires a compatible model (a `modelOverride` too, checked before the call) and prompt output schema. |
 
 Chat keys go under `[configs.chat]`. A decisions configuration uses
 `[configs.decisions]` with `questions`. An agent configuration uses `[configs.agent]`

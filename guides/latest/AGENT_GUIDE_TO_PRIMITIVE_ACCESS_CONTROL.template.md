@@ -30,7 +30,7 @@ Function access rules can check roles and group membership, but cannot query dat
 | Surface | Rule controls | Default for regular members |
 |---|---|---|
 | Function `access` | Who can invoke or start it | Denied without a rule |
-| Group or collection rule set | Resource and membership operations | Permissive when no type config exists |
+| Group or collection rule set | Resource and membership operations | Permissive when no type config exists; a type config without a rule set denies members |
 | Blob bucket preset or rule set | Reads, uploads, listing, deletion, sharing | A preset or rule set is required |
 | Database type rule set | Editing or deleting type configuration | Denied without a rule set |
 | Lock rule set | Acquiring and renewing keys | Open without a rule set; omitted operations deny once installed |
@@ -72,6 +72,7 @@ Bind via the type config: `primitive/<env>/group-type-configs/<type>.toml` / `pr
 Semantics:
 - **App owners/admins bypass rule sets entirely**; rules apply to regular members.
 - Group types with no config row get permissive defaults: any member can `create`; the creator can `edit`/`delete` and manage members; creator + direct members can read.
+- A type config with no `ruleSetName` denies members every operation; it does not fall back to the defaults.
 - To deny an op for everyone except admins/owners, set that op's rule to `"false"`.
 
 **Subject-form membership** — a group rule can ask which groups the *managed group* belongs to, not just the caller: `memberGroupsOf(group.groupId, '<groupType>')` returns that group's list of groupIds of the type. Compose with `.exists()`/`.all()` to follow a relationship graph, e.g. grant a teacher of any class the group is enrolled in:

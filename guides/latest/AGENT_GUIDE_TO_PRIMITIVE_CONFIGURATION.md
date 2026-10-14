@@ -59,13 +59,19 @@ merged, or when nobody else uses that environment.
    `create` copies the parent's settings and secrets, registers the child as
    this checkout's machine-local environment `feature-x`, selects it, and
    pushes the checkout's tree into it. `--branch` defaults to the current git
-   branch.
+   branch. A network failure or temporary server error in that push is
+   retried. Exit code 2 means the child was created but the push or the
+   registration didn't finish: run the command the output names, and don't
+   create the child again. Exit code 1 means no child was created.
 
 2. **Set up what isn't copied.** Users, documents, database records, blobs
    and other app data are not copied: the child starts empty. Sign in to it
    to create your user, then seed the data the change needs to be tested
    against. Every admin of the parent can already administer the child. Secrets the branch
-   adds are set on the child with `primitive secrets set`.
+   adds are set on the child with `primitive secrets set`. Config vars whose
+   value belongs to the child — its database ids, URLs containing its app id,
+   its origins — go in its override file (see Reference); pass them to
+   `create --vars-file <path>` so the first push already carries them.
 
 3. **Iterate.** With the child selected, `config push`, `config diff` and
    `config pull` act on the child, and the app template's dev, test and
@@ -106,8 +112,36 @@ primitive apps children delete feature-x --yes
 ```
 
 `create` takes `--branch <name>` (default: the checkout's current git
-branch), `--idle-days <n>` (7–30), `--no-secrets`, and `--no-use`. It fails
-closed: a create that errors on the server leaves no child behind.
+branch), `--idle-days <n>` (7–30), `--no-secrets`, `--no-use`, and
+`--vars-file <path>`. It fails closed: a create that errors on the server
+leaves no child behind.
+
+A child's own var values live in `primitive/<env>/vars.<slug>.override.toml`,
+a flat `KEY = "value"` table beside `vars.toml`:
+
+```toml
+# primitive/dev/vars.feature-x.override.toml
+REFERENCE_DB_ID = "01M4VFW6B2WANJXA58FG810HDX"
+WEB_ORIGIN = "https://feature-x.example.com"
+```
+
+With the child selected, `config push` sends `vars.toml` with the override's
+keys replacing or adding to it, `config diff` compares against those values,
+`config pull` writes differing server values into the override (never into
+`vars.toml`), and `config set vars KEY=value` edits the override. The parent
+and other children never read it. It is git-ignored
+(`primitive/*/*.override.toml`), and `apps children delete` removes it.
+`create --vars-file` refuses, before creating anything, a file that is not a
+valid flat var table or a destination it cannot keep out of git.
+
+**Gotchas**
+
+- The override cannot remove a var: every `vars.toml` key reaches the child.
+- Functions cache config vars per function version. Adding an override to a
+  child whose functions are already pushed leaves them reading the old values
+  until each function that reads one is pushed as a new version (any change
+  to its code or TOML); `config push` prints a note when this applies. Use
+  `--vars-file` at create time to avoid it.
 
 A child shares its parent's `primitive/<env>/` tree but keeps its own
 sync-state baseline and snapshot backups — `config pull`, `push`, and `diff`
@@ -119,10 +153,13 @@ merged back into the parent's tree keeps the parent's name.
 
 `primitive env use <name>` selects a committed environment or an existing
 local entry as usual; otherwise it looks the name up as a child slug of the
-current environment's app, and if found, registers it, copies the login, and
-selects it in one step. It refuses an unknown slug, and refuses a known one
-only when that child's app id is already registered here under a different
-name.
+current environment's app, and if found, registers it and selects it in one
+step. It refuses an unknown slug, and refuses a known one only when that
+child's app id is already registered here under a different name.
+
+A child uses its parent environment's login and step-up; it has none of its
+own. `login` or `logout` in the parent or any child signs in or out all of
+them, and names them.
 
 `primitive apps list` shows parent apps only; `--all` includes children.
 Deleting a parent with children is refused, naming them;
@@ -154,6 +191,7 @@ creation use their own commands; service configuration uses files and push.
 primitive/<env>/
   app.toml                        # App settings
   vars.toml                       # Config vars for this environment
+  vars.<child>.override.toml      # A child app's own var values (git-ignored)
   prompts/*.toml                  # Managed prompts
   prompts/{key}.tests/*.toml      # Prompt test cases
   integrations/*.toml             # External API integrations

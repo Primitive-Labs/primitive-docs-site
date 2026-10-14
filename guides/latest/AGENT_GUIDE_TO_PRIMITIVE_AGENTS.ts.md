@@ -146,7 +146,9 @@ type = "string"
 Push refuses: a server tool whose function is missing or lacks either schema; `endsTurn =
 true` with `approval = true`; an `outputSchema` on a client tool with `endsTurn = true`; a
 tool or event schema not translatable without loss to every provider a non-archived config
-uses.
+uses. While an agent uses a function (tool, `turnContext.function` or `history.function`),
+archiving it, deleting it, or a schema change the agent cannot take is refused with
+`FUNCTION_USED_BY_AGENT`; change the agent in the same push, or retire it.
 Gemini's JSON Schema subset refuses `$ref`, `allOf`, `not`, conditionals,
 `patternProperties`, `prefixItems`, `contains`, `format`, and a free-form
 `{ type: "object", properties: {} }`; it silently drops `additionalProperties: false` and
@@ -161,12 +163,14 @@ results to show"), don't design it around the call's id: the model cannot reliab
 ### Every tool function checks rights on its first line
 
 A tool call runs as the system, with the turn's initiator in `ctx.user` and the session in
-`ctx.tool` (set only when `ctx.trigger.kind === "tool"`). The function's `access` gate still
+`ctx.tool` (set only for a tool call). The function's `access` gate still
 runs first, against that same initiator. In a call about one user it may name
 only the initiator (`SUBJECT_USER_FORBIDDEN` otherwise), and so may anything it starts. The model chooses when to call a
 tool and with what arguments, and the SAME function can also be invoked directly over HTTP —
-so check the caller's current rights again before doing anything else, reading the session's
-`variables` for whatever the check needs:
+so make `assertTrigger(ctx, "tool")` the first line, then check the caller's current rights
+before doing anything else, reading the session's `variables` for whatever the check needs.
+`assertTrigger` refuses every other trigger and narrows `ctx`: after it, `ctx.tool` and
+`ctx.user` need no guard:
 
 ```toml
 # primitive/dev/functions/cashflow.toml
@@ -194,13 +198,13 @@ type = "number"
 
 ```ts
 // functions/cashflow/index.ts
-import { defineFunction } from "primitive-functions";
+import { assertTrigger, defineFunction } from "primitive-functions";
 
 export default defineFunction(async (_input, ctx) => {
-  if (ctx.trigger.kind !== "tool" || !ctx.tool) throw new Error("cashflow only runs as an agent tool");
+  assertTrigger(ctx, "tool"); // refuses any other trigger
   const { householdId } = ctx.tool.variables as { householdId: string };
 
-  await assertHouseholdMember(ctx.user!.userId, householdId); // check rights FIRST
+  await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
 
   return await loadCashflow(householdId);
 });
@@ -209,8 +213,9 @@ export default defineFunction(async (_input, ctx) => {
 `ctx.tool` fields: `sessionId`, `turnId`, `callId` (stable across retries — use it as an
 idempotency key), `toolName`, `documentId`, `ownerUserId`, `members: { viewerUserIds,
 participantUserIds }`, `variables` (grant nothing by themselves), and
-`attachArtifact(value)` — an app-only value on the call's row the model never sees (over
-64 KiB it becomes a blob; over 4 MiB it is refused `AGENT_ARTIFACT_TOO_LARGE`).
+`attachArtifact(value)` — an app-only value on the call the model never sees; a client reads
+it with `view.artifact` (see "Read a call's artifact"). Over 4 MiB it is refused
+`AGENT_ARTIFACT_TOO_LARGE`.
 
 A `task` tool is the same function, started durably instead of synchronously — same
 `ctx.tool`, same first-line check:
@@ -238,13 +243,13 @@ type = "string"
 
 ```ts
 // functions/advisor-report/index.ts
-import { defineFunction } from "primitive-functions";
+import { assertTrigger, defineFunction } from "primitive-functions";
 
 export default defineFunction(async (_input, ctx) => {
-  if (ctx.trigger.kind !== "tool" || !ctx.tool) throw new Error("advisor-report only runs as an agent tool");
+  assertTrigger(ctx, "tool"); // refuses any other trigger
   const { householdId } = ctx.tool.variables as { householdId: string };
 
-  await assertHouseholdMember(ctx.user!.userId, householdId); // check rights FIRST
+  await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
 
   const report = await buildSpendingReport(householdId);
   await ctx.tool.attachArtifact({ reportId: report.id });
@@ -342,11 +347,20 @@ authorization for who may use the agent — nothing on the agent prompt itself g
 Variables are re-validated against `inputSchema`; a declared agent key and bad variables are
 compile errors once a tree has pushed.
 
-`ctx.agents.getSession(sessionId, { userId })`, `listSessions({ userId })` and
-`recordEvent(sessionId, event, { userId })` follow the same rule: they act as that member,
-with no admin arm, and never return a session's `object`, `turnContexts` or `lastTurn`.
-None of the four ever sends, answers, marks a session read or manages members — those are
-the members', from a client.
+`ctx.agents.getSession(sessionId, { userId })`, `listSessions({ userId })`,
+`recordEvent(sessionId, event, { userId })` and `deleteSession(sessionId, { userId })` follow
+the same rule: they act as that member, with no admin arm, and never return a session's
+`object`, `turnContexts` or `lastTurn`.
+
+`deleteSession` deletes as the owner, with the same outcome as the client's delete, and
+answers `{ deleted: true, sessionId, documentId }`. It is the way to remove a member's
+sessions from an account-deletion or reset function (list with `listSessions({ userId })`
+and delete the items whose `role` is `"owner"`). A session whose document is already gone
+can still be deleted. A participant or viewer is refused `AGENT_SESSION_OWNER_ONLY`, anyone
+else `AGENT_SESSION_NOT_FOUND`. A `userId` passed as `null` or a non-string is refused
+`SUBJECT_USER_INVALID`, never read as the invoking user. None of the five ever sends,
+answers, cancels, marks a session read, renames or manages members — those are the
+members', from a client.
 
 ## Use a session from a client
 
@@ -446,13 +460,39 @@ A call to an `endsTurn = true` client tool needs no answer; render it from its `
   renderChips();
 ```
 
+### Read a call's artifact
+
+The view's `artifact` method answers a tool call's artifact (from `ctx.tool.attachArtifact`
+or a client tool handler's `artifact`), the same value whether it was stored on the row or,
+being large, as a blob on the session's document. Pass a `tool_call` part; a blob is
+downloaded only by this call.
+
+```typescript
+  for (const entry of view.messages) {
+    if (entry.kind === "pending") continue;
+    for (const part of entry.parts) {
+      if (part.kind === "tool_call" && part.toolName === "report" && part.state === "output-available") {
+        // The same value whether it was stored on the row or, being large,
+        // as a blob — which is downloaded only now.
+        const report = await view.artifact(part);
+        if (report !== undefined) render(report);
+      }
+    }
+  }
+```
+
+- A call with no artifact answers `undefined`.
+- A failed download throws the blob read's error; show a fallback rather than an empty result.
+- Read the artifact through `view.artifact`, not the part's `artifact` field, which is empty
+  when the artifact is stored as a blob.
+
 ### Handle client tools
 
 `view.handleClientTools(handlers)` answers client tools for you. When the active turn is the
 current user's (their message started it), each call of a named tool that waits for its
-result runs the handler, and the handler's `output` (and optional `artifact`) answers the
-call. Calls already waiting when you register, or found again when the document re-syncs
-after a reconnect, run too. It returns a function that removes the handlers; a run in flight
+result runs the handler, and the handler's `output` (and optional `artifact`, read back with
+`view.artifact`) answers the call. Calls already waiting when you register, or found again
+when the document re-syncs after a reconnect, run too. It returns a function that removes the handlers; a run in flight
 still answers.
 
 ```typescript
@@ -611,9 +651,10 @@ Every refusal and failure here carries a stable `code` under the standard error 
 
 ## Gotchas
 
-- `ctx.tool` is only set when `ctx.trigger.kind === "tool"` — the same function can also run
-  as a plain invocation; guard it, and always re-check `ctx.user`'s rights, never trust
-  `ctx.tool.variables` as authorization.
+- A kind check (`ctx.trigger.kind === "tool"`) narrows `ctx.trigger`, not `ctx`, so
+  `ctx.tool` stays possibly undefined and the push typecheck refuses reading it — call
+  `assertTrigger(ctx, "tool")` instead. Always re-check `ctx.user`'s rights after it; never
+  trust `ctx.tool.variables` as authorization.
 - An agent has no `outputSchema`, no `userPromptTemplate`, and no single-shot run through
   `ctx.prompts.run`.
 - `turnContext.function` and a send's client `context` are mutually exclusive — declaring a
