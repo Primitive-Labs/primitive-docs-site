@@ -49,7 +49,7 @@ primitive databases records query <database> ...       # read database records
 primitive databases records get <database> <model-name> <record-id>
 primitive databases records count <database> <model-name> [--filter '{...}']
 primitive databases records aggregate <database> <model-name> --op <count|sum|avg|min|max>
-primitive documents records query <document> <model-name> [--filter '{...}']
+primitive documents records query <document> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
 primitive documents records get <document> <model-name> <record-id>
 primitive documents records count <document> <model-name> [--filter '{...}']
 primitive documents records aggregate <document> <model-name> --op <count|sum|avg|min|max>

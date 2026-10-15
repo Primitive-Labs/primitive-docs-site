@@ -457,6 +457,21 @@ primitive databases import ./out --overwrite [--dry-run] [--batch-size 5000] [--
 
 `databases import` reads every file of the export before it writes anything, so a malformed export fails without creating a database. It writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
 
+A database the target app doesn't have is created with a new, server-assigned id. `databases import --json` reports where each database went in `databases[]`, one entry per database in the export, in import order:
+
+```json
+{ "created": 1, "updated": 0, "skipped": 0, "recordsImported": 3, "databases": [
+  { "sourceDatabaseId": "db_src", "title": "Reference", "action": "created", "targetDatabaseId": "db_new" }
+] }
+```
+
+- `action` — `created`, `updated` (`--overwrite` on an existing id) or `skipped`; the `created`/`updated`/`skipped` counts match the entries.
+- `targetDatabaseId` — the id records were written to: the new id for `created`, the source id for `updated`. Absent on `skipped` entries and under `--dry-run`, which reports every database as `created` without asking the target app.
+- `reason` — on `skipped` only: `exists` (no `--overwrite`) or `no metadata.json`.
+- `title` — present when the export has one.
+
+A script that seeds another app reads the new id from `targetDatabaseId`. An entry is recorded before its records are written, so a run that `--stop-on-error` aborts still reports the database it stopped in. The human output prints `Imported database <source> (<title>) as <target>` when the id changed.
+
 ## Database Types
 
 A **database type** is a named configuration shared by every database of that type:
@@ -661,14 +676,17 @@ A `$caller` registered query (see [Registered queries](#registered-queries)) or 
 
 ## Reserved Field Names
 
-Two names are reserved, and a record write carrying either is refused with **400 `RESERVED_FIELD_NAME`** — by the database engine for a database record, and by the document records API for a document record:
+These field names are reserved, and a record write carrying one is refused with **400 `RESERVED_FIELD_NAME`** — by the database engine for a database record, and by the document records API for a document record:
 
 - **`type`** — the internal `_type` column, which holds the **model name**. A filter on a field of that name matches the model name rather than a stored value.
 - **Any name starting with `_`** — the storage engine's own columns (`_id`, `_type`, `_data`).
+- **A generated model's own members** — a field of the same name stops the generated model compiling (or, for `constructor`, constructing) on at least one client, so the name is refused on both: `CodingKeys`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
+
+Matching is exact and case-sensitive: `Save` and `syncStatus` are fine.
 
 `id` is not reserved: it is the record's primary key.
 
-A `[models.*]` schema that DECLARES either name is refused at push with the same 400, naming the block, and stores nothing — a refused update leaves the previously stored schema exactly as it was:
+A `[models.*]` schema that DECLARES a reserved name is refused at push with the same 400, naming the block, and stores nothing — a refused update leaves the previously stored schema exactly as it was:
 
 ```
 [models.product.fields.type]: Field 'type' is reserved (maps to internal _type column in queries)
@@ -691,5 +709,5 @@ Rename the declared field (`kind`, `category`, `status`) and push again.
 | Slow query | Missing index on a filtered or sorted field | Declare `indexed = true` on the field |
 | Records not found after save | Querying the wrong model name | Model names are case-sensitive |
 | Using `addManager` for end-user access | Manager is administrative control, not scoped data access | Put the access decision in a function |
-| 400 `RESERVED_FIELD_NAME` on push or write | A field named `type` or starting with `_` | Rename the field. See [Reserved Field Names](#reserved-field-names) |
+| 400 `RESERVED_FIELD_NAME` on push or write | A field named `type`, starting with `_`, or named after a generated model's member | Rename the field. See [Reserved Field Names](#reserved-field-names) |
 | 413 `SCHEMA_TOO_LARGE` on push | The inline schema exceeds the per-type cap | Trim the schema or split the models across types |

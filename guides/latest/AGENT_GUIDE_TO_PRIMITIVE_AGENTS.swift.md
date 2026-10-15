@@ -212,8 +212,10 @@ export default defineFunction(async (_input, ctx) => {
 
 `ctx.tool` fields: `sessionId`, `turnId`, `callId` (stable across retries — use it as an
 idempotency key), `toolName`, `documentId`, `ownerUserId`, `members: { viewerUserIds,
-participantUserIds }`, `variables` (grant nothing by themselves), and
-`attachArtifact(value)` — an app-only value on the call the model never sees; a client reads
+participantUserIds }`, `variables` (grant nothing by themselves), `timezone` and `locale`
+(what the turn's send carried — the prompt's `turn.timezone`/`turn.locale`; `null` when
+absent), `context` (the turn's validated turn context — the prompt's `turn.*`; `null` when the
+turn carried none), and `attachArtifact(value)` — an app-only value on the call the model never sees; a client reads
 it with `view.artifact` (see "Read a call's artifact"). Over 4 MiB it is refused
 `AGENT_ARTIFACT_TOO_LARGE`.
 
@@ -556,6 +558,26 @@ There is no `uiMessages()` in Swift: read a part's `content` (`PrimitivePartCont
 A message sent while a turn runs queues; one from the owner or whoever `answeredBy` allows,
 sent while the turn is paused, supersedes it instead (unanswered calls end `superseded`, the
 model sees it).
+
+### Read a turn's steps
+
+Each view message's `steps` are its turn's timed rows, by `seq`: `kind`, `status` (`running`,
+`completed`, `failed`), `startedAt`, and once ended `endedAt`, `durationMs`, `errorCode`.
+
+| Kind | Times |
+| --- | --- |
+| `model_call` | One model round; `providerDurationMs`, token usage, `cost` |
+| `tool_call` | One server tool run; `functionName`, `functionVersion` |
+| `client_call` | One client tool call, from the call written to its answer arriving |
+| `context_call` | The turn context function |
+| `history_call` | The history function, per model round |
+
+A `client_call` step's `callId` and `toolName` match the call's part; `resolvedByUserId` is the
+member whose answer or cancel made it final. An approval-gated client tool has one step over
+approval and result. A call that ends unanswered is `failed` with `AGENT_CALL_CANCELLED`,
+`AGENT_CALL_SUPERSEDED`, `AGENT_CALL_EXPIRED` or the failed turn's code; a denial is
+`AGENT_CALL_DENIED`, an error answer `AGENT_CLIENT_TOOL_FAILED`. An `endsTurn` client tool call
+without approval has no step.
 
 ## Test an agent
 

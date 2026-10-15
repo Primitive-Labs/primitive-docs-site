@@ -2,6 +2,22 @@
 
 Deploy the web template to its hosting environment, or distribute the native app through TestFlight and the App Store.
 
+## Protect the app
+
+Before real users reach the app, raise its protection level in `app.toml`:
+
+```toml
+# primitive/prod/app.toml
+[app]
+protection = "protected"
+```
+
+```bash
+primitive config push --only app
+```
+
+A CLI login can still read the app, but its writes, such as a `config push` or a deploy, then need a step-up pinned to the app (`primitive login --step-up --scope write --app <app-id>`); a CI session pinned to the app writes without one. Only the app's console owner changes the level. See [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions) for the full access rules.
+
 ## Web (Cloudflare Workers)
 
 The web template deploys to Cloudflare Workers via `pnpm cf-deploy`. You need a Cloudflare account with Workers deploy access.

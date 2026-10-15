@@ -56,7 +56,17 @@ to that one — a tool function starts with `assertTrigger(ctx, "tool")`.
 Push bundles dependencies, generates types, checks function code, and activates
 a version. It preserves authored sources for `config pull`.
 
-- Keep source imports inside the configuration directory.
+- Keep source imports inside the configuration directory, or list shared
+  directories in `functionSources` in `primitive/config.json`
+  (`["web/src/engine"]`, relative to the project root; `..` may climb up to the
+  git repository root). Push bundles and typechecks shared files with each
+  function that imports them and never stores them; `config pull` writes only
+  the configuration directory.
+- A shared file's imports resolve with its own nearest `tsconfig.json`
+  `paths`/`baseUrl`, and must land in a listed directory: a `@/` alias or a
+  linked workspace package outside every listed directory is refused at push.
+  All other compiler options come from `functions/tsconfig.json` (no DOM); do
+  not set `rootDir` there.
 - Import npm packages by name. The built bundle is limited to 5 MB.
 - Treat generated declarations as build output. Use `primitive functions
   codegen --check` in CI.
@@ -406,7 +416,9 @@ access, not the caller’s.
 ### Which user a call is about
 
 A call about one user takes `userId`. Omitted, it means the caller
-(`ctx.user`). A run with no caller — cron, a webhook, `--as system`, or a task
+(`ctx.user`). Only an absent `userId` means the caller: an empty, `null` or
+non-string `userId` throws `SUBJECT_USER_INVALID` (400), user-scoped alias
+calls included, so omit it rather than pass `""`. A run with no caller — cron, a webhook, `--as system`, or a task
 started from one — must name the user, or the call throws
 `FUNCTION_SUBJECT_REQUIRED` (400):
 
@@ -507,9 +519,12 @@ for validated, typed `parsed` results. See
 Use `ctx.secret("KEY")` with `secret:KEY` in capabilities. Use
 `ctx.configVar("KEY")` for non-secret settings without a capability.
 
-Secrets refresh through a short cache, usually within about a minute. Config
-vars are cached per function version: push a new version after changing one.
-Never log credentials. See [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
+Secrets refresh through a short cache, usually within about a minute. A
+running function version caches each config var it reads and keeps that
+value until a new version is pushed (any change to its code or TOML) or its
+running instance is recycled on its own — there's no fixed expiry, so one
+test invocation after changing a var is not proof every invocation sees the
+change. Never log credentials. See [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
 
 ## Sending to a connected client
 
@@ -661,6 +676,48 @@ Use registered queries to share validated database operations. See the
 (the route's `result`), every other call answers the route's own shape. A
 document batch applies one model’s operations atomically. Use
 `ctx.api.documents.records.bulk` for multiple models.
+
+`query` takes `filter`, `sort`, `limit` and `cursor`. `sort` maps each field to
+`1` (ascending) or `-1` (descending), earlier keys first, with `id` breaking
+ties; `limit` and `cursor` apply to the sorted rows, so
+`query({ sort: { createdAt: -1 }, limit: 50 })` is the newest 50. Send the same
+`sort` with each `cursor`: a cursor from another sort is refused (400).
+
+`query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000;
+a larger value is refused (400), never clamped. A page also ends before the
+record that would pass 8 MiB (the sum of each record's UTF-8 JSON, envelope
+not counted), answering `hasMore: true` and a `nextCursor`; a single larger
+record comes back alone. Loop on `hasMore` rather than counting rows.
+
+`aggregate` takes the route's body, `{ options: { operations, groupBy?,
+filter? } }`. A `groupBy` entry is a plain field name or a period level
+`{ field, period }`, with `period` `"month"`, `"quarter"` or `"year"`:
+
+```ts
+const rows = await ctx.doc(ledgerId).model("transaction").aggregate({
+  options: {
+    groupBy: [{ field: "date", period: "month" }, "categoryId"],
+    operations: [{ type: "count" }, { type: "sum", field: "amount" }],
+    filter: { date: { $gte: "2025-11-01", $lte: "2026-10-31" } },
+  },
+});
+// [{ group: { date_month: "2026-01", categoryId: "food" }, count: 3, sum_amount: -42 }, …]
+```
+
+A period level's key in `group` is `<field>_<period>`; its value is
+`YYYY-MM`, `YYYY-Qn` or `YYYY`, read from the stored text with no time-zone
+conversion. A record whose field is missing or not a date is in the `null`
+bucket. The rows equal the client's `Model.aggregate` rows for the same call.
+
+Gotchas:
+
+- **A declared model checks period fields.** When the model declares a schema,
+  a period level must name a declared `date` or `string` field, or the call
+  fails with a 400. On a model with no declaration the same level answers the
+  `null` bucket, and a plain field level is never checked.
+- **Only plain fields and period levels group.** A `stringset` field,
+  `{ field, contains }`, `sort` and `limit` fail with a 400; sort or trim the
+  rows in the function.
 
 To sync external rows, use `{ action: "upsert", constraint, data }`: `constraint`
 names a declared unique constraint (`<model>_<field>_unique` for a `unique`

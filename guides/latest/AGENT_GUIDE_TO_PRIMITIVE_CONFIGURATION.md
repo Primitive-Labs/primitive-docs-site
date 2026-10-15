@@ -41,7 +41,9 @@ Pick the shape that matches how the work is done:
   branch.
 - **Parallel work in several worktrees or agents:** one child per worktree,
   each tracking that worktree's branch. Every git worktree keeps its own
-  environment selection, so the children never cross.
+  environment selection, so the children never cross. A linked worktree uses
+  the main checkout's login, so it needs no `primitive login` (git 2.31 or
+  newer); `primitive logout` in any worktree signs them all out.
 
 Push to the shared environment directly only when the change is already
 merged, or when nobody else uses that environment.
@@ -65,13 +67,22 @@ merged, or when nobody else uses that environment.
    create the child again. Exit code 1 means no child was created.
 
 2. **Set up what isn't copied.** Users, documents, database records, blobs
-   and other app data are not copied: the child starts empty. Sign in to it
-   to create your user, then seed the data the change needs to be tested
-   against. Every admin of the parent can already administer the child. Secrets the branch
-   adds are set on the child with `primitive secrets set`. Config vars whose
-   value belongs to the child — its database ids, URLs containing its app id,
-   its origins — go in its override file (see Reference); pass them to
-   `create --vars-file <path>` so the first push already carries them.
+   and other app data are not copied: the child starts empty. An
+   `invite-only` parent's `mode` carries over, so the child admits nobody —
+   even a whitelisted `testAccountBaseEmails` address is stopped at the
+   email step (waitlisted or rejected, exactly like a normal signup) until
+   it's added directly with `primitive users create`; see [Test User
+   Sign-In](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#test-user-sign-in-per-app-whitelist).
+   Otherwise, sign in to the child to create your user, then seed the data
+   the change needs to be tested against — `databases create` makes an empty
+   database, and `databases import` always mints a new database id on the
+   child, so any var or document that names the parent's database id still
+   needs updating to the child's. Every admin of the parent can already
+   administer the child. Secrets the branch adds are set on the child with
+   `primitive secrets set`. Config vars whose value belongs to the child —
+   its database ids, URLs containing its app id, its origins — go in its
+   override file (see Reference); pass them to `create --vars-file <path>`
+   so the first push already carries them.
 
 3. **Iterate.** With the child selected, `config push`, `config diff` and
    `config pull` act on the child, and the app template's dev, test and
@@ -94,6 +105,9 @@ merged, or when nobody else uses that environment.
 
 5. **Delete the child** once the parent has the change, or when the work is
    abandoned. Deleting removes its data and this checkout's registration.
+   `apps children delete` needs the `admin` scope, same as deleting any app;
+   step up first if the login doesn't already hold it (see [Admin
+   access](#admin-access-scopes-step-ups-and-ci-sessions)).
 
    ```bash
    primitive apps children delete feature-x --yes
@@ -137,11 +151,15 @@ valid flat var table or a destination it cannot keep out of git.
 **Gotchas**
 
 - The override cannot remove a var: every `vars.toml` key reaches the child.
-- Functions cache config vars per function version. Adding an override to a
-  child whose functions are already pushed leaves them reading the old values
-  until each function that reads one is pushed as a new version (any change
-  to its code or TOML); `config push` prints a note when this applies. Use
-  `--vars-file` at create time to avoid it.
+- A running function version caches the config vars it reads. Adding an
+  override to a child whose functions are already pushed can leave them
+  reading the old values until each one is pushed as a new version (any
+  change to its code or TOML) or its running instance is recycled on its
+  own; `config push` prints a note when a changed var left a function's
+  version unchanged. Use `--vars-file` at create time to avoid it.
+- `databases delete` needs the `admin` scope on the child too, same as
+  `apps children delete` — deleting a database is never scoped down just
+  because the app is a child.
 
 A child shares its parent's `primitive/<env>/` tree but keeps its own
 sync-state baseline and snapshot backups — `config pull`, `push`, and `diff`
@@ -234,10 +252,16 @@ Edit `app.toml` and use `primitive config push --only app`. Its sections are
 `[app]`, `[auth]`, `[cors]`, and `[invitations]`. `[app].name` and `[app].mode`
 are required. See the authentication guide for sign-in settings.
 
-`[app].protected = true` marks an app as live with real users. Only the app's
-console owner can set or clear it; a push from anyone else that would change
-it fails with `PROTECTED_FLAG_OWNER_ONLY`. On a protected app, a scoped login
-not pinned to it can only read; see
+`[app].protection` is the app's protection level, one of
+`default`, `protected` and `internal`: `protected` for an app with real users,
+`internal` for a throwaway app (every child app is `internal`). Only the app's
+console owner changes it; a push from anyone else
+that would change it fails with `PROTECTION_OWNER_ONLY`, and a child's level
+cannot change (`PROTECTION_FIXED_ON_CHILD`). A file without the line pushes
+`default`. The deprecated `protected = true` reads as
+`protection = "protected"` until the first breaking release after 2026-12-15;
+`primitive config pull --only app` rewrites it. On a `protected` app a login's
+writes need a step-up; see
 [Admin access](#admin-access-scopes-step-ups-and-ci-sessions).
 
 Removing a managed setting clears it or restores its default. Keep explicit
@@ -326,32 +350,40 @@ The scopes are `read`, `write`, `admin`, `data:read` and `data:write`:
 | Scope | Allows |
 |---|---|
 | `read` | Listing and reading configuration |
-| `write` | Changing configuration, setting and deleting secrets, setting `protected`, deploying and activating functions and prompts |
+| `write` | Changing configuration, setting and deleting secrets, raising the protection level, deploying and activating functions and prompts |
 | `data:read` | Reading documents and database records (admin API, app API, WebSocket) |
 | `data:write` | Changing documents and database records |
-| `admin` | Deleting apps, databases and users, removing collaborators, changing roles, hard deletes, clearing `protected` |
+| `admin` | Deleting apps, databases and users, removing collaborators, changing roles, hard deletes, lowering the protection level from `protected` |
 
 None implies another; a command needs every scope its route declares. The
 data scopes guard direct access only: a token holding `write` can deploy and
 activate code, and that code reads and writes the app's data whatever the
 token's data scopes are.
 
-**Protected apps.** On a protected app, anything beyond `read` needs a login
-pinned to that app. Clearing `protected` also needs `admin`.
-
-```bash
-primitive login --scope read,write,data:read,data:write --app <app-id>
-```
+**Protected apps.** On an app whose level is `protected`, anything beyond
+`read` and `data:read` needs a step-up pinned to that app, even from a login
+pinned to it; a pinned CI session needs none. Only the app's own level counts:
+a `default` or `internal` app, including the `internal` child of a protected
+app, never needs a step-up. Lowering the level from `protected` also needs
+`admin`.
 
 A pin also reaches the pinned app's child apps; a pin on a child app does not
-reach its parent. Child apps cannot be protected.
+reach its parent.
 
-**Step-up.** Deleting an app or a database, removing a collaborator, changing a
-user's role and clearing `protected` need `admin`. Ask the user to run
-`primitive login --scope admin` for a 15-minute step-up: the login's scopes
-plus `admin`, pinned to the environment's app (`--app <id>` pins another).
-Google re-prompts and the console asks for Approve. A command refused for
-lacking `admin` retries once with the step-up; `primitive logout` ends both.
+**Step-up.** A step-up is a 15-minute session holding exactly the scopes the
+command needs, pinned to the environment's app (`--app <id>` pins another).
+Ask the user to run the command a refusal prints:
+
+```bash
+primitive login --step-up --scope write --app <app-id>
+primitive login --step-up --scope admin
+```
+
+Deleting an app or a database, removing a collaborator, changing a user's role
+and lowering the protection level need `admin`; a step-up holds it only when
+asked for. The console asks for Approve, and Google re-prompts for `admin`. A
+command refused for lacking `admin`, or by a protected app, retries once with
+the stored step-up; `primitive logout` ends both.
 
 **A narrower token** for a script or an agent, at most 1 hour:
 
@@ -360,7 +392,8 @@ primitive token --scope read --app <app-id> --ttl 15m
 ```
 
 It prints with no browser when it is no wider than the login, and opens the
-approval page otherwise.
+approval page otherwise. `primitive token --step-up --scope <list>` prints a
+step-up, always after approval.
 
 **CI sessions.** Create one from your own login, then run the CLI with the
 printed token in `PRIMITIVE_TOKEN`; no credentials file is needed:
@@ -391,10 +424,11 @@ that can no longer be refreshed answers 401 instead:
 
 | `code` | Means | Do |
 |---|---|---|
-| `INSUFFICIENT_SCOPE` | The login lacks a scope the route declares (`details.missing`) | Ask the user to run the printed `primitive login --scope …` command |
+| `INSUFFICIENT_SCOPE` | The login lacks a scope the route declares (`details.missing`) | Ask the user to run the printed `primitive login …` command |
 | `APP_NOT_PINNED` | The login's pins do not reach the app or route named | Confirm the command targets the intended app (`primitive whoami` shows the pins), then the printed command |
-| `PROTECTED_APP_PIN_REQUIRED` | The app is protected and the login is not pinned to it | Ask the user to run the printed `--app` command |
-| `PROTECTED_FLAG_OWNER_ONLY` | Only the app's console owner changes `protected` | `primitive config pull --only app` if `app.toml` is stale; otherwise the owner |
+| `PROTECTED_APP_STEP_UP_REQUIRED` | The app is protected; the login is neither a step-up pinned to it nor a CI session | Ask the user to run the printed `primitive login --step-up …` command, then retry |
+| `PROTECTION_OWNER_ONLY` | Only the app's console owner changes the protection level | `primitive config pull --only app` if `app.toml` is stale; otherwise the owner |
+| `PROTECTION_FIXED_ON_CHILD` | A child app's level is always `internal` | Change the level on the parent |
 | `SESSION_UNSCOPED` | A 401 on refresh: the login predates scoped sessions | Ask the user to run `primitive login` |
 
 ### Gotchas
@@ -406,6 +440,8 @@ that can no longer be refreshed answers 401 instead:
   that app's children with the scopes it holds.
 - **A printed `--app` does not mean the app is protected.** `APP_NOT_PINNED`
   and `INSUFFICIENT_SCOPE` print it too; act on the `code`.
+- **A pushing CI session needs `read` too.** `config push` reads the app's
+  settings before it writes them; give a pushing session `read,write`.
 - While `PRIMITIVE_TOKEN` is set it takes precedence over the stored login,
   and `primitive auth sessions create` is refused. Unset it to create sessions.
 

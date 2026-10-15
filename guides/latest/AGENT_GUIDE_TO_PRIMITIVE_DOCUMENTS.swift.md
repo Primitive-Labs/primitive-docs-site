@@ -284,7 +284,7 @@ Each row holds the `groupBy` values under `group`, as stored, and each operation
 
 Grouping by a `stringset` field counts per member value (facet); a membership `groupBy` entry groups by whether the set contains one specific value. Only one stringset facet field is allowed per aggregation, and a facet can't be mixed with other `groupBy` entries — unsupported mixes degrade (the facet is dropped or the result is empty) rather than throw.
 
-A period `groupBy` entry (the `monthly` call) groups a `date` or `string` field by `month`, `quarter` or `year`. Its key in `group` is `<field>_<period>` (`dueDate_month`) and its value a string that sorts chronologically: `"2026-03"`, `"2026-Q1"` or `"2026"`. A record whose field is missing or doesn't start `YYYY-MM` groups under `null`. With a date-range `filter`, the first and last periods hold only in-range rows; a period with no rows has no row, so fill chart gaps yourself. Any other field type throws before anything is read. Period entries work in model `aggregate()` calls on documents only: database aggregates refuse them with a 400, so group database records by the stored date and bucket them in your code.
+A period `groupBy` entry (the `monthly` call) groups a `date` or `string` field by `month`, `quarter` or `year`. Its key in `group` is `<field>_<period>` (`dueDate_month`) and its value a string that sorts chronologically: `"2026-03"`, `"2026-Q1"` or `"2026"`. A record whose field is missing or doesn't start `YYYY-MM` groups under `null`. With a date-range `filter`, the first and last periods hold only in-range rows; a period with no rows has no row, so fill chart gaps yourself. Any other field type throws before anything is read. Period entries work in model `aggregate()` calls on documents and on the document records aggregate route (HTTP, and a server function's `ctx.doc(id).model(name).aggregate`), which answers the same rows: database aggregates refuse them with a 400, so group database records by the stored date and bucket them in your code.
 
 **Gotchas**
 
@@ -713,19 +713,26 @@ default = false
 
 ### Reserved Field Names
 
-A model may not declare a field named `type`, nor any field whose name starts with `_`. Both collide with the storage engine's own columns. `type` is the internal `_type` column, which holds the **model name** — so a filter on a declared `type` field matches the model name instead of the value the record stores, while the record still projects the value you saved. Wrong rows, and nothing in the response to say so. `id` is not reserved: it is the record's primary key.
+A model may not declare a field named `type`, a field whose name starts with `_`, or a field whose name a generated model already uses on either client. `id` is not reserved: it is the record's primary key.
+
+- **`type`** — the internal `_type` column, which holds the **model name**. A filter on a declared `type` field matches the model name instead of the value the record stores, while the record still projects the value you saved.
+- **Names starting with `_`** — the storage engine's own columns.
+- **A generated model's own members** — a field of the same name stops the generated model compiling (or, for `constructor`, constructing) on at least one client, so the name is refused on both: `CodingKeys`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
+
+Matching is exact and case-sensitive: `Save`, `syncStatus` and `sync_state` are fine.
 
 Codegen refuses such a schema rather than generating for it, naming the block and leaving no file behind:
 
 ```
 [models.tasks.fields.type]: Field 'type' is reserved (maps to internal _type column in queries)
+[models.tasks.fields.syncState]: Field 'syncState' is reserved (a record property on the JavaScript client)
 ```
 
 A function version's `documentSchema` — the copy of `models/models.toml` a push carries inside the version — is refused at the push with a 400 carrying the same sentence.
 
 The record routes refuse the key itself, whether or not a schema declares it: `POST .../documents/:documentId/records/:model`, `PATCH .../records/:model/:recordId` and `POST .../records/bulk` answer **400 `RESERVED_FIELD_NAME`** with the same sentence and write nothing. A bulk blob is all-or-nothing, so one bad record refuses the whole body. `primitive documents records save <document-id> <model> --data '{"type":"expense"}'` is therefore an error rather than a record no filter can find.
 
-**If your schema already declares `type`:** a schema the server has already stored still parses, and stored records keep their values, so nothing already stored is lost; the refusal appears the next time you run codegen or push — and straight away on any record write that carries the key. To clear it, rename the field (`kind`, `category`, `status`) and regenerate. Renaming the declaration moves no data — records written under the old name still carry it (visible in `primitive documents records query <document-id> <model> --json`), so copy each record's old value to the new field in a one-off pass before dropping it from your code.
+**If your schema already declares a reserved name:** a schema the server has already stored still parses, and stored records keep their values, so nothing already stored is lost; the refusal appears the next time you run codegen or push — and straight away on any record write that carries the key. To clear it, rename the field (`kind`, `category`, `status`) and regenerate. Renaming the declaration moves no data — records written under the old name still carry it (visible in `primitive documents records query <document-id> <model> --json`), so copy each record's old value to the new field in a one-off pass before dropping it from your code.
 
 ### Defining Relationships in models.toml
 
@@ -1625,20 +1632,58 @@ primitive documents snapshots list <document-id>
 primitive documents snapshots get <document-id> <build-id>
 ```
 
-A snapshot is a segment, the base a far-behind client or an export starts from. `--wait` waits until it is `complete` or `failed`; stopping the wait leaves it running. Starting one requires document write access or app-admin authority.
+A snapshot is a segment, the base a far-behind client or an export starts from. The platform builds them daily for a changed document of more than 5,000 records, a few seconds after a change of more than 5,000 records and a fifth of the document pauses, and when a far-behind client opens a document no segment covers (its open waits briefly, then downloads it); the last two at most every 15 minutes per document. `snapshots build` starts one now. `--wait` waits until it is `complete` or `failed`; stopping the wait leaves it running. Starting one requires document write access or app-admin authority. `snapshots get --json` names what started it in `trigger`: `daily`, `explicit`, `change` or `demand`. A segment reuses the parts of the previous one no write has changed, so its cost follows what changed, and a client holding the previous segment downloads only the changed parts.
 
 ### Bulk-loading a large document
+
+Use a bulk load, not saves, for an import, a dataset correction, or any change of thousands of records at once: one session writes every record, and they become visible together. From code, build the chunks from rows, open a session, upload, commit, and poll until the session ends:
+
+```swift
+  // rows: [DocumentIngestRow(model: "Note", id: "note-1", patch: ["title": "First"]), …]
+  let chunks = try client.documents.ingests.buildChunks(rows: rows)
+  let session = try await client.documents.ingests.create(
+    documentId: documentId,
+    options: DocumentIngestCreateOptions(mode: .merge)
+  )
+  for chunk in chunks {
+    _ = try await client.documents.ingests.uploadChunk(
+      documentId: documentId, sessionId: session.sessionId, chunk: chunk
+    )
+  }
+  _ = try await client.documents.ingests.commit(documentId: documentId, sessionId: session.sessionId)
+
+  var loaded = try await client.documents.ingests.get(documentId: documentId, sessionId: session.sessionId)
+  while !["complete", "failed", "aborted"].contains(loaded.state) {
+    try await _Concurrency.Task.sleep(nanoseconds: 1_000_000_000)
+    loaded = try await client.documents.ingests.get(documentId: documentId, sessionId: session.sessionId)
+  }
+  // loaded.state is now "complete", "failed" (loaded.failure says why) or "aborted".
+  // loaded.refusedRows counts rows the document refused; refusedSample names the first few.
+```
+
+Each row is a model, a record ID and a merge patch: values replace fields, `null` removes a field, a patch of exactly `{ "_deleted": true }` deletes the record. `buildChunks` sorts the rows and cuts them within the platform's limits (for the same rows both clients write the same decompressed chunk text, rows and ID ranges; the gzip bytes, `bytes` and `sha256` are per platform, as is the split of a chunk whose compressed size passes the limit); it holds the load in memory, so use the CLI for inputs beyond a few hundred thousand rows. `ingests.abort` discards what a session uploaded; rows a committed load already applied stay.
+
+From the CLI, supply one `<model>.ndjson` or `<model>.ndjson.gz` file per model, or an export of the same document:
 
 ```bash
 primitive documents ingest <document-id> --input ./records -y
 primitive documents ingests get <document-id> <session-id>
+primitive documents ingests abort <document-id> <session-id>
 ```
 
-Supply one `<model>.ndjson` or `<model>.ndjson.gz` file per model, or an export of the same document. Each line identifies a record and supplies a merge patch. `null` removes a field; `{"_deleted": true}` deletes the record.
+| Option | CLI flag | Default | Effect |
+|---|---|---|---|
+| `mode` | `--mode` | `merge` | `merge` adds or changes only the named records. `refresh` also deletes every record of the rows' models that no accepted row names. |
+| `models` | an empty `<model>.ndjson` file | none | For a refresh, models to empty that no row mentions. Takes `mode: "refresh"`. |
+| `reserveEpoch` | `--reserve-epoch` | `open` | When the load takes its place among the document's writes. |
 
-By default (`--mode merge`) a load only adds or changes the records its input names. `--mode refresh` also deletes every record of the input's models that the load's accepted rows don't name; an explicitly empty model's file deletes all of that model's records.
+**Write order:** with `reserveEpoch: "open"` (the default) the load is ordered when the session is created, so every write made while it uploads and applies comes after it and wins over a conflicting row. With `"commit"` it is ordered at commit: a write made while chunks were still uploading loses to the load, and only writes after the commit win. Choose `commit` only when the loaded rows should replace anything written during the upload.
 
-Writes made while a load runs are not lost. By default (`--reserve-epoch open`) the load reserves its place in the write order before applying any rows, so a client's write made any time after the load starts keeps winning over a conflicting row from it. `--reserve-epoch commit` reserves that place later, once the input finishes validating: a write made before that point loses to the load, and one made after still wins.
+**Connected clients** are told when the load completes, receive its rows in chunks, and apply the writes ordered after it on top; model subscriptions fire, and an offline client catches up on reconnect.
 
-**Gotchas:** loading changes live records and cannot be undone. All records become visible together. Ending the CLI wait does not stop the load. A row the load can't apply is skipped and reported, not retried — list them with `documents inspect --refused`.
+**Gotchas:**
+
+- Loading changes live records and cannot be undone; ending the CLI wait does not stop the load.
+- An option the document does not take fails with `INGEST_OPTION_INVALID` before a session opens.
+- A row the load can't apply is skipped and counted in the session's `refusedRows` (`refusedSample` names the first few), not retried — list them with `documents inspect --refused`.
 
