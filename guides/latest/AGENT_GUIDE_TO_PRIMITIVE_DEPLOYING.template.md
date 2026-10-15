@@ -99,9 +99,10 @@ Configure deployment environments and Primitive environments independently.
 
 ### Preview a branch against a child app
 
-A [child app](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#child-apps) (`primitive apps children create feature-x`) is a copy of the parent app for one branch. Upload a preview version of the worker under an alias instead of deploying, to run that branch's front end against it:
+A [child app](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#child-apps) (`primitive apps children create feature-x`) is a copy of the parent app for one branch. `create` does not push the configuration tree: set the child's own var values with `config set vars`, then push the tree into it before uploading (the template's `pnpm child:up feature-x` does both). Upload a preview version of the worker under an alias instead of deploying, to run that branch's front end against it:
 
 ```bash
+primitive config push --env feature-x --yes
 pnpm cf-deploy --deploy-env production --primitive-env feature-x --preview-alias feature-x
 ```
 

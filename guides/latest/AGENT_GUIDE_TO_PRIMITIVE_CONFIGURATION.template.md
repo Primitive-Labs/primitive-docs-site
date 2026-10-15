@@ -50,6 +50,10 @@ merged, or when nobody else uses that environment.
 
 ### The workflow
 
+In an app made from the Vue or Swift template, [the template
+scripts](#one-command-per-worktree-the-template-scripts) run steps 1–3 and
+the delete in one command each. The steps by hand:
+
 1. **Create the child from the branch's checkout.** Confirm the header names
    the parent environment first (`primitive env show`).
 
@@ -59,12 +63,12 @@ merged, or when nobody else uses that environment.
    ```
 
    `create` copies the parent's settings and secrets, registers the child as
-   this checkout's machine-local environment `feature-x`, selects it, and
-   pushes the checkout's tree into it. `--branch` defaults to the current git
-   branch. A network failure or temporary server error in that push is
-   retried. Exit code 2 means the child was created but the push or the
-   registration didn't finish: run the command the output names, and don't
-   create the child again. Exit code 1 means no child was created.
+   this checkout's machine-local environment `feature-x`, and selects it. It
+   pushes nothing: its last line names the push to run once the child is set
+   up (step 3). `--branch` defaults to the current git branch. Exit code 2
+   means the child was created but isn't registered on this machine: run
+   `primitive env use feature-x` to attach it, and don't create it again.
+   Exit code 1 means no child was created.
 
 2. **Set up what isn't copied.** Users, documents, database records, blobs
    and other app data are not copied: the child starts empty. An
@@ -81,17 +85,26 @@ merged, or when nobody else uses that environment.
    administer the child. Secrets the branch adds are set on the child with
    `primitive secrets set`. Config vars whose value belongs to the child —
    its database ids, URLs containing its app id, its origins — go in its
-   override file (see Reference); pass them to `create --vars-file <path>`
-   so the first push already carries them.
+   override file (see Reference), set before the first push:
 
-3. **Iterate.** With the child selected, `config push`, `config diff` and
+   ```bash
+   primitive --env feature-x config set vars DB_ID=01M4VFW6B2WANJXA58FG810HDX
+   ```
+
+3. **Push the tree into the child**, with the command `create` printed:
+
+   ```bash
+   primitive --env feature-x config push --yes
+   ```
+
+4. **Iterate.** With the child selected, `config push`, `config diff` and
    `config pull` act on the child, and the app template's dev, test and
    codegen scripts resolve to it with no other setup. Edit the TOML, push, test,
    repeat. Before declaring the work done, merge the base branch in and push
    once more so the child is tested against the parent's current
    configuration.
 
-4. **Merge, then apply to the parent.** After the branch merges, switch back
+5. **Merge, then apply to the parent.** After the branch merges, switch back
    and push the merged tree to the parent. Set any secret the branch added on
    the parent first, so the pushed configuration never references a secret
    the parent lacks.
@@ -103,11 +116,10 @@ merged, or when nobody else uses that environment.
    primitive config push
    ```
 
-5. **Delete the child** once the parent has the change, or when the work is
+6. **Delete the child** once the parent has the change, or when the work is
    abandoned. Deleting removes its data and this checkout's registration.
-   `apps children delete` needs the `admin` scope, same as deleting any app;
-   step up first if the login doesn't already hold it (see [Admin
-   access](#admin-access-scopes-step-ups-and-ci-sessions)).
+   An `internal` app is deleted with `write`, so `apps children delete`
+   needs no step-up: every child app is `internal`.
 
    ```bash
    primitive apps children delete feature-x --yes
@@ -116,19 +128,72 @@ merged, or when nobody else uses that environment.
 A teammate, or another of your worktrees, attaches an existing child with
 `primitive env use feature-x`.
 
+### One command per worktree: the template scripts
+
+Apps made from the Vue and Swift templates bring a child up for a branch, and
+tear it down, with one command each. Run them with the parent environment
+selected (or a sibling child, whose parent is then used):
+
+```bash
+pnpm child:up feature-x --port 5174   # Vue; --port defaults to 5173
+pnpm child:down feature-x
+scripts/child-app.sh up feature-x     # Swift
+scripts/child-app.sh down feature-x
+```
+
+`up` creates the child, or attaches or resumes one that exists, checks that
+`--env feature-x` resolves to that child, runs the app's
+`scripts/child-app-init`, pushes the tree, allows the Vue dev server's
+`http://localhost:<port>` origin, and selects the child. Every step is safe
+to repeat, so rerunning `up` resumes an interrupted run. A Swift app is then
+rebuilt so `primitive.json` names the child. `down` checks the child's
+environment the same way, runs `scripts/child-app-teardown`, then deletes the
+child and its local state.
+
+The two hooks are the app's own code; the templates ship neither. Add one as
+an executable file when the app needs it:
+
+- **`scripts/child-app-init`** seeds what a fresh child needs: users,
+  databases, the child's own config vars (`primitive config set vars
+  KEY=value`). It runs before the first push because a function caches the
+  config vars it reads, and on every `up`, so it must be safe to repeat.
+- **`scripts/child-app-teardown`** revokes or deletes anything the child
+  created outside the platform — third-party connections, webhooks, external
+  buckets. That cleanup is the app's responsibility: deleting the child
+  doesn't reach those services. `down --skip-teardown` deletes the child
+  without running the hook and leaves them behind.
+
+Each hook runs from the app root with `PRIMITIVE_ENV` (the child's local
+environment name), `CHILD_APP_ID`, `CHILD_APP_SLUG` and `PARENT_ENV` set.
+Address the child through `PRIMITIVE_ENV` or `--env`, never through the
+selected environment: a hook may change the selection, and the scripts don't
+rely on it afterwards. A hook that exits non-zero stops the script before the
+push (`up`) or the delete (`down`); a hook that exists but isn't executable
+is an error.
+
+**Gotchas**
+
+- A child's slug must not be the name of a committed environment in
+  `primitive/config.json`: `up` refuses it before anything runs.
+- `down` refuses a child that isn't registered on this machine, since its
+  teardown hook couldn't act on it; attach it with `primitive env use <slug>`
+  first, or pass `--skip-teardown`.
+- An exported `PRIMITIVE_ENV` outranks the selection `up` writes; `up` says
+  so when it's set.
+
 ### Reference
 
 ```bash
-primitive apps children create feature-x   # create, register, select, push the tree
+primitive apps children create feature-x   # create, register and select it
 primitive apps children list                # this app's children
 primitive apps children get feature-x       # one child, and its local status
 primitive apps children delete feature-x --yes
 ```
 
 `create` takes `--branch <name>` (default: the checkout's current git
-branch), `--idle-days <n>` (7–30), `--no-secrets`, `--no-use`, and
-`--vars-file <path>`. It fails closed: a create that errors on the server
-leaves no child behind.
+branch), `--idle-days <n>` (7–30), `--no-secrets`, `--no-use` and `--json`.
+It fails closed: a create that errors on the server leaves no child behind.
+`--json` prints one document whose `nextStep` is the command to run next.
 
 A child's own var values live in `primitive/<env>/vars.<slug>.override.toml`,
 a flat `KEY = "value"` table beside `vars.toml`:
@@ -145,8 +210,6 @@ keys replacing or adding to it, `config diff` compares against those values,
 `vars.toml`), and `config set vars KEY=value` edits the override. The parent
 and other children never read it. It is git-ignored
 (`primitive/*/*.override.toml`), and `apps children delete` removes it.
-`create --vars-file` refuses, before creating anything, a file that is not a
-valid flat var table or a destination it cannot keep out of git.
 
 **Gotchas**
 
@@ -156,10 +219,11 @@ valid flat var table or a destination it cannot keep out of git.
   reading the old values until each one is pushed as a new version (any
   change to its code or TOML) or its running instance is recycled on its
   own; `config push` prints a note when a changed var left a function's
-  version unchanged. Use `--vars-file` at create time to avoid it.
-- `databases delete` needs the `admin` scope on the child too, same as
-  `apps children delete` — deleting a database is never scoped down just
-  because the app is a child.
+  version unchanged. Set the child's vars with `config set vars` before its
+  first push to avoid it.
+- `databases delete` needs the `admin` scope on a child too. Only the child
+  app itself is deleted with `write`; deleting a database is never scoped
+  down because the app is a child.
 
 A child shares its parent's `primitive/<env>/` tree but keeps its own
 sync-state baseline and snapshot backups — `config pull`, `push`, and `diff`
@@ -182,7 +246,9 @@ them, and names them.
 `primitive apps list` shows parent apps only; `--all` includes children.
 Deleting a parent with children is refused, naming them;
 `primitive apps delete <app-id> --with-children` deletes each child, then the
-parent, stopping before the parent on the first child it can't delete.
+parent, stopping before the parent on the first child it can't delete. A
+plain login deletes the children; the parent needs an `admin` step-up unless
+it is `internal`.
 
 See the deploying guide's [Preview a branch against a child app](AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.md#preview-a-branch-against-a-child-app)
 for previewing a child's front end.
@@ -350,10 +416,10 @@ The scopes are `read`, `write`, `admin`, `data:read` and `data:write`:
 | Scope | Allows |
 |---|---|
 | `read` | Listing and reading configuration |
-| `write` | Changing configuration, setting and deleting secrets, raising the protection level, deploying and activating functions and prompts |
+| `write` | Changing configuration, setting and deleting secrets, raising the protection level, deleting an `internal` app, deploying and activating functions and prompts |
 | `data:read` | Reading documents and database records (admin API, app API, WebSocket) |
 | `data:write` | Changing documents and database records |
-| `admin` | Deleting apps, databases and users, removing collaborators, changing roles, hard deletes, lowering the protection level from `protected` |
+| `admin` | Deleting `default` and `protected` apps, databases and users, removing collaborators, changing roles, hard deletes, lowering the protection level from `protected` |
 
 None implies another; a command needs every scope its route declares. The
 data scopes guard direct access only: a token holding `write` can deploy and
@@ -365,10 +431,11 @@ token's data scopes are.
 pinned to it; a pinned CI session needs none. Only the app's own level counts:
 a `default` or `internal` app, including the `internal` child of a protected
 app, never needs a step-up. Lowering the level from `protected` also needs
-`admin`.
+`admin`. An `internal` app is deleted with `write`, with no step-up.
 
-A pin also reaches the pinned app's child apps; a pin on a child app does not
-reach its parent.
+A pin also reaches the pinned app's child apps: a login pinned to an app
+creates its children (with no step-up, even under a `protected` parent) and
+lists them with it. A pin on a child app does not reach its parent.
 
 **Step-up.** A step-up is a 15-minute session holding exactly the scopes the
 command needs, pinned to the environment's app (`--app <id>` pins another).
@@ -379,9 +446,9 @@ primitive login --step-up --scope write --app <app-id>
 primitive login --step-up --scope admin
 ```
 
-Deleting an app or a database, removing a collaborator, changing a user's role
-and lowering the protection level need `admin`; a step-up holds it only when
-asked for. The console asks for Approve, and Google re-prompts for `admin`. A
+Deleting a `default` or `protected` app or a database, removing a
+collaborator, changing a user's role and lowering the protection level need
+`admin`; a step-up holds it only when asked for. The console asks for Approve, and Google re-prompts for `admin`. A
 command refused for lacking `admin`, or by a protected app, retries once with
 the stored step-up; `primitive logout` ends both.
 
@@ -436,8 +503,8 @@ that can no longer be refreshed answers 401 instead:
 - **`write` deploys code that reaches data.** A `read,write` CI session cannot
   read data itself but can deploy a function that does. Grant `write` only
   where deploying is intended.
-- **A parent pin reaches its child apps.** A token pinned to an app can change
-  that app's children with the scopes it holds.
+- **A parent pin reaches its child apps.** A token pinned to an app can create
+  that app's children and change them with the scopes it holds.
 - **A printed `--app` does not mean the app is protected.** `APP_NOT_PINNED`
   and `INSUFFICIENT_SCOPE` print it too; act on the `code`.
 - **A pushing CI session needs `read` too.** `config push` reads the app's

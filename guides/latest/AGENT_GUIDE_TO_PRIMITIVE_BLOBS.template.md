@@ -231,6 +231,25 @@ if (blobs.hasServiceWorkerControl()) {
 
 ---
 
+## From a server function
+
+A server function uploads a document blob with `ctx.api.documents.blobs.upload`: `documentId`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.documents.blobs.list`, `downloadUrl` and `downloadHeaders` read it back.
+
+```ts
+await ctx.api.documents.blobs.upload({
+  documentId, blobId,
+  "X-Blob-Filename": "receipt.png",
+  "X-Blob-Size": bytes.byteLength,
+  "X-Blob-Sha256": sha256Base64,
+  "Content-Type": "image/png",
+  body: bytes,
+});
+```
+
+Name the type: without `"Content-Type"` the blob is stored as `application/octet-stream`, and an agent session message's `files` accepts only images and PDFs.
+
+---
+
 ## Permissions (document blobs)
 
 | Operation                              | Required document permission     |

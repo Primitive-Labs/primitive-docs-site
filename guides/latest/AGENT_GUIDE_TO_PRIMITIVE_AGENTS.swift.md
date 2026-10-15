@@ -110,43 +110,21 @@ cancel); `"participants"` admits the owner or any participant.
 | `function = "<key>"`, `invoke = "request"` (default) | the function's `inputSchema`/`outputSchema` | synchronously, as that function, 30 s at most |
 | `function = "<key>"`, `invoke = "task"` | the function's schemas | a durable task that reports back |
 | `runs = "client"` | declared in the TOML (`inputSchema`/`outputSchema`) | a member's client answers it |
+| `runs = "presentation"` | `inputSchema` in the TOML | never: data the model hands the client with its final answer |
 
-`approval = true` on either kind requires a person to approve first: a server tool runs once
+`approval = true` on a server or client tool requires a person to approve first: a server tool runs once
 approved; a client tool takes an approval, then a separate result — each stage won by the
 first valid answer. `historyScope = "turn"` limits a call's full output to its own turn;
 later turns see a stub. `statusText` is shown to members while the call is pending.
 
-`endsTurn = true` makes a call end the turn: once every call of that model response is final,
-the turn settles with no further model round, and the response's text is the final answer.
-A client tool with it is never answered — its call is final when the response is stored,
-with the result `{ "delivered": true }` — so declare `inputSchema` only and render from the
-call's `input`, which persists on the part. A server tool with it runs as usual first. Beside
-a call a person answers, the turn pauses on that call and settles on its answer (the model
-never sees it). A terminal call that errors (invalid arguments, a failing tool) does not end
-the turn. With `historyScope = "turn"`, later turns see its arguments stubbed too.
+`endsTurn = true` is for server tools: the tool runs as usual, then the turn settles with no
+further model round. A failing call does not end the turn.
 
-```toml
-[[prompt.agent.tools]]
-name = "suggest"
-description = "Show the member up to three follow-up chips beside your reply."
-runs = "client"
-endsTurn = true
-
-[prompt.agent.tools.inputSchema]
-type = "object"
-required = ["chips"]
-
-[prompt.agent.tools.inputSchema.properties.chips]
-type = "array"
-
-[prompt.agent.tools.inputSchema.properties.chips.items]
-type = "string"
-```
-
-Push refuses: a server tool whose function is missing or lacks either schema; `endsTurn =
-true` with `approval = true`; an `outputSchema` on a client tool with `endsTurn = true`; a
-tool or event schema not translatable without loss to every provider a non-archived config
-uses. While an agent uses a function (tool, `turnContext.function` or `history.function`),
+Push refuses: a server tool whose function is missing or lacks either schema; `endsTurn` on a
+client tool, or with `approval = true`; on a presentation, `function`, `outputSchema`,
+`approval`, `invoke` or `endsTurn`; `references` anywhere else, or naming a property that is
+not an integer or a list of integers; a tool or event schema not translatable without loss to
+every provider a non-archived config uses. While an agent uses a function (tool, `turnContext.function` or `history.function`),
 archiving it, deleting it, or a schema change the agent cannot take is refused with
 `FUNCTION_USED_BY_AGENT`; change the agent in the same push, or retire it.
 Gemini's JSON Schema subset refuses `$ref`, `allOf`, `not`, conditionals,
@@ -155,10 +133,49 @@ Gemini's JSON Schema subset refuses `$ref`, `allOf`, `not`, conditionals,
 `$schema`/`$id`/`$comment` (not a refusal); a string `const` becomes an `enum`; a
 discriminated `oneOf` becomes `anyOf`. Name a property, don't leave a tool's schema empty.
 
-If a tool's input must refer to one of the turn's earlier calls (e.g. "which of these
-results to show"), don't design it around the call's id: the model cannot reliably quote a
-`call_<ULID>` back and will invent one (e.g. `"c1"`). Have it name the earlier call by its
-1-based position in the turn, or by a key your own app put in that call's input.
+### Presentations
+
+A presentation (`runs = "presentation"`) is structured data the model hands the client with
+its final answer — result cards to show, follow-up chips. A valid call ends the turn: it is
+final when the response is stored, with the result `{ "delivered": true }`, and once every
+call of that response is final the response's text is the final answer. Declare
+`inputSchema` only. Beside a call a person answers, the turn pauses on that call and settles
+on its answer (the model never sees it). A call whose arguments fail the schema does not end
+the turn. With `historyScope = "turn"`, later turns see its arguments stubbed too.
+
+```toml
+[[prompt.agent.tools]]
+name = "present"
+description = "Choose which results to show as cards beside your reply, and up to three follow-up suggestions."
+runs = "presentation"
+references = ["show"]
+
+[prompt.agent.tools.inputSchema]
+type = "object"
+required = ["show"]
+
+[prompt.agent.tools.inputSchema.properties.show]
+type = "array"
+
+[prompt.agent.tools.inputSchema.properties.show.items]
+type = "integer"
+
+[prompt.agent.tools.inputSchema.properties.suggestions]
+type = "array"
+
+[prompt.agent.tools.inputSchema.properties.suggestions.items]
+type = "string"
+```
+
+Every tool call of a turn carries `callNumber`: 1 for the turn's first, every call counted in
+order, refused ones included. `references` names the top-level input properties (each an
+`integer` or a list of them) that refer to earlier calls by that number. With `references`
+declared, every tool result reaches the model as `{ "call": n, "result": … }` or
+`{ "call": n, "error": … }`, and the tool's description gains a sentence saying so. Each
+referenced number must be a call from an earlier step of the same turn that succeeded; a
+refused call, a call of the same response, or an unknown number is refused
+`AGENT_PRESENTATION_REFERENCE_INVALID` and the model retries next round. Never ask the model
+for a call's id.
 
 ### Every tool function checks rights on its first line
 
@@ -392,6 +409,42 @@ The mark is the user's own and is stored on the server, so the dot clears in `li
 owner, participants and viewers may mark a session read; an app owner or admin who is not in
 it is refused `AGENT_SESSION_MEMBER_ONLY`.
 
+### Keeping a session list live
+
+`client.agents.sessions.watch(options)` answers the first page of `list()` kept current from
+the server's changes, with no polling and no document opened: activity turns the dot on and
+moves the session up, a read on another device clears it, and title, `status` and members
+update in place. Items are ordered by last activity, newest first; `loadMore()` reads the next
+page, `onChange` fires on every change, and the list reads its loaded pages again after a
+reconnect. Open the session the user is viewing with `markRead: "while-open"`: it is marked
+read at open and again whenever activity arrives while it is open. The view's `info` follows
+the same changes.
+
+```swift
+  let list = try await client.agents.sessions.watch(options: WatchAgentSessionsOptions(agent: "advisor"))
+  let render: @Sendable () -> Void = {
+    for session in list.items {
+      let dot = session.hasUnread ? "•" : " "
+      print(dot, session.title ?? "Untitled", session.status?.rawValue ?? "", session.lastActivityAt)
+    }
+  }
+  render()
+  let stopListening = list.onChange(render)
+
+  // The session the user is looking at: marked read now, and again as new
+  // activity arrives, so it is not unread on their other devices.
+  guard let first = list.items.first else { return }
+  let view = try await client.agents.sessions.open(
+    sessionId: first.sessionId, options: OpenAgentSessionOptions(markRead: .whileOpen)
+  )
+  view.onChange { print(view.info.title ?? "Untitled", view.info.status.rawValue) }
+
+  // later, when the screen goes away:
+  await view.close()
+  stopListening()
+  list.close()
+```
+
 ### Opening a session
 
 `client.agents.sessions.open(sessionId)` runs `get`, registers the platform models, opens the
@@ -441,26 +494,29 @@ one model response together. Find a pending call from the view's parts (`tool_ca
   }
 ```
 
-A call to an `endsTurn = true` client tool needs no answer; render it from its `input`:
+A presentation needs no answer. `view.presentations` answers an agent message's presentations
+(pass the generated `presentationNames`), each with `name`, `input`, `part` and `call(n)`,
+which resolves a referenced number to that call's part in the view's window:
 
 ```swift
-  let renderChips: @Sendable () -> Void = {
+  let renderAll: @Sendable () -> Void = {
     for entry in view.messages {
       guard case .synced(let message) = entry else { continue }
-      for part in message.parts {
-        // Only an `output-available` call's input passed the tool's schema;
-        // a rejected call is `output-error` and keeps the invalid input.
-        guard case .toolCall(let call) = part.content, call.toolName == "suggest",
-          call.state == .outputAvailable,
-          case .object(let input)? = call.input, case .array(let items)? = input["chips"]
-        else { continue }
-        render(items.compactMap { if case .string(let chip) = $0 { return chip } else { return nil } })
+      let presented = view.presentations(of: message.message, names: AdvisorAgent.presentationNames)
+      for presentation in presented {
+        guard case .present(let input)? = AdvisorAgentPresentation(presentation) else { continue }
+        // Each number in `show` names an earlier call of the turn: show its result.
+        let cards = input.show.map { n -> JSONValue? in
+          guard case .toolCall(let call)? = presentation.call(n)?.content else { return nil }
+          return call.output
+        }
+        render(cards, input.suggestions ?? [])
       }
     }
   }
-  _ = view.onChange(renderChips)
+  _ = view.onChange(renderAll)
   // Opening loads the conversation without a change event: render it now.
-  renderChips()
+  renderAll()
 ```
 
 ### Read a call's artifact
@@ -576,8 +632,7 @@ A `client_call` step's `callId` and `toolName` match the call's part; `resolvedB
 member whose answer or cancel made it final. An approval-gated client tool has one step over
 approval and result. A call that ends unanswered is `failed` with `AGENT_CALL_CANCELLED`,
 `AGENT_CALL_SUPERSEDED`, `AGENT_CALL_EXPIRED` or the failed turn's code; a denial is
-`AGENT_CALL_DENIED`, an error answer `AGENT_CLIENT_TOOL_FAILED`. An `endsTurn` client tool call
-without approval has no step.
+`AGENT_CALL_DENIED`, an error answer `AGENT_CLIENT_TOOL_FAILED`. A presentation call has no step.
 
 ## Test an agent
 
@@ -675,6 +730,7 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | `AGENT_HISTORY_TOO_LARGE` | The selected history does not fit the model's context; add or tighten `[prompt.agent.history]`. |
 | `AGENT_SESSION_DOCUMENT_MISSING` | The session's document was deleted directly; every operation but delete answers this. |
 | `AGENT_TEST_CASE_INVALID` | A test case's `[test.agent]` block cannot be a round of this agent. `details.refusals` lists every problem. |
+| `AGENT_PRESENTATION_REFERENCE_INVALID` | A presentation's `references` named a refused call, one of the same response, or a number the turn never gave; the model sees it and retries. |
 
 ## Gotchas
 
@@ -687,8 +743,9 @@ Every refusal and failure here carries a stable `code` under the standard error 
 - `turnContext.function` and a send's client `context` are mutually exclusive — declaring a
   function refuses a client-supplied context by name.
 - A client tool with `approval = true` has TWO answers, not one: approve, then the output.
-- A client tool with `endsTurn = true` has none: don't answer it (an answer is refused
-  `AGENT_CALL_ANSWERED`); render its call from `input`.
+- A presentation has none: don't answer it (an answer is refused `AGENT_CALL_ANSWERED`) and
+  don't register a handler for it (the generated handler types refuse one); read it with
+  `view.presentations`.
   A server tool with `approval = true` has one: approving it runs the tool.
 - Every one of the initiator's open views (each tab or device) runs a waiting client tool
   with `handleClientTools`; the first answer wins and the others are dropped silently. Keep
@@ -701,6 +758,10 @@ Every refusal and failure here carries a stable `code` under the standard error 
 - `createSession`, `getSession`, `listSessions` and `recordEvent` act for `userId`, else the
   invoking user; a tool can create a session only for its initiator. Sending, answering,
   cancelling, marking read and member management are client-only.
+- `watch` lists only the signed-in user's sessions and refuses a `userId`; an admin screen
+  for another user's sessions uses `list({ userId })` and calls it again to update.
+- Close every watched list and session view when its screen goes away; until then each keeps
+  listening, and a `markRead: "while-open"` view keeps marking the session read.
 
 ## Related guides
 
