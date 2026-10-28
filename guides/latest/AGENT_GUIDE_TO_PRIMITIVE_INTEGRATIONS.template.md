@@ -34,21 +34,23 @@ primitive config push
 [function]
 key = "refund"
 entry = "functions/refund/index.ts"
-access = "user.role == 'admin'"
 capabilities = ["integration:stripe"]   # the egress allowlist: one line per integration key
 ```
 
 ```ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireRole } from "primitive-functions";
 
-export default defineFunction(async (input: { paymentIntent: string }, ctx) => {
-  const response = await ctx.integrations.call("stripe", {
-    method: "POST",
-    path: "/v1/refunds",
-    form: { payment_intent: input.paymentIntent },
-  });
-  if (response.errorCode) throw new Error(`stripe: ${response.errorCode} (${response.status})`);
-  return { refund: response.body };
+export default defineFunction({
+  authorize: requireRole("admin"),
+  handler: async (input: { paymentIntent: string }, ctx) => {
+    const response = await ctx.integrations.call("stripe", {
+      method: "POST",
+      path: "/v1/refunds",
+      form: { payment_intent: input.paymentIntent },
+    });
+    if (response.errorCode) throw new Error(`stripe: ${response.errorCode} (${response.status})`);
+    return { refund: response.body };
+  },
 });
 ```## Request and response
 
@@ -103,8 +105,9 @@ use integration defaults; no body is sent unless the case supplies one.
 
 ## Gotchas
 
-- Declare `integration:<key>` in the function’s capabilities. Its `access`
-  rule controls callers; integrations have no separate member access rule.
+- Declare `integration:<key>` in the function’s capabilities. The function’s
+  `authorize` decides who may call the integration, which carries no access
+  rule of its own.
 - Set `allowedPaths` explicitly. Its default is `/*`, and a trailing wildcard
   matches a prefix rather than an arbitrary glob.
 - Empty `forwardHeaders` and `forwardQueryParams` allow all caller-supplied

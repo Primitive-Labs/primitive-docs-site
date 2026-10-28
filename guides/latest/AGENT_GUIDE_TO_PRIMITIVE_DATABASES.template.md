@@ -1,713 +1,373 @@
-# Working with Databases in the Primitive platform
+# Agent Guide to Primitive Databases
 
-A database stores records on the server. Apps access it through server functions; each function authorizes callers and scopes their data.
+All app data on Primitive lives in **databases**. In code and on the CLI a database is a **`db3`**: `client.db3`, `primitive db3`, `ctx.db3(...)` in server functions, `db3-types/` in the config tree. This guide is the one data-storage guide: it covers types and codegen, records, synced databases, access, and partitioning.
 
-## Core Concept: Databases
+## The decision that shapes everything
 
-`ctx.db(databaseId, "<type>").model("<Model>")` returns a typed model handle. The database type defines shared model declarations, indexes, and server-stamped fields. Each database holds up to ~5 GB; use one per team or tenant when access and queries follow that boundary.
+Every database is **synced** (the default) or has **sync off**. Decide per database with two questions: **does each reader need all of this data to use the app**, and **may everyone who can read any of it read all of it?** Both yes → sync it. Either no → sync off, served by functions.
 
-## When to Use Databases vs. Documents
-
-Use a database for server-enforced rules and caller-specific records. See [Data Modeling](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md) for the choice between documents and databases.
-
-## Quick Start
-
-### 1. Configure a database type
-
-```bash
-primitive config init
-```
-
-```toml
-# primitive/dev/database-type-configs/project.toml
-[type]
-databaseType = "project"
-timestamps = { create = "createdAt", update = "modifiedAt" }
-
-[models.tasks.fields.title]
-type = "string"
-
-[models.tasks.fields.projectId]
-type = "string"
-indexed = true
-
-[models.tasks.fields.status]
-type = "string"
-indexed = true
-```
-
-### 2. Create a database
-
-```bash
-primitive databases create "Alpha Project" --type project    # prints the databaseId
-```
-
-Databases an app creates as it runs (one per team, per project) are created from a function with `ctx.api.databases.create` — see [Managing databases](#managing-databases).
-
-### 3. Write the function that reads and writes it
-
-```toml
-# primitive/dev/functions/create-task.toml
-[function]
-key = "create-task"
-entry = "functions/create-task/index.ts"
-access = "true"
-```
-
-```ts
-// primitive/dev/functions/create-task/index.ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { databaseId: string; title: string; projectId: string }, ctx) => {
-  const tasks = ctx.db(input.databaseId, "project").model("tasks");
-  return await tasks.save({
-    data: { title: input.title, projectId: input.projectId, status: "open", createdBy: ctx.user?.userId },
-  });
-});
-```
-
-```bash
-primitive config push
-```
-
-Push writes the declarations that type `ctx.db` from the `[models.*]` blocks above (`functions/primitive-db-types.d.ts`), so a model the type does not declare is a compile error and push refuses the function.
-
-### 4. Call it from app code
-
-{{ example: databases/db-call-function }}
-
-## Reading and Writing Records
-
-All of this runs inside a function. `ctx.api.databases.records.*` is the untyped form of the same operations, plus the rest of the records surface the typed handle doesn't carry — `increment`, `addToSet` / `removeFromSet`, the index and unique-constraint routes (`registerIndex`, `dropIndex`, `listIndexes`, `syncIndexes`, `registerUniqueConstraint`, `dropUniqueConstraint`, `listUniqueConstraints`), `describe` and `models`. See [The typed handle](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle) for the handle's typing and codegen.
-
-| Call | Body | Answers |
+| | Synced | Sync off |
 |---|---|---|
-| `query(body?)` | `{ filter?, options? }` | `{ items, hasMore, nextCursor? }` |
-| `count(body?)` | `{ filter? }` | `{ count }` |
-| `aggregate(body)` | `{ options: { groupBy, operations, filter?, sort?, limit? } }` | `{ result }` |
-| `save(body)` | `{ id?, data, condition?, ifNotExists?, upsertOn?, stringSets? }` | `{ success, id, appliedFields? }` |
-| `patch(id, body)` | `{ data, condition?, stringSets? }` | `{ success, id, appliedFields? }` |
-| `delete(id, body?)` | `{ condition? }` | `{ success }` |
-| `batch(body)` | `{ operations: [{ op, id?, data?, fields?, stringSets?, condition?, ifNotExists?, upsertOn? }], atomic? }` | `{ results: [{ success, id, error?, status?, code?, values? }] }` |
+| Where data lives | A full copy on every subscribing device; the first open downloads it all (one-time), then only changes arrive | Server only; nothing downloaded |
+| Reads and writes | Local: instant, offline-capable, live updates, concurrent edits merge | A request per call, through your server functions (and app admins) |
+| Access | Whole-database grants: users, groups, link, whole app; the data model is multi-user from the start | No member access; each function checks the caller and returns only their slice |
+| Fits | Data a person or group uses together: a user's lists or budget, a team's project, a chat channel, a small catalog | Large datasets each user needs a slice of (securities master, order history); per-person rules (grades, buyer/seller views) |
 
-- The model is bound by `.model(...)`; a body may not name another. `patch` and `delete` take the record id first; a body may not carry another id.
-- `ctx.db(id, type).batch({ operations })` (on the database handle, not a model) spans models — each op names its own `modelName`.
-- **Every row a read hands back carries `id: string`**, whatever the schema declares. A row you build for a write needs none: `save` without an `id` gets a generated ULID, returned as `id`.
-- `appliedFields` carries the server-stamped values (`timestamps`, trigger `set`), present only when non-empty.
-- A refused call throws an error carrying `status` and `errorCode` (`null` when the route answered none).
+Most apps use both. Access is all-or-nothing per database, and a synced database's size is what every subscriber downloads — keep synced databases small and partitioned (one per user, team, project, channel, class or tenant; about 5 GB at most per database). Never put all app data in one database.
 
-### Query options
+## Quick start
 
-| Key | Meaning |
-|---|---|
-| `sort` | `{ field: 1 \| -1, … }`. Records that lack the field — or hold it as `null` — sort first ascending, last descending |
-| `limit` | Page size |
-| `uniqueStartKey` | The cursor: pass the previous page's `nextCursor`. Opaque — never parse or build one |
-| `direction` | `1` forward (default), `-1` backward |
-| `projection` | Inclusion `{ title: 1, status: 1 }` returns just those fields; exclusion `{ internalNotes: 0 }` strips them server-side. `id` is always returned |
-| `include` | Related records: `refersTo` (FK to one record), `hasMany` (target FK to this record), `refersToMany` (StringSet to several). Loaded records land under `_related` on each row |
-
-```ts
-const tasks = ctx.db(input.databaseId, "project").model("tasks");
-let page = await tasks.query({
-  filter: { projectId: input.projectId, status: { $ne: "done" } },
-  options: { sort: { createdAt: -1 }, limit: 100 },
-});
-const rows = [...page.items];
-while (page.hasMore) {
-  page = await tasks.query({
-    filter: { projectId: input.projectId, status: { $ne: "done" } },
-    options: { sort: { createdAt: -1 }, limit: 100, uniqueStartKey: page.nextCursor },
-  });
-  rows.push(...page.items);
-}
-```
-
-`hasMore: true` always carries a `nextCursor`, so the loop above cannot stall with rows left behind.
-
-#### Sorting on a field some records don't have
-
-Records are schemaless, so the rows of one model need not all carry the field you sort on, and a row may carry it as `null`. **Absent and `null` are one value for ordering** — a record that never wrote the field sorts exactly where a record holding `null` sorts:
-
-| Sort | Where those rows land |
-|---|---|
-| `{ priority: 1 }` (ascending) | **first**, before every real value |
-| `{ priority: -1 }` (descending) | **last**, after every real value |
-
-That is the database's own `ORDER BY` placement for nulls, and it is identical on the server and in the JS and Swift clients, so the same records page in the same order everywhere. Paging visits every matching record exactly once in either sort direction and either paging direction; ties are broken by `id`, which every record has, so boundaries are stable when many rows share a value or share having none.
-
-Cursors are **opaque** base64 tokens — never parse or construct one. A cursor issued before this ordering was specified keeps working unchanged, so a client holding one need not restart its walk.
-
-### Filter operators
-
-| Operator | Description | Example |
-|----------|-------------|---------|
-| *(exact match)* | Equals a value (shorthand for `$eq`) | `{ status: "active" }` |
-| `$eq` | Explicit equality | `{ status: { $eq: "active" } }` |
-| `$ne` | Not equal | `{ status: { $ne: "archived" } }` |
-| `$gt` | Greater than | `{ price: { $gt: 10 } }` |
-| `$gte` | Greater than or equal | `{ price: { $gte: 10 } }` |
-| `$lt` | Less than | `{ price: { $lt: 50 } }` |
-| `$lte` | Less than or equal | `{ price: { $lte: 50 } }` |
-| `$in` | Matches any value in array | `{ category: { $in: ["books", "music"] } }` |
-| `$nin` | Matches none of the values in array | `{ status: { $nin: ["archived", "deleted"] } }` |
-| `$startsWith` | String prefix match | `{ name: { $startsWith: "Pro" } }` |
-| `$endsWith` | String suffix match | `{ filename: { $endsWith: ".pdf" } }` |
-| `$containsText` | Full-text search | `{ name: { $containsText: "deluxe" } }` |
-| `$exists` | Field exists (true) or is null/missing (false) | `{ avatar: { $exists: true } }` |
-| `$contains` | StringSet contains a value | `{ tags: { $contains: "featured" } }` |
-| `$all` | StringSet contains all values | `{ tags: { $all: ["featured", "sale"] } }` |
-| `$size` | StringSet element count (number or comparison) | `{ tags: { $size: 3 } }` or `{ tags: { $size: { $gte: 1 } } }` |
-| `$or` | Matches any of the conditions | `{ $or: [{ status: "active" }, { priority: { $gte: 5 } }] }` |
-| `$and` | Matches all conditions (useful when multiple conditions target the same field) | `{ $and: [{ price: { $gte: 10 } }, { price: { $lte: 50 } }] }` |
-
-`$startsWith`, `$endsWith`, and `$containsText` are mutually exclusive on the same field — only one substring operator per field per query.
-
-**List size.** A single `$in` or `$nin` list holds at most **1,000 values**; each list in a filter is counted on its own — two 600-value lists in one filter are fine. Past the cap the call is refused with `400 QUERY_IN_LIST_TOO_LARGE`, naming the field, the count and the cap. The list costs the statement ONE bound parameter, so a thousand keys page and sort no more expensively than two.
-
-Past a thousand, the split depends on the operator. Chunk an `$in` and merge the pages — each chunk matches some of the rows, so the union is the answer. NEVER merge chunked `$nin` queries that way — a chunk excluding some values still returns the rows the other chunks exclude, so the union is nearly every row. Put `$nin` chunks in ONE filter instead, where `$and` intersects them:
-
-```ts
-const chunks = [];
-for (let i = 0; i < keys.length; i += 1000) chunks.push(keys.slice(i, i + 1000));
-
-const page = await tasks.query({
-  filter: { $and: chunks.map((chunk) => ({ assigneeId: { $nin: chunk } })) },
-});
-```
-
-**Filter bind cap.** One statement may bind **100 parameters** total, shared with the model name and the cursor's sort values. A list (as above) and a group of equality branches on the same fields both cost ONE parameter however big they are, so an `$or` of a hundred `{ accountId, month }` pairs binds one parameter and pages, sorts and counts like any other filter. A filter with no such group — a hundred differently-shaped `$and` branches — is refused with `400 QUERY_FILTER_TOO_MANY_BINDS` naming the bound and the count; fold repeated conditions into an `$in` or an `$or` of equality branches, or split the query.
-
-**Absent fields (#3166).** `$ne`, `$nin` and `{ field: null }` match records that never wrote the field; equality, the range operators and `$in` match only records that carry it. To keep excluding the missing case, put `null` in the `$nin` list: `{ deleted: { $nin: [null, true] } }`. Full semantics: [Documents guide, §Absent fields](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#absent-fields).
-
-Multiple filters on different fields are implicitly combined with AND. Use an explicit `$and` only when you need two conditions on the *same* field (e.g. a range), and combine `$or` with other top-level fields freely.
-
-**Group membership in a filter.** Expand the group in code, then filter with `$in`:
-
-```ts
-// listMembers answers a page: { items: [{ userId, … }], hasMore, nextCursor? }
-const members = await ctx.api.groups.listMembers({ groupType: "team", groupId: input.teamId });
-const ids = members.items.map((m: { userId: string }) => m.userId);
-const tasks = await ctx.db(input.databaseId, "project").model("tasks")
-  .query({ filter: { assigneeId: { $in: ids } } });   // up to 1,000 ids per list
-```
-
-Follow `nextCursor` (`cursor` argument) for a group larger than one page.
-
-### Writes
-
-- **`save`** is an upsert: it creates the record, or merges `data` into the existing one. `ifNotExists: true` makes it insert-only (an existing id fails with `409`). `upsertOn: "<field>"` resolves the target by that field's value instead of by id.
-- **`patch`** merges `data` into an existing record; a missing record fails with `404`.
-- **`delete`** removes one record by id.
-- **`stringSets`** on `save`/`patch` seeds `stringset` fields: `{ tags: ["a", "b"] }`. A stringset stores each value once and reads back sorted by Unicode code point, not in the order you sent.
-
-### Conditional writes (compare-and-swap)
-
-`condition` is a filter the target record must match, checked in the same transaction as the write. Keep a `version` field and write only when it still matches what you read:
-
-```ts
-await tasks.patch(task.id, {
-  data: { status: "done", version: task.version + 1 },
-  condition: { version: task.version },
-});
-```
-
-A condition that does not hold writes nothing: a single write throws with status `409`; inside a batch the item's result carries `code: "CONDITION_NOT_MET"`. Retry by re-reading and comparing again. `condition` works on `save`, `patch`, `delete`, `increment` and the set operations.
-
-### Batch writes
-
-`batch` runs several writes in one request. `op` is `save`, `patch`, `delete`, `increment`, `addToSet` or `removeFromSet`.
-
-- `atomic: true` — all or nothing: an item that fails rolls the whole batch back, and the call throws with that item's status.
-- `atomic` omitted or `false` — each item succeeds or fails on its own and successful siblings commit. A per-item failure does NOT throw; check `success` on each result. `code` is one of `NOT_FOUND`, `HOOK_DENIED`, `CONDITION_NOT_MET`, `ALREADY_EXISTS`, `UNIQUE_VIOLATION`, `VALIDATION_ERROR`.
-
-### Atomic increments and string sets
-
-No read-modify-write round trip:
-
-```ts
-await tasks.batch({
-  operations: [
-    { op: "increment", id: task.id, fields: { views: 1 } },          // result carries values: { views: <new> }
-    { op: "addToSet", id: task.id, stringSets: { tags: ["urgent"] } },
-    { op: "removeFromSet", id: task.id, stringSets: { tags: ["triage"] } },
-  ],
-});
-```
-
-The standalone forms are `ctx.api.databases.records.increment({ databaseId, body: { modelName, id, fields } })` (answers `{ success, id, values }`), and `addToSet` / `removeFromSet` with `body: { modelName, id, sets }`. On a missing record each fails with `404`.
-
-### Aggregation
-
-```ts
-const { result } = await tasks.aggregate({
-  options: {
-    groupBy: ["status"],
-    operations: [{ type: "count" }, { type: "sum", field: "estimatedHours" }],
-    filter: { projectId: input.projectId },
-    sort: { field: "count", direction: -1 },
-    limit: 10,
-  },
-});
-// result: [
-//   { group: { status: "open" }, count: 12, sum_estimatedHours: 40 },
-//   { group: { status: "done" }, count: 30, sum_estimatedHours: 95 },
-// ]
-```
-
-Operation types: `count`, `sum`, `avg`, `min`, `max` (`field` required except for `count`). `result` holds one row per group, in `sort` order: the `groupBy` values under `group` (as stored — a missing field is `null`), and each operation's value beside it under a fixed key, `count` or `<type>_<field>`, even when it is the only operation. `sort.field` names one of those keys or a `groupBy` field. A membership entry `{ field: "tags", contains: "urgent" }` is keyed `has_tags_urgent` in `group`, with `"true"` or `"false"`. Ungrouped (`groupBy: []`), `result` is exactly one row with an empty `group`; grouped with no matching records, it is `[]`. Two `groupBy` entries that would share a key in `group` are a `400` (`Ambiguous aggregation group keys`).
-
-These are the same rows on every surface that aggregates a database or document model — here, the documents twin, the CLI, and the js-bao JavaScript library's model statics (`Model.aggregate`).
-
-## Access
-
-**The function's `access` gate is the authorization.** It is a CEL expression over the caller's identity (`user.userId`, `user.role`, `isMemberOf`, `memberGroups`, `hasRole`), evaluated on every call; app owners and admins bypass it. It does not see the function's input. See [The access gate](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-access-gate).
-
-**The code scopes the rows.** The platform does not narrow a function's read to its caller:
-
-- Filter on the caller: `query({ filter: { ownerId: ctx.user!.userId } })` (`ctx.user` is non-null on an HTTP invoke, `null` on a webhook or cron fire).
-- Or bind the caller with a registered query's `$caller` parameter (below).
-- A check that depends on the input — "is this caller in the team that owns `input.databaseId`?" — is code: read `ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "team" })` (a bare array of `{ groupType, groupId, name, … }`) and refuse before touching the rows.
-
-**Nothing is declared per database or per model.** A function reaches every database of the app; the capability lines a function declares are for integrations, secrets and the permission-changing operations only (creating, deleting or re-owning a database among them — see [Capabilities](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#capabilities)).
-
-## Registered queries
-
-`defineQuery(name, definition)` and `defineMutation(name, definition)` from `primitive-functions` are a **registration helper over the same handle**, not a separate query language — `run(db, params)` is ordinary code over a `ctx.db(...)` handle, called from function code with a handle, not by app code.
-
-```ts
-import { defineQuery, defineMutation } from "primitive-functions";
-
-const myOrders = defineQuery("myOrders", {
-  models: ["Order"],
-  params: {
-    owner: { caller: true },                    // $caller: injected, never supplied
-    since: { type: "string", optional: true },
-    limit: { type: "number", default: 25 },
-  },
-  cache: { ttlMs: 30_000 },
-  run: async (db, params) => {
-    const answer = await db.model("Order").query({ options: { limit: params.limit } });
-    return answer.items.filter((row) => row.owner === params.owner);
-  },
-});
-
-// A list parameter — the shape behind every $in filter; params.ids is string[] in run.
-const ordersByIds = defineQuery("ordersByIds", {
-  models: ["Order"],
-  params: { ids: { type: "array", items: { type: "string" } } },
-  run: (db, params) => db.model("Order").query({ filter: { id: { $in: params.ids } } }),
-});
-
-const addOrder = defineMutation("addOrder", {
-  models: ["Order"],
-  params: { owner: { caller: true }, label: { type: "string" } },
-  run: (db, params) =>
-    db.model("Order").save({ data: { owner: params.owner, label: params.label } }),
-});
-
-export default async function (input: { databaseId: string }, ctx) {
-  const db = ctx.db(input.databaseId, "orders");
-  await addOrder(db, { label: "new" });
-  return { orders: await myOrders(db, { limit: 10 }) };
-}
-```
-
-`run`'s `params` is **typed from the declaration** (a `const` type parameter): a scalar as its scalar, `$caller` as a string, an array as `T[]`, an `optional` parameter as an optional key; an undeclared name inside `run` is a compile error, and an explicit `TParams` generic still overrides.
-
-| `params.<name>` key | Meaning |
-|---|---|
-| `type` | `"string"`, `"number"`, `"boolean"`, `"any"` (default), `"$caller"`, or `"array"` — validated and coerced |
-| `items` | For `type: "array"`: `{ type: "string" \| "number" \| "boolean" \| "any" }`, each element coerced and validated like a scalar; absent accepts any array |
-| `caller: true` | The `$caller` binding: the platform injects the invoking user; a call that supplies it is refused by name. Not combinable with `array` |
-| `optional` | May be omitted |
-| `default` | Applied when omitted — **coerced to the declared type at registration** (`"25"` → `25`, `["1"]` → `[1]` for numeric items); a default that cannot be coerced is refused at registration, which `config push` reports |
-
-- **Register at module scope.** A registration inside the handler works for direct calls but is invisible to `config push`, so it is absent from the manifest.
-- Names are unique; registering one twice throws. An undeclared parameter is refused, not dropped.
-- A `$caller` query throws in an invocation with no initiating user — a webhook or cron fire; use a query with an explicit parameter there.
-- `$caller` is a convenience for the code, not a platform guarantee: the query body is what filters by it. An unfiltered `query()` inside a `$caller` query still reads every row.
-- **Caching is off unless the run is verified.** `cache.ttlMs` is honored only when every model the run touched is listed in `models` and nothing was written; TTL is capped at one minute (`MAX_QUERY_CACHE_TTL_MS`). A cache entry belongs to one query, one `databaseId` and resolved type, and one parameter set after injection — two databases of the same type never share an answer, and two callers never see each other's rows. A write through the handle drops the entries that read the written model. The cache lives inside one warm sandbox instance: it bounds staleness, it does not replicate. A mutation is never cached.
-
-## Realtime
-
-Realtime for database data is **channels**: the function that writes a row publishes to a channel in the same handler, and clients that were granted and subscribed to that channel receive it. See [Channels](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#channels) for authorizing, subscribing, publishing and grant expiry.
-
-## Configuring with the CLI
-
-Database types are TOML files managed with `primitive config` — see the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the sync loop (`init`/`pull`/`diff`/`push`).
-
-```
-database-type-configs/*.toml    # Database type configs
-rule-sets/*.toml                # Rule sets (who may administer a type)
-group-type-configs/*.toml       # Group type configs
-```
-
-### Database type config files
+1. Declare a type in `primitive/<env>/db3-types/<name>.toml`:
 
 ```toml
-# primitive/dev/database-type-configs/project.toml
+# primitive/dev/db3-types/workspace.toml
 [type]
-databaseType = "project"
-ruleSetName = "project-admin-rules"                          # optional — who may edit/delete this type's config
-timestamps = { create = "createdAt", update = "modifiedAt" } # optional — stamp every save/patch
+name = "workspace"
+timestamps = { create = "createdAt", update = "updatedAt" }
+
+[models.tasks]
+class_name = "Task"
 
 [models.tasks.fields.title]
 type = "string"
+required = true
 
-[models.tasks.fields.status]
-type = "string"
-indexed = true
+[models.tasks.fields.completed]
+type = "boolean"
+default = false
 
-[triggers.tasks]
-triggers = [
-  { on = "create", set = { createdBy = "user.userId" } },
-  { on = "save", when = "record.status == 'done' && record.completedAt == null", set = { completedAt = "now()" } },
-]
-```
-
-**TOML quoting tip:** a single-quoted TOML string cannot contain an apostrophe and has no escapes, so write CEL that uses `'…'` literals in double quotes: `when = "record.status == 'done'"`.
-
-Deleting a database type is deleting `database-type-configs/<type>.toml` and running `primitive config push --prune`. The delete refuses with a `409` while live databases of that type exist — delete them first (`primitive databases delete <id>`); prune reports the type as blocked and keeps it, and the rest of the prune proceeds.
-
-### Rule set config files
-
-A rule set bound through `ruleSetName` governs who may administer the type's config:
-
-```toml
-# primitive/dev/rule-sets/project-admin-rules.toml
-[ruleSet]
-name = "project-admin-rules"
-resourceType = "database_type"
-description = "Controls who can manage the project database type"
-
-[rules.config]
-edit = "hasRole('admin')"
-delete = "hasRole('admin')"
-```
-
-See the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) for rule sets in general.
-
-### Group type config files
-
-See the [Users and Groups guide](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md) for group types.
-
-```toml
-# primitive/dev/group-type-configs/team.toml
-[groupTypeConfig]
-groupType = "team"
-ruleSetName = "team-rules"     # optional — rule set for group management
-autoAddCreator = true          # auto-add creator as member (default: true)
-```
-
-### CLI commands for direct database management
-
-```bash
-primitive database-type-configs list | get <type>
-primitive databases list [--owner <user-id>] | get <id> | create "Title" --type <type> [--initial-metadata '{...}'] | delete <id>
-
-# Admin record introspection (app admins). `get` on a missing id prints null at
-# exit 0 — a miss is not an error. Every --filter also accepts --filter-file
-# <path> (JSON or TOML). `query --json` prints the list envelope
-# `{ items, hasMore, nextCursor? }`. Without --group-by, aggregate covers the
-# whole model; --json returns the { result } envelope keyed by the operation
-# ({"result":{"count":2}}, {"result":{"sum_age":60}}).
-primitive databases records models <id>
-primitive databases records describe <id> <model-name>
-primitive databases records query <id> <model-name> --filter '{"status":"open"}' [--limit <n>] [--cursor <c>]
-primitive databases records get <id> <model-name> <record-id>
-primitive databases records count <id> <model-name> [--filter '{...}']
-primitive databases records aggregate <id> <model-name> --op avg --field price [--group-by status]
-
-# Admin record writes — both MERGE the given fields (omitted fields keep their
-# stored value). On a missing record: `save` creates it (id generated when
-# omitted), `patch` fails 404. Both store an explicit null as the value null
-# with the key present, so `$exists` still matches the record; removing a key
-# is not expressible in a write body.
-primitive databases records save <id> <model-name> [record-id] --data '{"status":"open"}'
-primitive databases records patch <id> <model-name> <record-id> --data '{"status":"closed"}'
-primitive databases records delete <id> <model-name> <record-id> [-y]
-primitive databases records delete-all <id> <model-name> [--filter '{...}'] [-y]
-
-# Atomic multi-model operations blob — the same file `documents records bulk`
-# takes: { "operations": [{ "model", "action": "create"|"patch"|"delete",
-# "id", "data", "precondition"? }, ...] }. All-or-nothing; reports
-# { applied, added, updated, deleted }. `create` is a strict create (an
-# existing id fails the batch), and a `precondition` that does not hold rolls
-# the whole batch back. A `null` in a precondition means "present and holding
-# null" — an absent field does not satisfy it. A precondition value must be a
-# string or a number other than 0/1: a database compares JSON booleans as 1/0,
-# so the CLI rejects those values. `deleted` counts delete operations applied,
-# not records that existed.
-primitive databases records bulk <id> --data-file ops.json -y
-
-# Indexes
-primitive databases indexes list <id> [--model <model-name>]
-primitive databases indexes create <id> --model <model-name> --field <field> [--type string|number|boolean] [--unique]
-primitive databases indexes drop <id> --model <model-name> --field <field> [-y]
-primitive databases reindex <id> --from-schema     # re-provision the schema's unique indexes on one database
-
-# Schema scaffold from live records
-primitive databases schema generate <database-type>
-
-# Data copy (records + indexes + constraints; type config excluded — run config push on the target first)
-primitive databases export <id> --output ./out
-primitive databases import ./out --overwrite [--dry-run] [--batch-size 5000] [--stop-on-error]
-```
-
-`databases import` reads every file of the export before it writes anything, so a malformed export fails without creating a database. It writes records in chunked batch requests: `--batch-size` sets records per request (default 5000, ceiling 25000; an invalid value fails before any write). A failing chunk is reported and the run continues by default — the command still exits non-zero at the end; `--stop-on-error` aborts the whole run at the first failing chunk. Record upserts are keyed by `_id`, so re-running an import after a partial failure is safe.
-
-A database the target app doesn't have is created with a new, server-assigned id. `databases import --json` reports where each database went in `databases[]`, one entry per database in the export, in import order:
-
-```json
-{ "created": 1, "updated": 0, "skipped": 0, "recordsImported": 3, "databases": [
-  { "sourceDatabaseId": "db_src", "title": "Reference", "action": "created", "targetDatabaseId": "db_new" }
-] }
-```
-
-- `action` — `created`, `updated` (`--overwrite` on an existing id) or `skipped`; the `created`/`updated`/`skipped` counts match the entries.
-- `targetDatabaseId` — the id records were written to: the new id for `created`, the source id for `updated`. Absent on `skipped` entries and under `--dry-run`, which reports every database as `created` without asking the target app.
-- `reason` — on `skipped` only: `exists` (no `--overwrite`) or `no metadata.json`.
-- `title` — present when the export has one.
-
-A script that seeds another app reads the new id from `targetDatabaseId`. An entry is recorded before its records are written, so a run that `--stop-on-error` aborts still reports the database it stopped in. The human output prints `Imported database <source> (<title>) as <target>` when the id changed.
-
-## Database Types
-
-A **database type** is a named configuration shared by every database of that type:
-
-- **`[models.*]` schema** — optional model declarations: types `ctx.db` and drives indexes (see [Schema](#schema))
-- **Triggers** — computed fields evaluated server-side before each save
-- **`timestamps`** — created/modified stamps on every save and patch
-- **`autoPopulatedFields`** — fields filled from CEL values (the writer, the database's metadata) on save and patch
-- **`[metadata]` manifest** — resource metadata categories the type's trigger CEL may read
-- **Rule set attachment** — who may edit or delete the type's config
-
-### Schema
-
-`[models.<Name>.fields.<field>]` blocks in the type's TOML declare its models. The database stays schemaless — a write is not refused for an undeclared field — but the declaration:
-
-- **Types the function handle.** `config push` renders it into `functions/primitive-db-types.d.ts`; `ctx.db(id, "<type>").model("<Name>")` is then checked against it, rows carry the declared field types, and `config diff` reports when a schema change has left the declarations stale.
-- **Drives indexes.** A field marked `indexed = true` or `unique = true` is provisioned on every database of the type when it is created, and a push that newly marks one back-provisions it across every existing database automatically.
-
-```toml
-[models.product.fields.name]
-type = "string"
-
-[models.product.fields.priceCents]
+[models.tasks.fields.priority]
 type = "number"
 indexed = true
 
-[models.product.fields.sku]
-type = "string"
-unique = true
+[models.tasks.fields.tags]
+type = "stringset"
+
+[models.tasks.fields.createdAt]
+type = "number"
+
+[models.tasks.fields.updatedAt]
+type = "number"
 ```
 
-**Field types — no object/JSON type.** `[models.*.fields.*]` accepts `string`, `number`, `boolean`, `date`, `id`, `stringset` only. `type = "object"` fails with `TOML_PARSE_ERROR: Invalid field type`. To store a structured payload, declare the field as `string`, write JSON-encoded values, and parse where consumed.
+2. Point the client codegen at that file (see [Codegen](#codegen)), then `primitive config push`.
+3. Create (or get-or-create) a database of the type and subscribe:
 
-**Scaffolding a schema** for a type with live data: `primitive databases schema generate <database-type>` introspects the live records, infers field types where it can, and splices a `[models.*]` block into the local `primitive/<env>/database-type-configs/<type>.toml`. Review the result — it guesses from observed values — then `primitive config push` (or `--dry-run` first).
+{{ example: databases/create }}
 
-A schema over the per-type cap (100 KB) is refused with `413 SCHEMA_TOO_LARGE`.
+4. Read and write with the generated models:
 
-### Triggers
+{{ example: databases/records-write }}
 
-Triggers are computed fields that run server-side before a record is saved, on every write path — a function's handle and the admin CLI alike. Configured per model in `[triggers.<modelName>]`.
+## Types
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `on` | string | Yes | When to fire: `"create"`, `"update"`, or `"save"` (both) |
-| `when` | string | No | CEL boolean expression — trigger only fires if true. Errors → trigger does not fire (silent deny) |
-| `set` | object | Yes | Map of field name to CEL expression. Each expression is evaluated and assigned. If the expression errors, the field is NOT set |
+A type is the schema for every database of that type, every client, and every function. `primitive config create db3-type <name>` scaffolds one; `primitive config fields db3-type` lists the top-level keys.
 
-**Trigger CEL context:**
+| Table / key | Meaning |
+|---|---|
+| `[type] name` | The type's name — what `create({ type })`, `ctx.db3(id, "<name>")` and `--type` take |
+| `[type] timestamps` | `{ create = "<field>", update = "<field>" }` — epoch-ms numbers stamped on every create/update by any writer; declare the fields `number` |
+| `[type] autoPopulatedFields` | `{ field = "user.userId" }` fills on create; `{ field = { value = "…", on = ["update"] } }` names lifecycles. Fills only absent/`null` fields |
+| `[models.<key>]` | A model. `<key>` is the stored model name (used by functions, the CLI, includes); `class_name` is the generated class/struct |
+| `[models.<key>.fields.<field>]` | `type` = `string` \| `number` \| `boolean` \| `date` \| `id` \| `stringset`; options `required`, `default`, `indexed`, `unique`, `enum` (string only; types the generated field, writes unchecked), `max_count` / `max_length` (stringset: member count / each member's length, client-checked), `auto_assign`, `auto_stamp` (`create`\|`update`\|`both`; epoch ms, stamped by whichever side writes). A `date` field takes an ISO 8601 string (or a number) |
+| `[[models.<key>.unique_constraints]]` | `name` + `fields` — a compound unique key (upsert target). A unique constraint applies to scalar fields only. A `stringset` is refused `UNIQUE_ON_STRINGSET` at push, and a client model declaring one throws `UniqueStringsetError` |
+| `[models.<key>.relationships.<rel>]` | `type` = `refersTo` \| `hasMany` (`model`, `related_id_field`, optional `order_by_field`, `order_direction`) or `hasManyThrough` (`model`, `join_model`, `join_model_local_field`, `join_model_related_field`) |
+| `[triggers.<key>] triggers = [...]` | `{ on = "create"\|"update"\|"save", when = "<CEL>", set = { field = "<CEL>" } }` or `refuse = { code = "…", message = "…" }` |
 
-| Variable | Description |
-|----------|-------------|
-| `user.userId` | The user the write is attributed to — a function's caller |
-| `user.role` | The role the write carried |
-| `record.*` | The record being saved (current field values) |
-| `database.id` | The database ID |
-| `md.self.<category>.<key>` | A [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) value on this database — loaded automatically when a trigger names it |
-| `secrets.*` | App secrets — binds only the keys declared in the config's `secrets` manifest |
-| `now()` | Current ISO 8601 timestamp |
-| `lookup(modelName, id)` | Load another record by ID; returns `null` if missing |
-| `isMemberOf(groupType, groupId)`, `memberGroups(groupType)`, `hasRole(role)` | Membership/role checks against the attributed user |
+Trigger and `autoPopulatedFields` expressions see `user.userId`, `record.*`, `database.id`, `now()` and `lookup()`. A rule never writes `id`. A `refuse` reaches the writer as `DB3_TRIGGER_REFUSED` with your code in `error.details.reason`; values a rule set come back as `appliedFields` (server calls) and sync to devices with the record.
 
-**Trigger CEL is fail-closed.** An error in `when` or `set` silently skips that trigger — a malformed expression doesn't crash the write, but it doesn't run either. Test triggers explicitly.
+**Typed databases.** Create with `type` (`client.db3.create({ type })`, `primitive db3 create --type`), or attach later with `primitive db3 type attach <db3-id> <type>` / `client.db3.setType(id, type)`; a type is never detached. On a typed database, a model the type doesn't declare is refused `DB3_MODEL_NOT_DECLARED`, the type's indexes, constraints and rules apply to every writer, and a client's own model declaration is not installed. An attach over records that break the type is refused `DB3_TYPE_REFUSED` with `details.reasons`.
 
-### Timestamps
+**Changing a type.** Edit and `primitive config push`; the push reaches every database of the type in the background (`primitive db3-types push-status <type>`, `db3-types list`, `db3-types get <type>`). Adding models and fields is safe; a field newly `indexed`/`unique` is indexed everywhere. A database whose records break the new revision (e.g. a new `unique` over duplicates) refuses it and keeps its old revision; `push-status` names it, `primitive db3-types push <type> --retry <run-id>` retries after the fix. Removing a field leaves stored values; renaming is a new field plus a copy.
 
-`timestamps` on the `[type]` config stamps created and/or modified fields on `save` and `patch` writes. Field names are yours. Stamp values are epoch milliseconds, written only when the field is absent or `null` in the submission.
+**Reserved field names.** `type`, anything starting with `_`, and the names generated models use are refused with `RESERVED_FIELD_NAME` (use `kind`/`category`/`status`; `id` is allowed). The generated-model names: `CodingKeys`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
 
-```toml
-[type]
-databaseType = "project"
-timestamps = { create = "createdAt", update = "modifiedAt" }
-```
+**What a record holds.** Strings, numbers (integers exact to ±2^53), booleans, `null`, and string sets. No nested objects or non-string arrays — flatten, or store JSON in a `string`. A field's first non-null value fixes it as a set or a scalar; the other kind is then refused `DOCUMENT_ENTRY_INVALID`. At most 1,000 field names per model, ever. Writing `null` to a string set empties it.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `create` | string | Field stamped with the current time on record creation. Optional. |
-| `update` | string | Field stamped on every save and patch (including the first save). Optional. |
-| `models` | string[] | Restrict stamping to these models. Optional — omit to stamp every model of the type. |
+## Codegen
 
-- **Every write path, every verb that carries data.** The directive belongs to the type, so it stamps a function's `save` and `patch`, each `save` and `patch` inside a batch — `upsertOn` included, on the create and on the update — and the admin CLI's writes. `delete`, `increment`, `addToSet` and `removeFromSet` carry no record body, so they never stamp.
-- A batch `save` that inserts is stamped as a create even when an earlier operation in the same batch made it one (a failing save of the same id, or a `delete` of it).
-- If a model has both a trigger and `timestamps`, the trigger fires after the stamp, so a trigger that sets the same field wins.
+Every codegen reads the **same type file**, so clients and functions agree on model names and fields (a typed database refuses models it doesn't declare).
 
-Use `timestamps` for plain audit times; use triggers when the rule depends on the record's data (`completedAt` only when `status == "done"`).
+{{#lang ts}}
+- Web: in the template's `codegen` script, set js-bao-codegen-v2's input to the type file (`-i ../primitive/dev/db3-types/workspace.toml -o src/models`); change only `-i` — the script also runs the other generators. It writes `<Class>.generated.ts` per model and an `index.ts` exporting `allModels`; pass `allModels` to the client at initialization. The template's `dev`, `build` and `test` scripts run `pnpm codegen` first.
+{{/lang}}
+{{#lang swift}}
+- iOS: the template's `scripts/codegen.sh` regenerates the structs on every build path (Xcode and `swift build`). Put `bao-codegen.json` (`{ "input": "../../primitive/dev/db3-types/workspace.toml" }`) at the root of the app target's sources, and call `GeneratedModels.register(on: client)` once at startup.
+{{/lang}}
+- Functions: `primitive config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; `ctx.db3(id, "<type>")` then accepts only existing types, `.model("<key>")` only declared models, and rows are typed.
 
-### Auto-populated fields
+A database that grew without a type: `primitive db3 schema <db3-id> --toml --output primitive/dev/db3-types/<name>.toml` writes its observed fields as a type file to review, push and attach.
 
-`autoPopulatedFields` on the `[type]` config fills fields from CEL values evaluated for the writer. A plain string fills on create; a table sets `on` to `["create"]`, `["update"]` or both.
+## Records
 
-```toml
-[type]
-databaseType = "project"
-autoPopulatedFields = { ownerId = "user.userId", editedBy = { value = "user.userId", on = ["update"] }, tier = "md.self.config.tier" }
-```
+On a device, the generated models read and write the **local copy** of a synced database. Name the database with `{ db3: id }` on `query`/`count`/`aggregate`/`save`/`increment` (Swift: `QueryOptions(db3: [id])`, `AggregateOptions(db3: [id])`, `save(in: id)`, `Model.increment(id:fields:in: id)`), or set a default with `BaseModel.setDefaultDb3(id)` (Swift: `client.setDefaultDb3(id)`). Unless you name a database, a read applies to every database on the device.
 
-- Values see `user.*` (the user the write is attributed to — a function's caller), the membership functions, `database.id`, `md.self.*` (the database's own metadata) and declared `secrets`/`vars`.
-- A `create` value fills when the write inserts the record; an `update` value when it changes an existing one (a `patch`, or a `save` of a record that exists). Each `save` and `patch` in a batch counts, and a batch `save` that inserts after an earlier `delete` of the same id is a create.
-- A value fills only a field that is absent or `null` in the submission. A value that does not evaluate leaves its field unset; the write still succeeds.
+In a server function, `ctx.db3(db3Id, "<type>").model("<key>")` reads and writes on the server with the app's authority — any database, synced or not, no grant needed. A model handle has `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment` and `bulk`. Over HTTP from a client — admin tooling, or a database with sync off — `client.db3.records(id)` offers the same verbs with the same options and refusals.
 
-## Managing databases
+### Querying
 
-Lifecycle calls go through `ctx.api.databases` in a function. Each takes one options object with its path parameters and a `body`; each answers the route's JSON. Calls that create, delete, or change permissions need a capability line on the function (`capabilities = [...]`) — an undeclared one is refused with `FUNCTION_HIGH_BLAST_GRANT_MISSING`, naming the string to add.
+{{ example: databases/records-query }}
 
-| Call | Args | Capability |
-|---|---|---|
-| `create` | `{ body: { title, databaseType, initialMetadata? } }` → the database (`databaseId`, `title`, `databaseType`, `createdBy`, …) | `databases:create` |
-| `get` | `{ databaseId }` | — |
-| `update` | `{ databaseId, body: { title } }` | — |
-| `delete` | `{ databaseId }` — removes every record and permission | `databases:delete` |
-| `listPermissions` | `{ databaseId }` → `[{ userId, permission, grantedAt, grantedBy, … }]` | — |
-| `addManager` | `{ databaseId, body: { userId, permission: "manager" } }` | `databases:addManager` |
-| `revokePermission` | `{ databaseId, userId }` | `databases:revokePermission` |
-| `transferOwnership` | `{ databaseId, body: { newOwnerId } }` | `databases:transferOwnership` |
-| `listGroupPermissions` | `{ databaseId }` | — |
-| `grantGroupPermission` | `{ databaseId, body: { groupType, groupId, permission: "manager" } }` | `databases:grantGroupPermission` |
-| `revokeGroupPermission` | `{ databaseId, groupType, groupId }` | `databases:revokeGroupPermission` |
-| `records.models` | `{ databaseId }` → `{ models: [...] }` | — |
-| `records.describe` | `{ databaseId, modelName }` → `{ fields: [{ model_name, field_name, inferred_type, first_seen_at }] }` | — |
-
-- **Creator and owner.** A database a function creates records the function's caller as `createdBy` and gives them the `owner` permission (a trigger fire, having no caller, records the app's system principal). A database type named in `create` that has no config yet is created with an empty one.
-- **Another app's database id** answers as one that does not exist.
-- **`records.describe`** reports each model's observed fields with inferred types `string`, `number`, `boolean`, `array`, `object`.
-
-### One database per team
-
-Reuse the database id as the group id, so a user's memberships name their databases:
+Server function:
 
 ```ts
-// capabilities = ["databases:create"]
-export default defineFunction(async (input: { title: string }, ctx) => {
-  const db = await ctx.api.databases.create({ body: { title: input.title, databaseType: "workspace" } });
-  await ctx.api.groups.create({ body: { groupType: "workspace", groupId: db.databaseId, name: input.title } });
-  await ctx.api.groups.addMember({ groupType: "workspace", groupId: db.databaseId, body: { userId: ctx.user!.userId } });
-  return { databaseId: db.databaseId };
+const tasks = ctx.db3(input.db3Id, "workspace").model("tasks");
+const one = await tasks.get(id);                                  // row or null
+const page = await tasks.query({ filter: { completed: false }, sort: { priority: -1 }, limit: 50, cursor });
+// page.items, page.hasMore, page.nextCursor — loop on hasMore
+const { count } = await tasks.count({ filter: { completed: false } });
+```
+
+Operators: `$eq $ne $gt $gte $lt $lte $in $nin $exists`, text `$startsWith $endsWith $containsText`, string sets `$contains $all $size`, and `$and $or`. Values compare as stored (`{ n: 5 }` never matches `"5"`). `{ field: null }` matches unset and stored-null; `$exists: false` only never-written; `$ne`/`$nin` also match unset/null; `{ field: { $eq: null } }` matches nothing. Sorting puts unset and null together — first ascending, last descending.
+
+### Aggregations
+
+`aggregate` returns one row per group: the group's values under `group`, each operation's result beside it as `count` or `<type>_<field>`. Operations: `count`, `sum`, `avg`, `min`, `max`.
+
+{{ example: databases/aggregate-count }}
+
+{{ example: databases/aggregate-sums }}
+
+**StringSet facet aggregation** — grouping by a `stringset` field produces one row per member value:
+
+{{ example: databases/aggregate-facets }}
+
+Also group by membership (`{ field: "tags", contains: "urgent" }` → group key `has_tags_urgent`) or by a date period (`{ field: "dueDate", period: "month" | "quarter" | "year" }` → group key `dueDate_month`). A function aggregates with `ctx.db3(id, type).model(key).aggregate({ options: { groupBy, operations, filter, sort, limit } })`, which resolves to the bare row array.
+
+### Includes
+
+{{ example: databases/records-includes }}
+
+`type` is `refersTo` (`sourceField` on this record), `hasMany` (`foreignKey` on the related records, with `limit`/`sort`/`filter`) or `refersToMany` (a string set of ids); related rows land under `_related[as ?? model]`. Nest up to 3 levels; includes resolve within the same database. A function passes the same `include` array to `query`.
+
+### Writes
+
+{{ example: databases/records-upsert }}
+
+{{ example: databases/records-conditional }}
+
+{{ example: databases/records-increment }}
+
+{{ example: databases/records-stringsets }}
+
+{{#lang ts}}
+Batches: `BaseModel.withTransaction(async () => { … })` applies the writes together (one unit per database); `{ atomic: false }` lets each stand alone.
+
+{{ example: databases/records-batch }}
+{{/lang}}
+
+Server function writes:
+
+```ts
+const tasks = ctx.db3(input.db3Id, "workspace").model("tasks");
+const { record, appliedFields } = await tasks.save({ data: { title: "x" } });       // id minted when omitted
+await tasks.save({ data: { email, name }, upsertOn: "email" });                     // unique field or constraint name
+await tasks.save({ id: "daily", data: { title: "Standup" }, ifNotExists: true });
+await tasks.patch(id, { data: { status: "done" }, condition: { status: "open" } });  // 409 DB3_CONDITION_NOT_MET
+await tasks.patch(id, { data: { tags: { $add: ["urgent"], $remove: ["low"] } } });  // also { $clear: true }
+const { values } = await tasks.increment(id, { views: 1 });                          // 404 DB3_RECORD_NOT_FOUND
+await tasks.delete(id, { condition: { completed: true } });
+await tasks.bulk([{ action: "create", data: { title: "a" } }, { action: "increment", id, fields: { n: 1 } }]);
+await ctx.db3(input.db3Id, "workspace").bulk(
+  [{ model: "tasks", action: "patch", id, data: { done: true } }, { model: "posts", action: "create", data: { title: "b" } }],
+  { atomic: false },                                                                 // per-op results[]
+);
+```
+
+Bulk actions: `create`, `patch`, `delete`, `upsert` (`constraint`: a constraint name — a `unique` field's is `<model>_<field>_unique`), `increment`, each with optional `condition` and `requestId`; up to 500 per call; all-or-nothing unless `atomic: false`. Pass a `requestId` (a ULID) on any server write you may retry.
+
+### Bulk loading
+
+Use a bulk load — not saves or `bulk()` — for imports, reference datasets, and any change of thousands of records or more than 1 MiB: one session uploads every row and they apply together.
+
+{{ example: databases/bulk-load }}
+
+CLI: `primitive db3 ingest <db3-id> --input <dir> -y` (one `<model>.ndjson[.gz]` per model, each line an id and a patch), `primitive db3 ingests get|abort <db3-id> <session-id>`. To move a database: `primitive db3 export <db3-id> --output <dir>`, then `primitive db3 import <dir>` (a new id), `--into <db3-id>`, or `--keep-id` (the exported id, which must be free in the target app).
+
+- A row is `{ model, id, patch }`: values replace fields, `null` removes one, `{ "_deleted": true }` deletes the record.
+- `mode: "merge"` (default) touches only named records; `mode: "refresh"` also deletes every record of the rows' models no row names.
+- Rows that break the type, a record's value rules, or a unique key are skipped and counted in `refusedRows` (`refusedSample` names a few); the load continues.
+- Records appear together at completion; subscribed devices receive them in chunks. App writes made during the load win over conflicting rows.
+- `buildChunks` holds all rows in memory — use the CLI beyond a few hundred thousand rows. A load can't be undone, and stopping the CLI's wait doesn't stop it — check `primitive db3 ingests get`.
+
+### From the CLI
+
+For inspecting or fixing data by hand (admin login), not app code: `primitive db3 records query|count|aggregate|save|patch|delete|increment <db3-id> <model> …`, `primitive db3 records bulk <db3-id> --data-file <file>`, `primitive db3 schema <db3-id>`, `primitive db3 inspect <db3-id>`.
+
+### Indexes
+
+{{ example: databases/indexes }}
+
+Every index costs on every write (server and each synced device), so declare `indexed` only on fields you filter on; adding one later is safe — existing records are indexed when the type is pushed or the index registered. Fields declared `indexed`/`unique` are indexed in every database of the type; register more per database (`primitive db3 indexes register <db3-id> --model <m> --field <f>`). Names: `idx_records_<model>_<field>`; composite (needs `unique` + `name`) `idx_named_<model>_<name>`; declared constraint `idx_uc_<model>_<constraint>`. Errors: `DB3_INDEX_NOT_UNIQUE` (existing duplicates, up to ten in `details.duplicates`), `DB3_INDEX_IN_USE` (dropping a declared index), `DB3_INDEX_SET_FIELD` (string sets need none). Registering/dropping needs the owner or an app admin; devices pick up new indexes at their next subscribe.
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| Page size | default 100, max 10,000 (`DB3_PAGE_TOO_LARGE` above; never clamped) |
+| Page bytes | 8 MiB of records: a plain page ends early with `hasMore: true`; a page whose `_related` would pass it is refused with `DB3_PAGE_TOO_LARGE` |
+| Include depth | 3 |
+| `hasMany` related rows per request | 1,000 (`DB3_PAGE_TOO_LARGE`) |
+| `$in` / `$nin` values | 1,000 (`QUERY_IN_LIST_TOO_LARGE`) |
+| Bound values per query | 100 (`QUERY_FILTER_TOO_MANY_BINDS`) |
+| Bulk ops | 500 per call |
+| One write / batch | 1 MiB JSON (`DOCUMENT_ENTRY_TOO_LARGE`) |
+| Field names per model | 1,000 |
+
+## Synced databases on a device
+
+{{ example: databases/subscribe }}
+
+| Call | Does |
+|---|---|
+| `client.db3.subscribe(id)` | Handle with `available` (readable copy on device), `ready` (caught up), `state`, events, `dispose()`. `ready` rejects `DB3_READY_TIMEOUT` (30 s without progress; `subscribe(id, { readyTimeoutMs })`, Swift `Db3SubscribeOptions(readyTimeout:)`), `DB3_ACCESS_REFUSED`, `DB3_SYNC_OFF`, `NOT_A_DB3` |
+| `client.db3.unsubscribe(id)` | Disposes every handle for the database |
+| `client.db3.refresh(id)` | Subscribe → caught up → dispose |
+| `client.db3.state(id)` | `{ resident, subscribed, phase, progress, rows, pendingWrites, lastSyncAt, permission, error }` without subscribing |
+| `client.db3.stored()` | Databases this device holds for the signed-in user |
+| `client.db3.evict(id, { force })` | Delete the local copy; `DB3_PENDING_WRITES` unless `force` |
+| `client.db3.setRetentionPolicy(...)` | Evict automatically (session-only, max count/bytes, TTL) |
+
+`phase`: `idle`, `opening`, `loading`, `catching-up`, `live`, `reconnecting`, `gone`. Events: `db3:state`, `db3:ready`, `db3:rows` (`changes`, `origin`: `local`\|`remote`\|`sibling`), `db3:write-refused`, `db3:evicted`, `db3:gone` (`reason`: `permission`\|`sync-off`\|`client-outdated`), `db3:error`.
+
+A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) works offline: it resolves at once with `pendingCreate` true in the state and is saved under the same id on reconnect (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
+
+{{#lang ts}}
+Storage: web clients need `databaseConfig: { type: "opfs", options: { workerURL } }` (add `brokerURL` to share across tabs; serve `sql-wasm.wasm` beside the worker); Node uses `databaseConfig: { type: "node-sqlite", options: { recordLogDirectory } }` with a persistent directory. Without suitable storage the client reports `FORMAT2_STORAGE_UNAVAILABLE`. The browser's answer to the persistent-storage request is `persisted`, `granted`, `declined` or `unsupported`; on the last two it may clear the copy under storage pressure.
+{{/lang}}
+
+### Re-rendering on change
+
+Every generated model has `subscribe(callback)` → unsubscribe function; it fires on local and remote changes. Re-run the query in the callback.
+
+{{#lang ts}}
+In the Vue template, `useJsBaoDataLoader` (imported from `@/composables/useJsBaoDataLoader`) wraps this: it re-runs `loadData` when the subscribed models change.
+{{/lang}}
+
+{{ example: databases/live-query }}
+
+### Concurrent edits
+
+Different fields of a record both survive; the same field converges on one write everywhere; string-set members and increments all count; a unique key goes to the first write the database accepts (an upsert merges into it); conditions are checked by the database.
+
+### Write refusals
+
+A device write applies locally first (a conditional write shows only once the database accepts it; `confirm: true`, in Swift `Db3WriteOptions(confirm: true)`, awaits that). If the database refuses it at sync, the record reverts and `db3:write-refused` carries `writes` (every affected write, in order, to redo), `error.code`, and `conflictingRecord`/`current` where relevant.
+
+{{ example: databases/write-refused }}
+
+| Code | Cause |
+|---|---|
+| `DOCUMENT_CONSTRAINT_VIOLATED` | Unique key taken by another device first |
+| `DB3_CONDITION_NOT_MET` | Condition no longer held (`current`) |
+| `DB3_TRIGGER_REFUSED` | A type rule refused (`error.details.reason`) |
+| `DB3_MODEL_NOT_DECLARED` | Model not in the database's type |
+| `WRITE_ACCESS_DENIED` | User lost write access |
+| `DOCUMENT_ENTRY_INVALID` / `DOCUMENT_ENTRY_TOO_LARGE` | Value/name not storable / over 1 MiB |
+| `DOCUMENT_OFFLINE_WINDOW_EXPIRED` / `DOCUMENT_EPOCH_FROZEN` / `DOCUMENT_EPOCH_BUDGET` | Offline too long / too many offline writes — reconnect |
+| `DOCUMENT_STORE_PURGED` | Local copy cleared before sending |
+
+## Access
+
+| Level | Can |
+|---|---|
+| `reader` | Read all records |
+| `read-write` | Read and write all records |
+| `owner` | Also share, transfer, delete |
+
+App owners/admins read, write and manage every database.
+
+### Sharing a synced database
+
+{{ example: databases/share }}
+
+{{ example: databases/link-access }}
+
+Grants by email work before the person joins (pending invitation). Group grants follow group membership. {{#lang ts}}`client.db3.permissions(id).requestAccess({ permission })`{{/lang}}{{#lang swift}}`client.db3.permissions(id).requestAccess(RequestAccessOptions(permission: .reader))`{{/lang}} lets a member ask the owner. Removing a grant turns the user's subscription `gone` at once: the local copy stays readable, new writes are refused `WRITE_ACCESS_DENIED`, and queued writes stay until access returns or you evict.
+
+### App access
+
+**App access** — every current and future member: `client.db3.setAppAccess(id, "reader" | "read-write" | null)` (app admin), `primitive db3 app-access set <db3-id> reader|read-write|none`, or in a function `ctx.api.db3.setAppAccess({ db3Id, body: { level } })` with capability `db3:setAppAccess`. Content only at its level (`reader` reads, `read-write` writes; no share/delete). Refused on a sync-off database.
+
+### Checking access
+
+Device: `client.db3.get(id)` → `{ …, permission, accessSource }` for the signed-in user. Function: `auth.db3(id, type).permissions()` in `authorize` (caller's level or `null`); `ctx.api.db3.validateAccess({ db3Id, body: { userId } })` → `{ hasAccess, permission?, accessSource? }` for any member (always pass `userId`; omitted, it describes the function's app authority). An app role is not a content grant. Sync-off databases answer no access for members.
+
+### Collections
+
+A collection is a set of databases shared together: its members reach every database in it, including ones added later.
+
+{{ example: collections/create }}
+
+{{ example: collections/manage }}
+
+{{ example: collections/access }}
+
+| Role | Can |
+|---|---|
+| `owner` | Everything a manager can, and delete the collection; one per collection (the custodian) |
+| `manager` | Edit the collection and its settings; add, remove and re-role members |
+| `editor` | Add databases; remove any database |
+| `contributor` | Add databases; remove the ones they added |
+| `viewer` | Read the collection and its databases |
+
+- Members are user ids or `group:<groupId>` (a group can hold any role but `owner`). Collection grants add to a database's own; the highest wins. Deleting a collection keeps its databases.
+- A sync-off database can't be added, and a group can't be granted a role on a collection holding one (`DB3_SYNC_OFF_NO_SHARING`).
+- Group sharing changes and deletion are refused above 200 databases, and deletion also above databases × groups 400 (`COLLECTION_FANOUT_LIMIT`).
+- Functions: `ctx.api.collections` creates, deletes and shares collections and adds databases; `ctx.api.collections.listDb3({ collectionId })` lists them. Rules the roles don't express go in a function whose `authorize` uses `requireCollectionRole`.
+- CLI: `primitive collections create|get|delete|transfer`, `collections documents add|remove <collection-id> <db3-id>`, `collections members add|set-role|list|remove`.
+
+### Custody
+
+Every database has a `custodian`: `user:<userId>` (holder and owner; a member's own creates, a function's creates for its caller) or `app` (no owner; created from the CLI's admin token with no custodian, by an app admin naming `custodian: "app"`, or by a function naming it with capability `db3:transfer`). Transfer: owner → another member (old owner keeps `read-write`); to/from the app needs an app admin (`primitive db3 transfer <db3-id> app`) or `ctx.api.db3.transfer({ db3Id, body: { to } })` with `db3:transfer`. When a member leaves the app, databases they hold pass to the app if another user holds an accepted grant, any group is granted, or app access is set (link access and unaccepted invitations don't count); otherwise they are deleted. List by holder: `primitive db3 list --custodian app|user:<id>`; `client.db3.listMine()` lists the databases the signed-in user can open.
+
+### Sync off
+
+`sync: false` at create (`primitive db3 create … --sync off`) or `client.db3.setSync(id, false)` / `primitive db3 sync set <db3-id> off` / `ctx.api.db3.setSync({ db3Id, body: { sync: false } })` (capability `db3:setSync`); app admins and app owners only. Effects: subscribers dropped (`db3:gone`, `sync-off`), socket opens refused `DB3_SYNC_OFF`, every user content action refused (the owner keeps delete and transfer), grants suspended, new grants refused `DB3_SYNC_OFF_NO_SHARING`, app access refused. Functions and admins keep full read/write. Flipping back restores grants; a flip never rebuilds data.
+
+Serve a sync-off database through functions that check the caller and filter:
+
+```ts
+import { allow, defineFunction, deny } from "primitive-functions";
+
+export default defineFunction("class-grades", {
+  authorize: async (input: { classDb: string }, auth) => {
+    if (!auth.user) return deny("FORBIDDEN");
+    const roster = auth.db3(input.classDb, "classroom").model("roster");
+    const [me] = (await roster.query({ filter: { userId: auth.user.userId }, limit: 1 })).items;
+    return me ? allow({ role: me.role }) : deny("NOT_FOUND");
+  },
+  handler: async (input, ctx) => {
+    const filter = ctx.auth.role === "teacher" ? {} : { studentId: ctx.user!.userId };
+    return (await ctx.db3(input.classDb, "classroom").model("grades").query({ filter })).items;
+  },
 });
 ```
 
-Discovery is the same shape in reverse: `ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "workspace" })` (a bare array of `{ groupType, groupId, name, … }`), then `ctx.api.databases.get({ databaseId: m.groupId })` for each, in a `Promise.all`. `ctx.api.groups.listDatabases({ groupType, groupId })` answers the databases a group holds a **permission grant** on (a bare array of `{ databaseId, databaseType, permission, … }`) — that is the administrative group grant below, not membership-by-id.
+`auth.db3` is read-only (`get`, `query`). A function creates databases with `ctx.api.db3.create({ body: { title, type, sync, custodian } })`; `custodian: "app"` needs capability `db3:transfer` and `sync: false` needs `db3:setSync`. To react to changes in databases of a type, declare `[[function.triggers.db3]]` with `type = "<type>"` in the function's TOML; the run receives the database id and the changed record keys.
 
-## Permissions
+## Partitioning patterns
 
-### How end users reach data
+| Data | Partition | Access | Sync |
+|---|---|---|---|
+| A user's own data (todos, finances, journal) | One per user, `getOrCreateWithAlias` with a user-scoped alias | User holds it; may share whole | On |
+| A team's / project's / channel's shared work | One per team/project/channel | Grant the group; group several with a collection | On |
+| Small reference data all users read (catalog, plans) | One app-held | App access `reader`; written by admin/function | On |
+| Large reference data (securities master, price history) | App-held, split by dataset | Functions answer the queries screens need | Off |
+| Per-person visibility (grades, orders, HR) | One per class/store/tenant, app-held | Functions filter by caller | Off |
 
-End users reach records **through functions**: the function's `access` gate decides who may call it, and its code decides which rows they get. Database permissions do not enter into it — a function reaches every database of the app whoever called.
-
-### Owner and manager (administrative)
-
-Owner and manager are **permission records on the database itself**, not a way into its data. The database routes refuse a non-admin caller, so holding `owner` or `manager` lets a user do nothing directly: app admins manage the records (`primitive databases permissions list | add-manager | remove-manager`, or a function via `ctx.api.databases.addManager` / `revokePermission` / `grantGroupPermission`, which runs on the app's authority), and a function reads them with `ctx.api.databases.listPermissions` / `listGroupPermissions` to make its own decisions — for example, letting only a database's managers rename it through your function.
-
-| Level | Meaning |
-|-------|---------|
-| `owner` | The creator, set automatically at create |
-| `manager` | An administrator the app has named; the only level a group grant can hold |
-
-A group grant (`grantGroupPermission`) gives every member of the group `manager` at once and follows membership changes automatically. A permission record grants no bypass on a [resource metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) category's `readRule`/`writeRule` — only the app role does.
-
-**Don't add end users as managers** to share data with them. Share by writing the function that serves them the rows.
+Store another system's id in a `unique` field and import with `upsertOn` it; let the platform mint record ids; reference records by platform id.
 
 ## Gotchas
 
-- A function acts with app authority. Validate requested IDs and authorize writes; scope reads to the caller.
-- A schema change does not rewrite existing records. Check existing data before adding uniqueness.
-- Use conditional writes when an update depends on a previously read value.
-- Keep queries within one logical database where possible; index fields used for filtering and sorting.
-
-## Common Patterns
-
-### Settings record
-
-Store mutable settings (feature flags, visibility toggles) as a regular record and read it in the same function as the data it governs:
-
-```ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { databaseId: string }, ctx) => {
-  const db = ctx.db(input.databaseId, "classroom");
-  const [settings] = (await db.model("settings").query({ filter: { key: "class-settings" }, options: { limit: 1 } })).items;
-
-  const mine = { authorId: ctx.user!.userId };
-  const filter = settings?.peerVisible ? { $or: [mine, { status: "approved" }] } : mine;
-  return await db.model("posts").query({ filter, options: { sort: { createdAt: -1 }, limit: 50 } });
-});
-```
-
-### Several models in one call
-
-```ts
-export default defineFunction(async (input: { databaseId: string; projectId: string }, ctx) => {
-  const db = ctx.db(input.databaseId, "project");
-  const [recent, byStatus, openBugs] = await Promise.all([
-    db.model("tasks").query({ filter: { projectId: input.projectId }, options: { sort: { createdAt: -1 }, limit: 5 } }),
-    db.model("tasks").aggregate({ options: { groupBy: ["status"], operations: [{ type: "count" }], filter: { projectId: input.projectId } } }),
-    db.model("tasks").count({ filter: { projectId: input.projectId, label: "bug", status: "open" } }),
-  ]);
-  return { recent: recent.items, byStatus: byStatus.result, openBugs: openBugs.count };
-});
-```
-
-### User-scoped data
-
-A `$caller` registered query (see [Registered queries](#registered-queries)) or a filter on `ctx.user!.userId`. For writes, stamp the owner from `ctx.user` in code or with a trigger (`{ on = "create", set = { ownerId = "user.userId" } }`), never from input.
-
-## Reserved Field Names
-
-These field names are reserved, and a record write carrying one is refused with **400 `RESERVED_FIELD_NAME`** — by the database engine for a database record, and by the document records API for a document record:
-
-- **`type`** — the internal `_type` column, which holds the **model name**. A filter on a field of that name matches the model name rather than a stored value.
-- **Any name starting with `_`** — the storage engine's own columns (`_id`, `_type`, `_data`).
-- **A generated model's own members** — a field of the same name stops the generated model compiling (or, for `constructor`, constructing) on at least one client, so the name is refused on both: `CodingKeys`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
-
-Matching is exact and case-sensitive: `Save` and `syncStatus` are fine.
-
-`id` is not reserved: it is the record's primary key.
-
-A `[models.*]` schema that DECLARES a reserved name is refused at push with the same 400, naming the block, and stores nothing — a refused update leaves the previously stored schema exactly as it was:
-
-```
-[models.product.fields.type]: Field 'type' is reserved (maps to internal _type column in queries)
-```
-
-Rename the declared field (`kind`, `category`, `status`) and push again.
-
-## Error handling
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `403 FUNCTION_ACCESS_DENIED` calling the function | The function's `access` gate denied the caller | Check the caller's role/groups against the gate |
-| A user sees other users' rows | The function's query has no caller filter | Filter on `ctx.user!.userId` or use a `$caller` registered query |
-| Compile error / refused push naming a model | The model is not declared in the type's `[models.*]` schema, or the declarations are stale | Declare the model, or run `config push` / `primitive functions codegen` to refresh |
-| `409` on `patch` / `save` with `condition` | The record no longer matches the condition | Re-read and retry |
-| `409` on `save` with `ifNotExists` | The record already exists | Use a plain `save` to upsert |
-| `404` on `patch`, `increment`, set ops | The record doesn't exist | `save` creates; `patch` does not |
-| `400 QUERY_IN_LIST_TOO_LARGE` | A `$in`/`$nin` list over 1,000 values | Chunk `$in` and merge; put `$nin` chunks in one `$and` |
-| Per-item failures in a non-atomic `batch` | Each item's outcome is independent | Check `success` / `code` on each result, or pass `atomic: true` |
-| Slow query | Missing index on a filtered or sorted field | Declare `indexed = true` on the field |
-| Records not found after save | Querying the wrong model name | Model names are case-sensitive |
-| Using `addManager` for end-user access | Manager is administrative control, not scoped data access | Put the access decision in a function |
-| 400 `RESERVED_FIELD_NAME` on push or write | A field named `type`, starting with `_`, or named after a generated model's member | Rename the field. See [Reserved Field Names](#reserved-field-names) |
-| 413 `SCHEMA_TOO_LARGE` on push | The inline schema exceeds the per-type cap | Trim the schema or split the models across types |
+- **Hiding records in the UI is not access control.** A synced database is on every reader's device in full. Split it, or turn sync off and serve it through functions.
+- **Wait for `available` before reading** a database the device may not hold yet; otherwise `DB3_NOT_RESIDENT`.
+- **Index what you filter on.** An unindexed equality filter reads every record of the model; development builds log a warning.
+- **The first subscribe downloads the whole database** — show `state.progress`; keep databases partitioned so a device holds only what its user needs.
+- **Unsent writes live only on the device** — surface `state.pendingWrites`.
+- **One type file for every codegen.** Two schema files drift, and a typed database refuses models its type doesn't declare.
+- **`confirm: true` on a device write waits for the next subscribe** when the database isn't subscribed.
+- **Upgrade client libraries forward only.** A local copy written by a newer client doesn't open in an older one; reload web tabs left open across a deploy.
+- **Generated fields are optional in practice** — older records may lack newer fields.
+- **App access and grants are refused on a sync-off database** (`DB3_SYNC_OFF_NO_SHARING`).
+- **An app-held database has no owner** — nobody can open it until it is shared, given app access, or transferred.

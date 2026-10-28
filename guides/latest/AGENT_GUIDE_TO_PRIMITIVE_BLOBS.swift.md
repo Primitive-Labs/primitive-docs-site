@@ -1,20 +1,19 @@
 # Agent Guide to Primitive Blobs
 
-Document blobs attach files to a document and inherit its permissions. Each blob can hold up to 10 MB. Use [blob buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) for files independent of documents.
+Database blobs are files stored with a database (`db3` in code) and follow its access. Each blob can hold up to 10 MB. Use [blob buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) for files independent of any database. Store a blob's `blobId` in a record field to attach the file to a record.
 
-## Document-scoped blob operations
+## Database blob operations
 
-Blobs attached to a document are reached through the document's blob accessor.
-
+A database's blobs are reached through its blob accessor. The database does not need to be subscribed on the device.
 
 ```swift
-let blobs = client.documents.blobs(documentId: documentId)
+let blobs = client.db3.blobs(db3Id)
 ```
 
 ### Upload
 
 ```swift
-  let blobs = client.documents.blobs(documentId: documentId)
+  let blobs = client.db3.blobs(db3Id)
   let result = try await blobs.upload(
     data: data,
     options: BlobUploadSourceOptions(filename: "notes.txt", contentType: "text/plain")
@@ -33,17 +32,18 @@ let blobs = client.documents.blobs(documentId: documentId)
     options: BlobUploadSourceOptions(
       filename: "hello.txt",
       contentType: "text/plain",
-      disposition: .attachment  // or .inline
+      disposition: .attachment // or .inline
+      // retainLocal defaults to true; set false to drop local bytes once the
+      // server confirms the upload.
     )
   )
-  let blobId = result.blobId
-  let numBytes = result.numBytes
+  // result.blobId, result.numBytes, result.contentType
 ```
 
 ### List / URL / read
 
 ```swift
-  let blobs = client.documents.blobs(documentId: documentId)
+  let blobs = client.db3.blobs(db3Id)
 
   let list = try await blobs.list()
   let url = blobs.downloadUrl(blobId: blobId)          // synchronous, authenticated
@@ -53,25 +53,24 @@ let blobs = client.documents.blobs(documentId: documentId)
 ### List / metadata / delete
 
 ```swift
-  let blobs = client.documents.blobs(documentId: documentId)
+  let blobs = client.db3.blobs(db3Id)
 
-  let list = try await blobs.list(limit: 50)
+  let page = try await blobs.list(limit: 50) // page.items, page.nextCursor
   let meta = try await blobs.get(blobId: blobId)
   _ = try await blobs.delete(blobId: blobId)
 ```
 
 ## Overview
 
-Readers can download document blobs; editors can upload or delete them. Uploaded files queue when offline and downloaded files can be cached locally.
+Anyone who can read the database can list and download its blobs; anyone who can write it can upload or delete them. A database with sync turned off is read and written only by app admins and server functions, and the same holds for its blobs. Uploaded files queue when offline and downloaded files can be cached locally.
 
 ## Uploading
 
 Repeated uploads can reuse the same file content. See **Upload with disposition** above for the full options form. The download endpoint chooses `Content-Disposition` from the `?disposition=` query param (default `attachment`), not from the upload-time value — pass `disposition` explicitly to the download URL when serving inline.
 
+`upload` accepts `Data`. `retainLocal` (default `true`; set `false` to drop local bytes once the server confirms) controls whether local bytes are kept after upload.
 
-`upload` accepts `Data`.
-
-Uploading more than 10 MB to a document-scoped blob returns `413`. Use a blob bucket instead (100 MB cap).
+Uploading more than 10 MB to a database blob returns `413`. Use a blob bucket instead (100 MB cap).
 
 ### Idempotent re-upload
 
@@ -86,13 +85,13 @@ See **List / metadata / delete** above for the basic call. Each item carries `bl
 ```swift
   let page1 = try await blobs.list(limit: 50)
   for b in page1.items {
-    print(b.blobId, b.filename, b.contentType, b.numBytes, b.sha256, b.createdAt)
+    print(b.blobId, b.filename ?? "", b.contentType ?? "", b.numBytes ?? 0, b.sha256 ?? "", b.createdAt ?? "")
   }
 
   // `nextCursor` is an opaque token; only present when more results remain.
   if let cursor = page1.nextCursor {
     let page2 = try await blobs.list(cursor: cursor)
-    _ = page2.items
+    return page2.items
   }
 ```
 
@@ -101,7 +100,6 @@ See **List / metadata / delete** above for the basic call. Each item carries `bl
 ## Get metadata
 
 See **List / metadata / delete** above.
-
 
 ```swift
 let meta = try await blobs.get(blobId: blobId)
@@ -114,13 +112,13 @@ let meta = try await blobs.get(blobId: blobId)
 
 ### Download URL (authenticated)
 
-The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin — it works in an `<a href download>` or `window.location`.
+The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin.
 
 ```swift
   let url = blobs.downloadUrl(
     blobId: blobId,
-    disposition: .attachment,            // or .inline
-    attachmentFilename: "report.pdf"     // optional override (RFC 5987-encoded)
+    disposition: .attachment,         // or .inline
+    attachmentFilename: "report.pdf"  // optional override (RFC 5987-encoded)
   )
 ```
 
@@ -129,22 +127,27 @@ The basic call is shown in **List / URL / read** above. `downloadUrl` is synchro
 `read` is shown in **List / URL / read** above. It checks the cache first; on a miss it fetches from the server and writes the response into the cache.
 
 ```swift
-  let bytes = try await blobs.read(blobId: blobId)                 // Data
+  let bytes = try await blobs.read(blobId: blobId)                 // Data (default)
   let text = try await blobs.read(blobId: blobId, as: String.self) // UTF-8 String
 
   // Bypass the local cache and re-fetch from the server.
   let fresh = try await blobs.read(blobId: blobId, as: String.self, force: true)
 ```
 
+A typed `read(blobId:as:)` overload also JSON-decodes a blob into any `Decodable` type. When the client is offline and the blob has no local copy, `read` throws `JsBaoError` with code `.offline` without sending a request.
+
+```swift
+let payload = try await blobs.read(blobId: blobId, as: MyCodable.self)
+```
 
 ### Range requests and conditional GETs
 
-The document blob download endpoint supports two HTTP behaviors useful when streaming media or revalidating cached bytes:
+The database blob download endpoint supports two HTTP behaviors useful when streaming media or revalidating cached bytes:
 
 - **Range requests.** Send `Range: bytes=START-END` and the server replies with `206 Partial Content` and the requested slice. Out-of-range requests return `416`. This is what media players use to seek; you usually don't issue these manually, but if you build a custom player it works as expected.
 - **Conditional GET.** The server emits an `ETag` (the blob's sha256). Send `If-None-Match: <etag>` on subsequent requests and the server returns `304 Not Modified` with no body when the bytes are unchanged.
 
-Both behaviors are on the document blob path only. Bucket blobs go through signed URLs straight to the object store, which has its own range/etag semantics handled by the storage layer.
+Both behaviors are on the database blob path only. Bucket blobs go through signed URLs straight to the object store, which has its own range/etag semantics handled by the storage layer.
 
 ---
 
@@ -152,9 +155,8 @@ Both behaviors are on the document blob path only. Bucket blobs go through signe
 
 See **List / metadata / delete** above.
 
-
 ```swift
-let result = try await blobs.delete(blobId: blobId) // BlobDeleteResult: .deleted
+let result = try await blobs.delete(blobId: blobId) // result.deleted == true
 ```
 
 Deleting also cancels any in-flight upload for the same `blobId` and clears local bytes.
@@ -163,13 +165,13 @@ Deleting also cancels any in-flight upload for the same `blobId` and clears loca
 
 ## Offline & the upload queue
 
-The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
+The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads and app restarts: a queued or in-flight upload resumes in the next client for the same app and user, and never for another user. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
 
 ```swift
-  client.networkMode = .offline
+  client.setNetworkMode(.offline)
 
   // Bytes are written to the local cache immediately and queued. upload()
-  // resolves without waiting for the network (bytesTransferred is 0).
+  // returns without waiting for the network (bytesTransferred is 0).
   let result = try await blobs.upload(
     data: data,
     options: BlobUploadSourceOptions(filename: "draft.txt", contentType: "text/plain")
@@ -181,43 +183,39 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
   // Warm the cache; per-blob errors are logged and swallowed.
   await blobs.prefetch(blobIds: blobIds, concurrency: 4)
 
-  // Queue processing resumes automatically; listen for .blobsQueueDrained.
-  client.networkMode = .online
+  // Queued uploads resume automatically once back online.
+  client.setNetworkMode(.online)
 ```
+
+An upload whose request fails for a retryable reason (no connection, a timeout, a `5xx`) is queued the same way and answers `bytesTransferred: 0`; a refusal such as a `403` throws and queues nothing.
+
+The queue is kept in the client's SQLite database, so it survives a restart with `storageConfig: .sqlite(...)` (the default); with `.memory` it lasts only as long as the client. Restored uploads are listed once `waitForStorageReady()` returns.
 
 ---
 
 ## Gotchas: upload queue management
 
-Inspect and control the per-document upload queue, and set the client-wide upload concurrency (applies to all documents). The `queueId` is the `blobId` for document uploads.
+Inspect and control a database's upload queue, and set the client-wide upload concurrency (applies to all databases). The `queueId` is the `blobId` for database blob uploads.
 
 ```swift
-  // Inspect what's queued for this document. Each BlobUploadStatus carries
+  // Inspect what's queued for this database. Each BlobUploadStatus carries
   // queueId, blobId, filename, contentType, numBytes, status, attempts,
   // nextAttemptAt, lastError.
   let tasks = await blobs.uploadsAsync()
 
-  // Pause/resume by blobId (the queueId is the blobId for document uploads).
+  // Pause/resume by blobId (the queueId is the blobId for database uploads).
   _ = await blobs.pauseUploadAsync(blobId: blobId)
   _ = await blobs.resumeUploadAsync(blobId: blobId)
 
   await blobs.pauseAllAsync()
   await blobs.resumeAllAsync()
 
-  // Concurrency is set on the client (global, all documents).
+  // Concurrency is set on the client (global, all databases).
   await client.setBlobUploadConcurrencyAsync(5) // min 1; default 2
   let concurrency = await client.blobUploadConcurrency
 ```
 
-Every queue verb is `async`: the upload queue lives behind an actor, so reading
-or changing it is an `await`. The queue members carry the `Async` suffix
-(`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`,
-`setBlobUploadConcurrencyAsync(_:)`, …), and the two concurrency readers are
-`async` properties: `await client.blobUploadConcurrency` and
-`await client.documents.uploadConcurrency`.
-
-`downloadUrl(blobId:disposition:attachmentFilename:)` is the exception and stays
-synchronous, so it is safe to call straight from a SwiftUI `body`.
+Every queue verb is `async`: the upload queue lives behind an actor, so reading or changing it is an `await`. The queue members carry the `Async` suffix (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`, `setBlobUploadConcurrencyAsync(_:)`, …), and the concurrency reader is an `async` property: `await client.blobUploadConcurrency`. `downloadUrl(blobId:disposition:attachmentFilename:)` stays synchronous, so it is safe to call straight from a SwiftUI `body`.
 
 ---
 
@@ -239,22 +237,16 @@ The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level
   }
 ```
 
-A typed `read(blobId:as:)` overload also JSON-decodes a blob into any `Decodable` type:
-
-```swift
-let payload = try await blobs.read(blobId: blobId, as: MyCodable.self)
-```
-
 
 ---
 
 ## From a server function
 
-A server function uploads a document blob with `ctx.api.documents.blobs.upload`: `documentId`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.documents.blobs.list`, `downloadUrl` and `downloadHeaders` read it back.
+A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list`, `get` and `downloadUrl` read it back, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
 
 ```ts
-await ctx.api.documents.blobs.upload({
-  documentId, blobId,
+await ctx.api.db3.blobs.upload({
+  db3Id, blobId,
   "X-Blob-Filename": "receipt.png",
   "X-Blob-Size": bytes.byteLength,
   "X-Blob-Sha256": sha256Base64,
@@ -267,23 +259,10 @@ Name the type: without `"Content-Type"` the blob is stored as `application/octet
 
 ---
 
-## Permissions (document blobs)
+## Permissions (database blobs)
 
-| Operation                              | Required document permission     |
+| Operation                              | Required database permission     |
 |----------------------------------------|----------------------------------|
 | Upload, Delete                         | `read-write` or `owner`           |
 | List, Get metadata, Download, Read     | `reader` or higher                |
 
----
-
-## Document thumbnails and presentation metadata
-
-A document carries two fields that pair naturally with the blob system — set them with the document update call (covered in detail in the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#updating-document-metadata)):
-
-- **`thumbnailBlobId`** points at an existing blob owned by the document. Anyone with access to the document inherits read access to the referenced blob, so a thumbnail uploaded as a private document blob can safely back a thumbnail surface.
-- **`metadata`** is a small JSON-serializable object capped at 4KB serialized UTF-8. Use it for presentation hints that should travel with the document (cover image references, color tags, list-card layout, etc.).
-
-Both fields are optional and accept `null` to clear. Errors surface as `BLOB_NOT_FOUND` (referenced blob missing), `BLOB_DOC_MISMATCH` (blob belongs to a different document), or `METADATA_TOO_LARGE` (serialized `metadata` exceeds 4KB).
-
-</content>
-</invoke>

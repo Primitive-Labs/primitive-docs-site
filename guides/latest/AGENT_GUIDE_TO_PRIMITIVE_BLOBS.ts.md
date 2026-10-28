@@ -1,20 +1,19 @@
 # Agent Guide to Primitive Blobs
 
-Document blobs attach files to a document and inherit its permissions. Each blob can hold up to 10 MB. Use [blob buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) for files independent of documents.
+Database blobs are files stored with a database (`db3` in code) and follow its access. Each blob can hold up to 10 MB. Use [blob buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md) for files independent of any database. Store a blob's `blobId` in a record field to attach the file to a record.
 
-## Document-scoped blob operations
+## Database blob operations
 
-Blobs attached to a document are reached through the document's blob accessor.
+A database's blobs are reached through its blob accessor. The database does not need to be subscribed on the device.
 
 ```typescript
-const blobs = client.document(documentId).blobs();
+const blobs = client.db3.blobs(db3Id);
 ```
-
 
 ### Upload
 
 ```typescript
-  const blobs = client.document(documentId).blobs();
+  const blobs = client.db3.blobs(db3Id);
   const { blobId } = await blobs.upload(data, {
     filename: "notes.txt",
     contentType: "text/plain",
@@ -39,7 +38,7 @@ const blobs = client.document(documentId).blobs();
 ### List / URL / read
 
 ```typescript
-  const blobs = client.document(documentId).blobs();
+  const blobs = client.db3.blobs(db3Id);
 
   const list = await blobs.list();
   const url = blobs.downloadUrl(blobId);              // synchronous, authenticated
@@ -49,7 +48,7 @@ const blobs = client.document(documentId).blobs();
 ### List / metadata / delete
 
 ```typescript
-  const blobs = client.document(documentId).blobs();
+  const blobs = client.db3.blobs(db3Id);
 
   const { items, nextCursor } = await blobs.list({ limit: 50 });
   const meta = await blobs.get(blobId);
@@ -58,7 +57,7 @@ const blobs = client.document(documentId).blobs();
 
 ## Overview
 
-Readers can download document blobs; editors can upload or delete them. Uploaded files queue when offline and downloaded files can be cached locally.
+Anyone who can read the database can list and download its blobs; anyone who can write it can upload or delete them. A database with sync turned off is read and written only by app admins and server functions, and the same holds for its blobs. Uploaded files queue when offline and downloaded files can be cached locally.
 
 ## Uploading
 
@@ -68,12 +67,12 @@ Repeated uploads can reuse the same file content. See **Upload with disposition*
 
 ### From a file input
 
-The upload call is the compiled [Upload](#upload) example — `client.document(documentId).blobs().upload(file)`. The only web-specific glue is pulling the `File` off an `<input>` (`File` objects are accepted directly; `filename`/`contentType` default to `file.name`/`file.type`):
+The upload call is the compiled [Upload](#upload) example — `client.db3.blobs(db3Id).upload(file)`. The only web-specific glue is pulling the `File` off an `<input>` (`File` objects are accepted directly; `filename`/`contentType` default to `file.name`/`file.type`):
 
 ```typescript
 // web-DOM glue: get a File from an <input type="file">, then upload it.
 const file = (document.querySelector('input[type="file"]') as HTMLInputElement).files![0];
-const { blobId } = await client.document(documentId).blobs().upload(file);
+const { blobId } = await client.db3.blobs(db3Id).upload(file);
 ```
 
 ### Don't do this
@@ -83,14 +82,13 @@ const { blobId } = await client.document(documentId).blobs().upload(file);
 const buf = await file.arrayBuffer();
 await blobs.upload(buf, { filename: file.name, contentType: file.type });
 
-// DON'T: try to upload >10 MB to document-scoped blobs. The server returns 413.
+// DON'T: try to upload >10 MB to a database blob. The server returns 413.
 // Use a blob bucket instead (100 MB cap).
 ```
 
 ### `uploadFile` vs `upload`
 
 Both call the same code path. `uploadFile` returns a slightly trimmed result (`{ blobId, numBytes, bytesTransferred? }`). Prefer `upload`.
-
 
 ### Idempotent re-upload
 
@@ -136,14 +134,13 @@ const meta = await blobs.get(blobId);
 // { blobId, filename, contentType, numBytes, sha256, createdAt, ... }
 ```
 
-
 ---
 
 ## Downloading
 
 ### Download URL (authenticated)
 
-The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin — it works in an `<a href download>` or `window.location`.
+The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin— it works in an `<a href download>` or `window.location`.
 
 ```typescript
   const url = blobs.downloadUrl(blobId, {
@@ -169,12 +166,12 @@ The basic call is shown in **List / URL / read** above. `downloadUrl` is synchro
 
 ### Range requests and conditional GETs
 
-The document blob download endpoint supports two HTTP behaviors useful when streaming media or revalidating cached bytes:
+The database blob download endpoint supports two HTTP behaviors useful when streaming media or revalidating cached bytes:
 
 - **Range requests.** Send `Range: bytes=START-END` and the server replies with `206 Partial Content` and the requested slice. Out-of-range requests return `416`. This is what media players use to seek; you usually don't issue these manually, but if you build a custom player it works as expected.
 - **Conditional GET.** The server emits an `ETag` (the blob's sha256). Send `If-None-Match: <etag>` on subsequent requests and the server returns `304 Not Modified` with no body when the bytes are unchanged.
 
-Both behaviors are on the document blob path only. Bucket blobs go through signed URLs straight to the object store, which has its own range/etag semantics handled by the storage layer.
+Both behaviors are on the database blob path only. Bucket blobs go through signed URLs straight to the object store, which has its own range/etag semantics handled by the storage layer.
 
 ---
 
@@ -186,14 +183,13 @@ See **List / metadata / delete** above.
 const { deleted } = await blobs.delete(blobId); // { deleted: true }
 ```
 
-
 Deleting also cancels any in-flight upload for the same `blobId` and clears local bytes.
 
 ---
 
 ## Offline & the upload queue
 
-The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
+The upload queue is keyed by user identity, retries with exponential backoff (2s base, 60s max), and persists across reloads and app restarts: a queued or in-flight upload resumes in the next client for the same app and user, and never for another user. While offline, bytes are written to the local cache immediately and queued; `upload()` resolves without waiting for the network (`bytesTransferred: 0`). Reads are served from the cache for blobs previously uploaded or downloaded on this device/user, and `prefetch` warms the cache — its per-blob errors are logged and swallowed, so it resolves once all attempts complete regardless of individual failures. Coming back online resumes queue processing automatically, draining the queue in the background.
 
 ```typescript
   await client.setNetworkMode("offline");
@@ -215,25 +211,28 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
   await client.setNetworkMode("online");
 ```
 
+An upload whose request fails for a retryable reason (no connection, a timeout, a `5xx`) is queued the same way and answers `bytesTransferred: 0`; a refusal such as a `403` throws and queues nothing.
+
+
 ---
 
 ## Gotchas: upload queue management
 
-Inspect and control the per-document upload queue, and set the client-wide upload concurrency (applies to all documents). The `queueId` is the `blobId` for document uploads.
+Inspect and control a database's upload queue, and set the client-wide upload concurrency (applies to all databases). The `queueId` is the `blobId` for database blob uploads.
 
 ```typescript
-  // Inspect what's queued for this document. Each task carries queueId, blobId,
+  // Inspect what's queued for this database. Each task carries queueId, blobId,
   // filename, contentType, numBytes, status, attempts, nextAttemptAt, lastError.
   const tasks = blobs.uploads();
 
-  // Pause/resume by blobId (the queueId is the blobId for document uploads).
+  // Pause/resume by blobId (the queueId is the blobId for database uploads).
   blobs.pauseUpload(blobId);
   blobs.resumeUpload(blobId);
 
   blobs.pauseAll();
   blobs.resumeAll();
 
-  // Concurrency is set on the client (global, all documents).
+  // Concurrency is set on the client (global, all databases).
   client.setBlobUploadConcurrency(5); // min 1; default 2
   const concurrency = client.getBlobUploadConcurrency();
 ```
@@ -259,7 +258,6 @@ The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level
     console.log("failed", e.blobId, e.lastError, "retry?", e.willRetry);
   });
 ```
-
 
 ---
 
@@ -288,11 +286,11 @@ if (blobs.hasServiceWorkerControl()) {
 
 ## From a server function
 
-A server function uploads a document blob with `ctx.api.documents.blobs.upload`: `documentId`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.documents.blobs.list`, `downloadUrl` and `downloadHeaders` read it back.
+A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list`, `get` and `downloadUrl` read it back, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
 
 ```ts
-await ctx.api.documents.blobs.upload({
-  documentId, blobId,
+await ctx.api.db3.blobs.upload({
+  db3Id, blobId,
   "X-Blob-Filename": "receipt.png",
   "X-Blob-Size": bytes.byteLength,
   "X-Blob-Sha256": sha256Base64,
@@ -305,23 +303,12 @@ Name the type: without `"Content-Type"` the blob is stored as `application/octet
 
 ---
 
-## Permissions (document blobs)
+## Permissions (database blobs)
 
-| Operation                              | Required document permission     |
+| Operation                              | Required database permission     |
 |----------------------------------------|----------------------------------|
 | Upload, Delete                         | `read-write` or `owner`           |
 | List, Get metadata, Download, Read     | `reader` or higher                |
-
----
-
-## Document thumbnails and presentation metadata
-
-A document carries two fields that pair naturally with the blob system — set them with the document update call (covered in detail in the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#updating-document-metadata)):
-
-- **`thumbnailBlobId`** points at an existing blob owned by the document. Anyone with access to the document inherits read access to the referenced blob, so a thumbnail uploaded as a private document blob can safely back a thumbnail surface.
-- **`metadata`** is a small JSON-serializable object capped at 4KB serialized UTF-8. Use it for presentation hints that should travel with the document (cover image references, color tags, list-card layout, etc.).
-
-Both fields are optional and accept `null` to clear. Errors surface as `BLOB_NOT_FOUND` (referenced blob missing), `BLOB_DOC_MISMATCH` (blob belongs to a different document), or `METADATA_TOO_LARGE` (serialized `metadata` exceeds 4KB).
 
 ---
 
@@ -332,14 +319,14 @@ A **web walkthrough** composing the neutral calls already shown — [Upload](#up
 ```typescript
 async function uploadAndDisplay(
   client: JsBaoClient,
-  documentId: string,
+  db3Id: string,
   file: File,
   imgEl: HTMLImageElement
 ) {
   if (file.size > 10 * 1024 * 1024) {
-    throw new Error("Document blobs are capped at 10 MB. Use a bucket instead.");
+    throw new Error("Database blobs are capped at 10 MB. Use a bucket instead.");
   }
-  const blobs = client.document(documentId).blobs();
+  const blobs = client.db3.blobs(db3Id);
 
   const onProgress = (e: any) => {
     if (e.blobId) console.log(`[${e.blobId}] ${e.status} (attempt ${e.attempts})`);
@@ -367,8 +354,8 @@ async function uploadAndDisplay(
 A **web walkthrough** composing [List](#listing), `prefetch` ([Offline & the upload queue](#offline--the-upload-queue)), and `proxyUrl` into a gallery loader. Only the URL-wiring is web-specific:
 
 ```typescript
-async function loadGallery(client: JsBaoClient, documentId: string) {
-  const blobs = client.document(documentId).blobs();
+async function loadGallery(client: JsBaoClient, db3Id: string) {
+  const blobs = client.db3.blobs(db3Id);
   const { items } = await blobs.list({ limit: 100 });
   const images = items.filter((b: any) => b.contentType?.startsWith("image/"));
 
@@ -384,5 +371,3 @@ async function loadGallery(client: JsBaoClient, documentId: string) {
   }));
 }
 ```
-</content>
-</invoke>

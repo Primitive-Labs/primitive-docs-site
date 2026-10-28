@@ -9,12 +9,12 @@ Every Primitive app ships a dev-only inspection surface for working against a
 running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
-1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds.
+1. **Data inspection** — browse and mutate the databases (`db3` in code), models,
+   and records the client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
-3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
-   document.
+3. **Blob inspection** — list, preview, upload, download, and delete the blobs
+   stored with a database.
 
 The tools are active only in development builds and never ship to production.
 
@@ -66,14 +66,14 @@ The overlay keeps Primitive's own palette, font, and radius in every app; the ap
 
 ## Document Explorer
 
-Select a document in the left panel, then choose a model to inspect its records. The right panel shows document properties, sharing, and model counts.
+The explorer lists the databases you can read. Select a database in the left panel, then choose a model to inspect its records. The right panel shows the database's properties, sharing, and model counts.
 
 ### Common tasks
 
 #### Verify a record exists
 
 ```
-1. Sidebar → click target document
+1. Sidebar → click target database
 2. Middle panel header → click the "{ModelName} model" dropdown → choose model
    (or click the model name in the right-panel Models summary)
 3. Use the Filter Bar to narrow down (see "Filtering")
@@ -134,7 +134,7 @@ the plugin's virtual module spreads arrays and wraps single groups.
 The `run` signature is `(log: TestLogFn) => Promise<string>`. `log` is
 always provided — no optional chaining needed.
 
-**Pure-logic test** (no document needed):
+**Pure-logic test** (no database needed):
 
 ```typescript
 import type { TestGroup } from "primitive-app";
@@ -159,10 +159,10 @@ export default myTests;
 // or: export const myTests = [...]   // arrays are spread
 ```
 
-**CRUD test** (needs a document for `.save()`, `.find()`, `.query()`, `.delete()`):
+**CRUD test** (needs a database for `.save()`, `.find()`, `.query()`, `.delete()`):
 
 ```typescript
-import { createTestDocument, destroyTestDocument } from "primitive-app";
+import { jsBaoClientService } from "primitive-app";
 import type { TestGroup } from "primitive-app";
 import { Task } from "@/models/Task";
 
@@ -173,20 +173,23 @@ const myTests: TestGroup = {
       id: "task-create-find",
       name: "Task: create and find",
       run: async (log) => {
-        const doc = await createTestDocument();
+        const client = await jsBaoClientService.getClientAsync();
+        const db = await client.db3.create({ title: "Task CRUD test", type: "workspace" });
+        const sub = client.db3.subscribe(db.id);
         try {
+          await sub.available;             // a writable copy is on this device
           const task = new Task({ title: "Hello" });
-          await task.save();               // implicitly uses the test document
+          await task.save({ db3: db.id });
 
-          const found = await Task.find(task.id as string);
-          if (!found) throw new Error("not found");
-          if (found.title !== "Hello")
-            throw new Error(`title=${found.title}`);
+          const found = await Task.query({ title: "Hello" }, { db3: db.id });
+          if (found.data.length !== 1)
+            throw new Error(`found ${found.data.length} tasks`);
 
           log("task created and found");
           return "ok";                     // PASS
         } finally {
-          await destroyTestDocument(doc);
+          sub.dispose();
+          await client.db3.delete(db.id);  // also on failure
         }
       },
     },
@@ -206,9 +209,8 @@ export default myTests;
 
 - Use a globally unique test ID and the `.primitive-test.ts` suffix so the runner discovers the test correctly.
 - Return a string from an async test to pass; throw an error to fail. An assertion must throw when its condition is false.
-- For model operations, create a test document and destroy it in `finally`. Pure logic needs no document.
-- The default test document isolates writes, not queries. Pass `{ documents: doc.docId }` to queries. For cross-document tests, tag records with a unique value and filter on it.
-- Blob uploads and collection membership need `createTestDocument({ networkSync: true })`; cleanup deletes that server-side document.
+- For model operations, create a throwaway database and delete it in `finally`; a failed test otherwise leaves it behind. Pure logic needs no database.
+- Queries span every database on the device. Pass `{ db3: db.id }` to queries and saves. For cross-database tests, tag records with a unique value and filter on it.
 - A scored result must start with `N/M (P%)`. Headless runs fail incomplete scores by default.
 
 ### Environment-scoped tests
@@ -290,7 +292,6 @@ PRIMITIVE_TEST_EMAIL="you+primitivetest-ci@yourdomain.com" PRIMITIVE_ENV=alpha p
 | `otpCode` | `"000000"` (`PRIMITIVE_TEST_OTP_CODE`) | The test-account OTP bypass code |
 | `testTimeoutMs` | `60_000` | Per-test timeout |
 | `clientOptions` | storage `{ type: "auto" }` | Partial client options |
-| `cleanupTestDocuments` | `true` | Deletes leftover `===TEST===` documents after the run |
 | `failBelowFullScore` | `true` | Fail scored tests below full marks |
 
 Auth and failure semantics:
@@ -306,7 +307,7 @@ Auth and failure semantics:
 
 ## Blob Explorer
 
-Select a document to list its blobs, then select a file to preview or download it. Upload and delete require write access. Enter a blob ID for an exact lookup.
+Select a database to list its blobs, then select a file to preview or download it. Upload and delete require write access. Enter a blob ID for an exact lookup.
 
 ## Browser-console debugging
 
@@ -325,13 +326,13 @@ await window.__primitiveAppModels.Task.query({ priority: { $gte: 3 } })
 await window.__primitiveAppModels.Task.find("some-id")
 await window.__primitiveAppModels.Task.count({ completed: false })
 
-// New record needs an explicit targetDocument when no default is set
+// New record needs an explicit database when no default is set
 const t = new window.__primitiveAppModels.Task({ title: "x" });
-await t.save({ targetDocument: "some-doc-id" });
+await t.save({ db3: "some-db3-id" });
 
-// Underlying client (auth, documents, etc.)
+// Underlying client (auth, databases, etc.)
 await window.__primitiveAppClient.me.get();
-await window.__primitiveAppClient.me.ownedDocuments();
+await window.__primitiveAppClient.db3.listMine();
 ```
 
 Not exposed in production builds or non-debug hostnames.
@@ -343,7 +344,7 @@ Not exposed in production builds or non-debug hostnames.
 - Wait for sign-in and for **Initializing dev tools...** to finish before interacting.
 - Click rather than drag the floating button; dragging repositions it.
 - Close nested dialogs before closing the overlay with Escape.
-- Inspect data after acting in the app: choose the document and model, then filter for the expected record.
+- Inspect data after acting in the app: choose the database and model, then filter for the expected record.
 {{/lang}}
 
 {{#lang swift}}
@@ -380,27 +381,27 @@ update on their own. Every mutation you trigger calls the corresponding
 ## The tabs
 
 The inspector opens on an **Overview** dashboard (read-only): connection state,
-current user, a document summary, a storage summary, and a tail of the last ~20
+current user, a summary of the data on the device, a storage summary, and a tail of the last ~20
 events. The other tabs are below.
 
 ## Documents
 
-Three-column CRUD for documents plus a per-model records browser.
+Three-column CRUD for the databases on the device plus a per-model records browser.
 
-- **Left** — filterable document list, color-coded for open / pending / local-only.
-  Clicking a document auto-opens it.
+- **Left** — filterable database list, color-coded by sync state.
+  Clicking a database opens it.
 - **Middle** — the **Records** table: pick one of the registered models for the
-  selected document, read its rows, add a record via a schema-typed form (inputs
+  selected database, read its rows, add a record via a schema-typed form (inputs
   dispatched by field `kind`: string/number/boolean/date/id/stringset/json), and
   delete rows.
-- **Right** — detail for the selected document: rename / close / delete / share,
+- **Right** — detail for the selected database: rename / close / delete / share,
   plus raw metadata.
 
 ### Common tasks
 
 ```
 Verify a record exists / its field values:
-  1. Left list → click the document (auto-opens)
+  1. Left list → click the database (opens it)
   2. Middle "Records" → pick the model
   3. Read the rows directly
 
@@ -415,25 +416,7 @@ Create a record by hand:
 
 ### Surfacing your models
 
-Registered models appear automatically for each open document. Register a model with `client.registerModels([...])` or use it through its generated model API.
-
-For a hand-built runtime-schema `DynamicModel` that doesn't go through the
-facade, `override` the `open var inspectableModels` and append:
-
-```swift
-class MyAppState: PrimitiveAppState {
-  override var inspectableModels: [InspectableModel] {
-    guard let docId = modelsDocId else { return super.inspectableModels }
-    var out = super.inspectableModels        // keep the auto-surfaced models
-    if let m = runtimeTaskModel { out.append(.from(m, documentId: docId)) }
-    return out
-  }
-}
-```
-
-`InspectableModel.from(...)` takes the `DynamicModel` and wires `loadAll` /
-`deleteById` / `createWith` so the table, delete buttons, and create form all
-work with no extra code. Field descriptors come from the model's schema.
+Registered models appear automatically for each open database. Register a model with `client.registerModel(Model)` or use it through its generated model API.
 
 ## Tests
 
@@ -473,14 +456,14 @@ repro and iterate.
 
 ## Collections
 
-Two-column CRUD for collections of documents. Left = filter + list + create.
-Right = the selected collection's detail: rename / delete, the documents in it
-(per-row remove, add by documentId), and its access (raw `getAccess()` dump plus
+Two-column CRUD for collections of databases. Left = filter + list + create.
+Right = the selected collection's detail: rename / delete, the databases in it
+(per-row remove, add by database id), and its access (raw `getAccess()` dump plus
 grant-group and add-member prompts).
 
 ## Blobs
 
-Two-column file browser, scoped to whichever document is selected on the Documents
+Two-column file browser, scoped to whichever database is selected on the Documents
 tab.
 
 - **Left** — blob list + a file-picker "upload" button.
@@ -490,7 +473,7 @@ tab.
 
 ## Performance
 
-Use the timeline to see when documents load and sync. Filter by document to inspect one operation's duration and data source.
+Use the timeline to see when databases load and sync. Filter by database to inspect one operation's duration and data source.
 
 ## Storage inspection
 
@@ -508,9 +491,9 @@ Read inspector errors here when an action fails.
 
 ```
 1. Open the banner URL in a browser
-2. Act in the app → switch to Documents → pick the document → read the records
+2. Act in the app → switch to Documents → pick the database → read the records
 3. To run tests: Tests tab → Run all (or Run selected) → read pass/fail + output
-4. To inspect blobs: Documents tab → select the document → Blobs tab → preview
+4. To inspect blobs: Documents tab → select the database → Blobs tab → preview
 5. To cross-check query behavior: Memory SQL → run the same SELECT and compare
 ```
 

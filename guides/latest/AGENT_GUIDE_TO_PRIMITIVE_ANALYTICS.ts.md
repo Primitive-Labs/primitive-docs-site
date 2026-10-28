@@ -65,7 +65,7 @@ Pass a `context_json` object for per-event debug data. The serialized payload is
 
 ## What's Tracked Automatically
 
-The client and server record active users, sessions, document and permission changes, and function, prompt, and integration activity.
+The client and server record active users, sessions, database and permission changes, and function, prompt, and integration activity.
 
 ### Client-Side Auto Events
 
@@ -88,27 +88,24 @@ The platform emits these from the server. No client code at all.
 | Action | Feature | When |
 |--------|---------|------|
 | `session.refreshed` | `auth` | JWT refresh succeeds |
-| `document.created` | `documents` | Document created |
-| `document.viewed` | `documents` | Document info fetched — fires on every open (the client fetches info as part of opening) |
-| `document.opened` | `documents` | Document opened via alias resolution; plain `documents.open(id)` does not fire it |
-| `document.updated` | `documents` | Document metadata updated (title/thumbnail/metadata) — document content edits are not individually evented |
-| `document.deleted` | `documents` | Document deleted |
+| `document.created` | `documents` | Database created |
+| `document.deleted` | `documents` | Database deleted (record writes are not individually evented) |
 | `document.tag_added` | `documents` | Tag added |
 | `document.tag_removed` | `documents` | Tag removed |
-| `access_request.created` | `documents` | User requested access to a document |
+| `access_request.created` | `documents` | User requested access to a database |
 | `access_request.approved` | `documents` | Access request approved |
 | `access_request.denied` | `documents` | Access request denied |
 | `permission.granted` | `permissions` | Permission granted |
 | `permission.revoked` | `permissions` | Permission revoked |
 | `permission.pending.cancelled` | `permissions` | Pending invite-permission cancelled |
-| `ownership.transferred` | `permissions` / `ownership` | Document ownership transferred (emitted from both controllers) |
+| `ownership.transferred` | `permissions` / `ownership` | Database ownership transferred |
 | `invitation.sent` | `invitations` | Invitation sent |
 | `invitation.cancelled` | `invitations` | Invitation cancelled |
 | `invitation.declined` | `invitations` | Invitation declined |
 | `user.removed` | `users` | User removed from app |
 | `user.role_changed` | `users` | User role changed |
 | `prompt.executed` | `prompts` | Prompt execution completes |
-| `function.invoke` | `functions` | A server function's HTTP invoke or task start, attributed to the caller. Context: `functionKey`, `functionId`, `configId`, `contentHash`, `status` (the terminal status of an invoke; `started` for a task start, plus `executionMode: "durable"`). A trigger fire (webhook, cron) has no caller and emits none |
+| `function.invoke` | `functions` | A server function's HTTP invoke or task start, attributed to the caller. Context: `functionKey`, `functionId`, `configId`, `contentHash`, `status` (the terminal status of an invoke; `started` for a task start, plus `runtime: "task"`). A trigger fire (webhook, cron) has no caller and emits none |
 | `integration.invoke` | _(integration key)_ | Integration call |
 | `created` | `token` | API token created |
 | `revoked` | `token` | API token revoked |
@@ -278,7 +275,7 @@ primitive analytics events-grouped --group-by feature --window-days 14
 
 # Error groups: failures grouped by fingerprint with per-day counts
 # (default --window-days 7, --limit 50). Filter: --status-class 4xx|5xx|transport,
-# --source workflow_run|workflow_step|integration|function_invocation|function_run
+# --source integration|function_invocation|function_run
 primitive analytics errors-groups --window-days 7 --status-class 5xx
 
 # Integration / prompt analytics (default --window-days 30)
@@ -416,7 +413,7 @@ Only a bounded set of dimensions is filterable (the exact error code is inside t
 | Field | Operators | Values |
 | --- | --- | --- |
 | `fingerprint` | `is`, `contains`, `starts with` | any |
-| `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration`, `function_invocation`, `function_run` |
+| `source` | `is`, `is not` | `integration`, `function_invocation`, `function_run` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
 Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).

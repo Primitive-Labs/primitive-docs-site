@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-10-15",
+    "stampedAt": "2026-10-28",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
@@ -63,7 +63,7 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents"
+        "databases"
       ],
       "variants": [
         {
@@ -124,7 +124,7 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents",
+        "databases",
         "server-functions"
       ],
       "variants": [
@@ -135,53 +135,6 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOBS.swift.md"
-        }
-      ]
-    },
-    {
-      "topic": "data-modeling",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md",
-      "description": "Choosing between documents and databases, and designing your app's data architecture",
-      "keywords": [
-        "data modeling",
-        "storage",
-        "architecture",
-        "documents vs databases",
-        "when to use",
-        "design patterns",
-        "data architecture"
-      ],
-      "useCases": [
-        "Deciding between documents and databases for a feature",
-        "Designing data architecture for a new app",
-        "Splitting data across documents and databases",
-        "Choosing access control patterns",
-        "Planning for scale and performance"
-      ],
-      "concepts": [
-        "documents",
-        "databases",
-        "local-first",
-        "server-side storage",
-        "access control",
-        "CEL",
-        "sharing",
-        "collaboration"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "documents",
-        "databases",
-        "users-and-groups"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.swift.md"
         }
       ]
     },
@@ -234,8 +187,6 @@
       "prerequisites": [],
       "relatedGuides": [
         "databases",
-        "documents",
-        "data-modeling",
         "authentication",
         "invitations",
         "resource-metadata"
@@ -254,82 +205,76 @@
     {
       "topic": "databases",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.ts.md",
-      "description": "Server-side databases — types, schemas, triggers; records via ctx.db in server functions",
+      "description": "Databases (db3): types, codegen, records, synced copies, sharing, sync-off access, partitioning",
       "keywords": [
         "databases",
         "database",
-        "server-side",
-        "database type",
+        "db3",
+        "data",
+        "storage",
+        "data modeling",
         "schema",
+        "db3-types",
+        "types",
         "models",
-        "triggers",
-        "autoPopulatedFields",
-        "timestamps",
-        "ctx.db",
+        "codegen",
+        "js-bao-codegen-v2",
         "query",
         "filter",
-        "save",
-        "patch",
-        "batch",
         "aggregate",
-        "compare-and-swap",
-        "defineQuery",
-        "registered queries",
-        "$caller",
-        "channels",
+        "includes",
+        "upsert",
+        "condition",
+        "increment",
+        "stringset",
+        "batch",
+        "indexes",
+        "sync",
+        "offline",
+        "local-first",
+        "subscribe",
+        "real-time",
+        "sharing",
         "permissions",
-        "managers",
-        "grantGroupPermission",
-        "rule sets",
-        "primitive databases",
-        "import",
-        "indexes"
+        "app access",
+        "custodian",
+        "sync off",
+        "partitioning",
+        "primitive db3"
       ],
       "useCases": [
-        "Configuring a database type with a schema and triggers",
-        "Creating and managing databases from a server function",
-        "Reading and writing records from a function with ctx.db",
-        "Filtering, sorting, and paging record queries",
-        "Conditional writes, batch writes, and atomic increments",
-        "Aggregating records (count, sum, avg, min, max)",
-        "Scoping reads to the caller in function code or with a $caller registered query",
-        "Pushing realtime updates for database data over channels",
-        "Managing owners, managers, and group grants on a database",
-        "Inspecting and editing records with the primitive databases CLI",
-        "Splitting data into one database per team or tenant"
+        "Deciding how to store and partition an app's data",
+        "Declaring a database type and generating models for web, iOS and functions",
+        "Creating a database, or one per user with an alias",
+        "Reading and writing records on a device and in a server function",
+        "Aggregates, includes, upserts, conditional writes, counters and batches",
+        "Subscribing to a synced database, offline writes and live UI updates",
+        "Handling write refusals",
+        "Sharing a database with users, groups, a link or the whole app",
+        "App-held databases, transfer and custody",
+        "Turning sync off and serving data through functions with per-caller access",
+        "Registering indexes"
       ],
       "concepts": [
-        "database",
+        "db3",
         "database type",
-        "schema",
-        "triggers",
-        "timestamps",
-        "ctx.db",
-        "query options",
-        "filter operators",
-        "writes",
-        "conditional writes",
-        "batch writes",
-        "atomic increments",
-        "aggregation",
-        "access gate",
-        "registered queries",
-        "$caller",
-        "channels",
-        "database type config",
-        "rule set config",
-        "group type config",
-        "managing databases",
-        "owner and manager",
-        "reserved field names"
+        "db3-types",
+        "synced database",
+        "sync off",
+        "client.db3",
+        "ctx.db3",
+        "BaseModel",
+        "Db3State",
+        "app access",
+        "custodian",
+        "partitioning"
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents",
-        "data-modeling",
-        "users-and-groups",
         "server-functions",
-        "resource-metadata"
+        "access-control",
+        "users-and-groups",
+        "blobs"
       ],
       "variants": [
         {
@@ -339,74 +284,6 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.swift.md"
-        }
-      ]
-    },
-    {
-      "topic": "documents",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md",
-      "description": "Local-first collaborative documents — models, CRUD, sharing, collections, access requests",
-      "keywords": [
-        "documents",
-        "models",
-        "schema",
-        "query",
-        "save",
-        "CRUD",
-        "sharing",
-        "permissions",
-        "js-bao",
-        "data modeling",
-        "local-first",
-        "collaboration",
-        "share",
-        "collections",
-        "access request",
-        "members",
-        "pending invitations"
-      ],
-      "useCases": [
-        "Creating and defining data models",
-        "Querying and filtering data",
-        "Saving and updating records",
-        "Sharing documents with other users",
-        "Understanding document permissions",
-        "Using useJsBaoDataLoader for reactive data",
-        "Sharing a document with a user, email, or group",
-        "Building a members + pending sharing UI",
-        "Handling document access requests",
-        "Bundling documents into collections"
-      ],
-      "concepts": [
-        "BaseModel",
-        "models.toml",
-        "js-bao-codegen-v2",
-        "query",
-        "save",
-        "documents.open",
-        "me.ownedDocuments",
-        "me.sharedDocuments",
-        "useJsBaoDataLoader",
-        "documentReady",
-        "initialDataLoaded",
-        "upsertByUnique",
-        "aliases"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "server-functions",
-        "devtools",
-        "databases",
-        "data-modeling"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.swift.md"
         }
       ]
     },
@@ -736,7 +613,7 @@
       "relatedGuides": [
         "prompts",
         "server-functions",
-        "documents"
+        "databases"
       ],
       "variants": [
         {
@@ -993,10 +870,10 @@
         "data validation"
       ],
       "prerequisites": [
-        "documents"
+        "databases"
       ],
       "relatedGuides": [
-        "documents"
+        "databases"
       ],
       "variants": [
         {
@@ -1047,7 +924,8 @@
       "relatedGuides": [
         "app-secrets",
         "multi-client"
-      ]
+      ],
+      "prerequisites": []
     },
     {
       "topic": "inspecting-and-debugging",
@@ -1082,7 +960,8 @@
       "relatedGuides": [
         "devtools",
         "server-functions"
-      ]
+      ],
+      "prerequisites": []
     },
     {
       "topic": "access-control",
@@ -1116,7 +995,8 @@
       ],
       "relatedGuides": [
         "resource-metadata"
-      ]
+      ],
+      "prerequisites": []
     },
     {
       "topic": "resource-metadata",
@@ -1169,7 +1049,8 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.swift.md"
         }
-      ]
+      ],
+      "prerequisites": []
     },
     {
       "topic": "invitations",
@@ -1206,7 +1087,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "blob-buckets",
@@ -1240,7 +1123,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "deploying",
@@ -1280,7 +1165,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "multi-client",
@@ -1292,7 +1179,7 @@
         "web and ios",
         "layout",
         "shared schema",
-        "models.toml",
+        "db3-types",
         "primitive init",
         "add client",
         "project root",
@@ -1307,10 +1194,10 @@
       ],
       "relatedGuides": [
         "configuration",
-        "documents",
-        "deploying",
-        "data-modeling"
-      ]
+        "databases",
+        "deploying"
+      ],
+      "prerequisites": []
     },
     {
       "topic": "error-handling",
@@ -1393,7 +1280,9 @@
         "Checking what changed before upgrading platform libraries",
         "Finding new platform capabilities to adopt",
         "Tracking deprecations that need migration"
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     }
   ]
 }

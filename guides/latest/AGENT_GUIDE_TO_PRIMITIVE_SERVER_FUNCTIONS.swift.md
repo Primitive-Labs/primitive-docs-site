@@ -1,8 +1,8 @@
 # Agent Guide to Primitive Server Functions
 
 Server functions run TypeScript with the app’s authority. Define the entry
-point and access rule in `functions/<key>.toml`, then deploy with
-`primitive config push`.
+point in `functions/<key>.toml` and an `authorize` method beside the handler,
+then deploy with `primitive config push`.
 
 Choose `functions.invoke` for a result in the request or `functions.start` for
 a background task. Webhooks use requests; cron schedules start tasks. `invoke`
@@ -16,23 +16,28 @@ can exceed 30 000 ms has to be a task.
 [function]
 key = "greet"
 entry = "functions/greet/index.ts"
-access = "true"
 ```
 
 `key` identifies the function; `entry` is relative to the configuration root.
-`access` is a CEL expression controlling member calls. Add `inputSchema` and
-`outputSchema` when inputs and results need validation.
+Add `inputSchema` and `outputSchema` when inputs and results need validation.
 
 ## The handler
 
 ```ts
 // functions/greet/index.ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { name?: string }) => {
-  return { message: `Hello ${input.name ?? "world"}` };
+export default defineFunction("greet", {
+  authorize: requireSignedIn(),
+  handler: async (input: { name?: string }) => {
+    return { message: `Hello ${input.name ?? "world"}` };
+  },
 });
 ```
+
+Every version pushed today must define `authorize` beside the handler — a
+version with none is refused `FUNCTION_AUTHORIZE_REQUIRED` at push. See
+[Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method).
 
 ```bash
 primitive config push
@@ -72,6 +77,9 @@ a version. It preserves authored sources for `config pull`.
   codegen --check` in CI.
 - Push executes module-level code while collecting the manifest; only push a
   tree you trust to run locally.
+- The server loads each new version once with no network and no credentials.
+  Module-level code that throws, awaits I/O, or runs long refuses that
+  function's push with `FUNCTION_PROBE_FAILED`; keep such work in the handler.
 - A failed function build can leave other configuration changes applied.
 - An agent whose tool names a function that failed to build or typecheck, and
   that the app does not hold (never pushed, or archived), is not pushed. Its
@@ -103,20 +111,52 @@ uses an HTTP error. Use `invocationId` to locate its log.
 | Option | Use |
 | --- | --- |
 | `rootInput` | REST input; client methods call this `input`. |
-| `contextDocId` | The document the invocation concerns. |
+| `contextDocId` | What the invocation concerns, at most 100 characters — typically a database id. A task run is keyed under it. |
 | `meta` | Caller metadata, up to 1 KB. |
 | `timeoutMs` | Request deadline: 5 000 ms default, 30 000 ms maximum. |
 | `runKey` | Deduplicates task starts; ignored by request invocations. A *failed* run keeps its key — retry with a new one. |
 
 ### The access gate
 
+New code defines `authorize` instead — see [Access Control: The authorize method](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method) and its [porting table](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#porting-from-access). What follows is `access`, the CEL rule an already-deployed legacy version still runs; it is frozen and a new or changed version can no longer set it.
+
 `access` controls member HTTP calls and an agent's tool, context and history
 calls, which it evaluates as the turn's initiator. Owners and admins bypass it.
-Webhooks, cron, and nested starts do not evaluate it; use `access = "false"`
-for a function intended only for these paths, never for one an agent calls.
+Webhooks, cron, and nested starts do not evaluate it; a legacy function
+intended only for these paths uses `access = "false"`, never one an agent calls.
 
 Function operations use app authority, not the caller’s data permissions.
-Check document access explicitly when acting on a caller-supplied ID.
+Check the caller's access explicitly when acting on a caller-supplied database ID.
+
+### Input and output validation
+
+Every invoke, task start, nested start, trigger and agent tool call is checked
+against `inputSchema` before the handler runs. A failed call or start is `400`
+`FUNCTION_INPUT_INVALID` with `details` naming each path and rule; a trigger
+records a failed run with that code; a tool call gets
+`AGENT_TOOL_ARGUMENTS_INVALID`. The handler's result is checked against
+`outputSchema` with the same rules; a result that breaks it fails the call or
+run with `FUNCTION_OUTPUT_INVALID`.
+
+```toml
+[function.inputSchema]
+type = "object"
+additionalProperties = false
+required = ["householdId"]
+
+[function.inputSchema.properties.householdId]
+type = "string"
+minLength = 1
+maxLength = 64
+```
+
+Enforced: `type`, `enum`, `const`, `properties`, `required`,
+`additionalProperties = false`, `items`, `minLength`, `maxLength`, `pattern`,
+`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+`minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`,
+`anyOf`, `oneOf`, `nullable`. In either schema, push refuses `allOf`, `not`, `if`/`then`/`else`,
+`patternProperties`, `propertyNames`, `dependentRequired`, `contains`,
+`prefixItems`, a schema-valued `additionalProperties` and a list-valued `items`.
 
 ## Task runs
 
@@ -140,7 +180,7 @@ completion:
   let settled = try await client.functions.waitFor(
     runId: run.runId,
     as: Confirmation.self,
-    options: FunctionWaitOptions(timeout: 60) // throws workflowWaitTimeout past it
+    options: FunctionWaitOptions(timeout: 60) // throws functionWaitTimeout past it
   )
   // A failed run RESOLVES — branch on the status, don't catch. `error.message`
   // is the reason, a platform refusal leads it with its code, and `error.code`
@@ -151,7 +191,6 @@ completion:
     print(settled.status, settled.output?.confirmedAt ?? 0)
   }
 
-  // The function key goes where a workflow key would.
   _ = try await client.functions.terminate(
     FunctionRunRef(functionKey: "order-sync", runKey: run.runKey)
   )
@@ -163,9 +202,11 @@ Use `ctx.functions.start(key, input, { runKey })` to start a child task from
 function code. A repeated key returns the existing run, including a failed
 one. Retry failed work with a new key.
 
-Child tasks inherit the original caller and usually the parent’s context
-document. A child’s `access` rule is not evaluated; the entry function’s
-access rule controls who may start the work.
+Child tasks inherit the original caller and usually the parent’s context id. A legacy child’s `access` rule is not evaluated; the entry function’s
+`access` rule controls who may start the work. A child with an `authorize`
+method is different: it runs its own `authorize` all the same, at every level
+of the chain — naming the door with `allowCallers({ functions: [parentKey] })`
+— see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance).
 
 Use `assertRuntime("task")` for handlers that require background execution.
 In request mode, `step.do` executes inline, sleeps must fit the request budget,
@@ -185,9 +226,9 @@ List the signed-in user's task runs with `functions.listRuns`, and one run's
 recorded steps, oldest first, with `functions.listRunSteps`:
 
 ```swift
-  // Every run this user started against the document, a page at a time.
+  // Every run this user started against the database, a page at a time.
   let page = try await client.functions.listRuns(
-    options: FunctionRunListOptions(contextDocId: documentId, limit: 20)
+    options: FunctionRunListOptions(contextDocId: db3Id, limit: 20)
   )
   for run in page.items {
     print(run.functionKey ?? "", run.runId, run.status, run.startedAt ?? "")
@@ -195,7 +236,7 @@ recorded steps, oldest first, with `functions.listRunSteps`:
   if let cursor = page.nextCursor {
     // Same filters, plus the cursor, for the next page.
     _ = try await client.functions.listRuns(
-      options: FunctionRunListOptions(contextDocId: documentId, cursor: cursor)
+      options: FunctionRunListOptions(contextDocId: db3Id, cursor: cursor)
     )
   }
 
@@ -213,7 +254,7 @@ recorded steps, oldest first, with `functions.listRunSteps`:
 
 | Option | Use |
 | --- | --- |
-| `contextDocId` | Runs started against this document. |
+| `contextDocId` | Runs keyed under this context id (a database id, say). |
 | `functionKey` | One function's runs; matched exactly. |
 | `status` | `queued`, `running`, `completed`, `failed`, `terminated` or `missing`. |
 | `limit` | Page size: 50 by default, 200 at most. |
@@ -224,7 +265,9 @@ The list holds only the caller's own runs, never trigger-started ones. It is in
 storage order, not start order: most recently updated first, or, with
 `contextDocId`, by status and then newest first. Sort by `startedAt` for start
 order. Over REST, `GET functions/runs` answers `400` for an unknown query
-parameter.
+parameter, `GET functions/runs/{runId}/status` reads one run, and
+`GET|POST functions/{functionKey}/instances/{runKey}/status|terminate` read and
+stop a run by its run key.
 
 ### Step discipline
 
@@ -258,10 +301,9 @@ no feature that pushes a run's settlement to the client — the three options
 above are it.
 
 - **For "the task's write landed":** don't poll run status for this. A client
-  with the context document open already has a
-  [subscription](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#subscribe-to-changes) on
-  the model the task writes; that callback fires when the write syncs in, same
-  as any other write to an open document.
+  subscribed to the database the task writes receives the write as a live
+  update, same as any other write to a
+  [synced database](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#synced-databases-on-a-device).
 - **For "the run finished":** call `ctx.users.send(ctx.user.userId, …)` as the
   run's last step, after the work it reports on has committed — a connected
   starter gets it immediately. It never fires for a platform failure
@@ -292,8 +334,7 @@ may have completed some work. Report repeated platform failures.
 | `FUNCTION_NO_HANDLER` | The entry file exported no callable default. | Export a default function from the file `entry` names. |
 | `FUNCTION_TIMEOUT` | The invocation did not finish inside its budget. | Shorten the work, or run it as a task (`functions start`) where the budget is per slice. |
 | `FUNCTION_INPUT_INVALID` | The input did not match the declared `inputSchema`. | Fix the caller's input, or the schema. |
-| `FUNCTION_OUTPUT_INVALID` | A webhook delivery's run returned output that did not match `outputSchema`. (An HTTP invoke refusing its output answers `OUTPUT_SCHEMA_VIOLATION` in the envelope instead.) | Fix the returned value, or the schema. |
-| `OUTPUT_SCHEMA_VIOLATION` | A task run's output did not match `outputSchema`. | Fix the returned value, or the schema. The message names the failing paths. |
+| `FUNCTION_OUTPUT_INVALID` | The output did not match `outputSchema` — on an invoke, a webhook delivery's run or a task run. | Fix the returned value, or the schema. The message names the failing paths. |
 | `OUTPUT_NOT_SERIALIZABLE` | The returned value is not JSON. | Return plain data — no functions, no cycles, no `undefined` where a value is required. |
 | `OUTPUT_TOO_LARGE` | The output exceeds the 1 MiB platform ceiling. | Page the result, or write it to a database and return a handle. |
 | `FUNCTION_DELETED` | The function was hard-deleted while the run was starting. | Nothing to retry: the stored bundle the run pinned is gone. |
@@ -320,14 +361,19 @@ an attempt the run row's code is the whole statement; there is nothing in
 Wait for a named lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs, owner? }, fn)`: it acquires, runs `fn(handle)` while the key is held, and releases in `finally` — on a return and on a throw. It answers `fn`'s value; `fn`'s own error propagates unchanged after the release.
 
 ```ts
-export default defineFunction(async (input: { itemId: string }, ctx, step) => {
-  return ctx.locks.withLock(`ingest:${input.itemId}`, {
-    ttlMs: 600_000,
-    timeoutMs: 360_000, // task runtime; a request must fit its remaining budget
-  }, async () => {
-    await step.do("ingest", async () => { /* work that must not overlap */ });
-    return { ingested: true };
-  });
+import { defineFunction, requireSignedIn } from "primitive-functions";
+
+export default defineFunction({
+  authorize: requireSignedIn(),
+  handler: async (input: { itemId: string }, ctx, step) => {
+    return ctx.locks.withLock(`ingest:${input.itemId}`, {
+      ttlMs: 600_000,
+      timeoutMs: 360_000, // task runtime; a request must fit its remaining budget
+    }, async () => {
+      await step.do("ingest", async () => { /* work that must not overlap */ });
+      return { ingested: true };
+    });
+  },
 });
 ```
 
@@ -405,20 +451,30 @@ validate resource access in your code when the result must be caller-scoped.
 
 ### Checking a user's access
 
-Pass the caller’s ID to `ctx.api.documents.validateAccess`:
-`{ documentId, body: { userId: ctx.user.userId } }`. Require a signed-in caller
-before reading `ctx.user`.
+A database id in the input is a claim, not a permission: `ctx.db3` reaches
+every database in the app. Gate in `authorize` with the caller's effective
+level, `auth.db3(id, type).permissions()` → `"reader" | "read-write" | "owner" | null`:
 
-Content writes require `permission` of `read-write` or `owner`. `appRole`
-alone is not a document grant. Omitting `body.userId` checks the app’s own
-access, not the caller’s.
+```ts
+authorize: async (input: { db3Id: string }, auth) => {
+  if (!auth.user) return deny("FORBIDDEN");
+  const level = await auth.db3(input.db3Id, "project").permissions();
+  return level === "read-write" || level === "owner" ? allow() : deny("FORBIDDEN");
+},
+```
+
+For another user, or from the handler: `ctx.api.db3.validateAccess({ db3Id, body: { userId } })` →
+`{ hasAccess, permission?, accessSource? }` (`accessSource`: `owner`, `grant`, `group`, `link`, `app`, or `resource` when a platform resource such as an agent session holds the database and its members read it).
+Omitting `body.userId` describes the function's own app authority, not the caller — always pass it.
+Both resolve grants, groups, collections, link and app access exactly as the database enforces them; an app role
+is not a content grant. A sync-off database answers no access for every member — gate those on
+records your app keeps (a roster row read through `auth.db3(...).model(...)`).
 
 ### Which user a call is about
 
 A call about one user takes `userId`. Omitted, it means the caller
 (`ctx.user`). Only an absent `userId` means the caller: an empty, `null` or
-non-string `userId` throws `SUBJECT_USER_INVALID` (400), user-scoped alias
-calls included, so omit it rather than pass `""`. A run with no caller — cron, a webhook, `--as system`, or a task
+non-string `userId` throws `SUBJECT_USER_INVALID` (400), so omit it rather than pass `""`. A run with no caller — cron, a webhook, `--as system`, or a task
 started from one — must name the user, or the call throws
 `FUNCTION_SUBJECT_REQUIRED` (400):
 
@@ -430,10 +486,9 @@ const page = await ctx.api.collections.list({ userId: member.userId });
 
 | Calls | `userId` |
 | --- | --- |
-| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `ctx.agents.*`; user-scoped alias calls | Optional; defaults to the caller |
-| `collections.listForUser`, `documents.listOwnedByUser`, `documents.listSharedWithUser`, `groups.listUserMemberships`, `users.getRootDocument` | Required |
-| `documents.requestAccess` | None: always the caller |
-| App-wide reads (`databases.list`, `groups.list`, `users.list`) | None |
+| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `ctx.agents.*` | Optional; defaults to the caller |
+| `collections.listForUser`, `groups.listUserMemberships` | Required |
+| App-wide reads (`groups.list`, `users.list`) | None |
 | Calls that hand something to a user (`notifications.send`, `users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
 
 Naming a user other than the caller, with an optional or a required `userId`:
@@ -443,15 +498,19 @@ Naming a user other than the caller, with an optional or a required `userId`:
 | No caller | `FUNCTION_SUBJECT_REQUIRED` | Allowed |
 | Invoked by an app owner or admin | The caller | Allowed |
 | Invoked by any other member | The caller | `SUBJECT_USER_FORBIDDEN` (403) |
+| Invoked by any other member, function declares `users:readAny` / `users:actAsAny` | The caller | Allowed on reads / on calls acting as them |
 | A tool, context or history run, and anything it starts | The initiator | `SUBJECT_USER_FORBIDDEN` (403) |
 
 The role is read at each call, so a task sees a role change made while it
 slept. A named user who is not a member throws `SUBJECT_USER_NOT_FOUND` (404)
-on the optional-`userId` calls; the required-`userId` reads and the alias
-calls keep their own not-found answers.
+on the optional-`userId` calls; the required-`userId` reads keep their own
+not-found answers.
 
 Gotchas:
 
+- **A subject grant reaches any member the code names.** A function holding
+  `users:readAny` or `users:actAsAny` lets every member who may invoke it name
+  anyone; take the user id from your own data, not from input.
 - **Writes toward a named user are not restricted.** `users.setProfile`,
   `notifications.send` and `ctx.channels.authorize` accept any member, so a
   tool that passes a model-supplied user id to them changes that user's data.
@@ -471,19 +530,20 @@ Direct internet `fetch` calls are denied. Missing capabilities return
 
 A single `$in` or `$nin` list is limited to 1 000 values
 (`QUERY_IN_LIST_TOO_LARGE`). How to split a longer list depends on the
-operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#filter-operators).
+operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#limits).
 
 ## Capabilities
 
-`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only three kinds exist:
+`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only four kinds exist:
 
 | Kind | Strings | Unlocks |
 |---|---|---|
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
-| High-blast | `databases:create`, `databases:delete`, `databases:transferOwnership`, `databases:addManager`, `databases:revokePermission`, `databases:grantGroupPermission`, `databases:revokeGroupPermission`, `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
+| High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
+| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, documents, root document, inbox, devices, agent sessions, user aliases, holdings); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
 
-**Nothing else is declared.** Database models, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
+**Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
 
 Push checks capability syntax and integration existence. Secret values are
 provisioned separately; an unset value returns `FUNCTION_SECRET_NOT_FOUND`.
@@ -536,7 +596,7 @@ return { delivered: result.connections, truncated: result.truncated };
 ```
 
 - **Presence is not guaranteed and there is no durable record.** A user with no connected client answers `{ connections: 0, truncated: false }` — a success. A client that was offline never receives the frame later; use a notification when the message must survive being missed.
-- **One socket, one frame.** A client with several documents open is one connection, delivered once.
+- **One socket, one frame.** A client with several databases open is one connection, delivered once.
 - **Fan-out is bounded** at 64 unique connections per user, and the lookup behind it is bounded too; past either, the send delivers what it found and answers `truncated: true` — "there may be more", not an error.
 - **Payloads are capped at 64 KiB** serialized (`FUNCTION_SEND_PAYLOAD_TOO_LARGE`; nothing delivered).
 - `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`).
@@ -648,131 +708,40 @@ await step.do("send-receipt", stepPolicy.email, () =>
 
 ## Database records
 
-Use schema-typed handles for records:
-
-- `ctx.db(databaseId, typeKey).model(modelName)` for databases.
-- `ctx.doc(documentId).model(modelName)` for documents.
-
-The database model handle offers `query`, `count`, `aggregate`, `save`,
-`patch`, `delete`, and `batch`. Returned rows include `id: string`. Page large
-reads with `items`, `hasMore`, and `nextCursor`.
-
-### The typed handle
-
-Push generates types from your database and document schemas. Use
-`primitive functions codegen --check` for stale output. See
-[Configuration](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#functions-directory)
-and [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for operations.
-
-### Registered queries
-
-Use registered queries to share validated database operations. See the
-[Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md).
-
-### The typed document handle
-
-`ctx.doc(id).model(name)` supports `query`, `count`, `aggregate`, `save`,
-`patch`, `delete`, and `batch`; `aggregate` resolves to the row array itself
-(the route's `result`), every other call answers the route's own shape. A
-document batch applies one model’s operations atomically. Use
-`ctx.api.documents.records.bulk` for multiple models.
-
-`query` takes `filter`, `sort`, `limit` and `cursor`. `sort` maps each field to
-`1` (ascending) or `-1` (descending), earlier keys first, with `id` breaking
-ties; `limit` and `cursor` apply to the sorted rows, so
-`query({ sort: { createdAt: -1 }, limit: 50 })` is the newest 50. Send the same
-`sort` with each `cursor`: a cursor from another sort is refused (400).
-
-`query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000;
-a larger value is refused (400), never clamped. A page also ends before the
-record that would pass 8 MiB (the sum of each record's UTF-8 JSON, envelope
-not counted), answering `hasMore: true` and a `nextCursor`; a single larger
-record comes back alone. Loop on `hasMore` rather than counting rows.
-
-`aggregate` takes the route's body, `{ options: { operations, groupBy?,
-filter? } }`. A `groupBy` entry is a plain field name or a period level
-`{ field, period }`, with `period` `"month"`, `"quarter"` or `"year"`:
+`ctx.db3(db3Id, "<type>").model("<model>")` reads and writes one model of one database:
 
 ```ts
-const rows = await ctx.doc(ledgerId).model("transaction").aggregate({
-  options: {
-    groupBy: [{ field: "date", period: "month" }, "categoryId"],
-    operations: [{ type: "count" }, { type: "sum", field: "amount" }],
-    filter: { date: { $gte: "2025-11-01", $lte: "2026-10-31" } },
-  },
-});
-// [{ group: { date_month: "2026-01", categoryId: "food" }, count: 3, sum_amount: -42 }, …]
+const orders = ctx.db3(input.db3Id, "orders").model("orders");
+const open = await orders.query({ filter: { status: "open" }, sort: { createdAt: -1 }, limit: 50 });
+await orders.patch(open.items[0].id, { data: { status: "picked" }, condition: { status: "open" } });
 ```
 
-A period level's key in `group` is `<field>_<period>`; its value is
-`YYYY-MM`, `YYYY-Qn` or `YYYY`, read from the stored text with no time-zone
-conversion. A record whose field is missing or not a date is in the `null`
-bucket. The rows equal the client's `Model.aggregate` rows for the same call.
+The handle's contract:
 
-Gotchas:
+- **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
+- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
+- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `bulk`. `ctx.db3(id, type).bulk([...])` spans models, each op naming its `model`.
+- **Refusals reject:** `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
+- **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
+- **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
+- **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
 
-- **A declared model checks period fields.** When the model declares a schema,
-  a period level must name a declared `date` or `string` field, or the call
-  fails with a 400. On a model with no declaration the same level answers the
-  `null` bucket, and a plain field level is never checked.
-- **Only plain fields and period levels group.** A `stringset` field,
-  `{ field, contains }`, `sort` and `limit` fail with a 400; sort or trim the
-  rows in the function.
+Every operation's options and server-function examples are in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Creating a database, transferring it, and switching its sync or app access go through `ctx.api.db3` with the `db3:*` capabilities — see [Access](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access).
 
-To sync external rows, use `{ action: "upsert", constraint, data }`: `constraint`
-names a declared unique constraint (`<model>_<field>_unique` for a `unique`
-field), and `data` carries its fields. The holder gets only the supplied
-fields; a missing record is created. The result's `upserted` lists `{ index,
-model, id, created }` per upsert. `data` must not carry `id`, and a constraint
-over `id` is refused (400).
-
-### A member's documents, collections and aliases
+### A member's collections and profile
 
 Triggered functions have no caller, so name the member (see
-[Which user a call is about](#which-user-a-call-is-about)). A root lookup
-can return `rootDocId: null`; it does not create a document.
+[Which user a call is about](#which-user-a-call-is-about)).
+`ctx.api.collections.listForUser({ userId })` pages the collections a member
+belongs to, with `permission`; loop on `hasMore`, since a page can be short or
+empty while `hasMore` is `true`. A non-member throws 404. No capability gates
+it: a run with no caller, or one an app owner or admin invoked, can list any
+member's, so keep such a function admin-only or trigger-only.
+
 `ctx.api.users.setProfile({ userId, body: { name, avatarUrl } })` sets a
 member's display name and avatar (`avatarUrl` is an `http:` or `https:` URL;
 `null` clears it).
-
-List what a named member holds:
-
-| Call | Answers |
-| --- | --- |
-| `ctx.api.documents.listOwnedByUser({ userId })` | Owned documents (`me.ownedDocuments()` rows); `includeRoot: true` adds the root document. |
-| `ctx.api.documents.listSharedWithUser({ userId })` | Documents shared directly with the member (`me.sharedDocuments()` rows). |
-| `ctx.api.collections.listForUser({ userId })` | Collections the member belongs to, with `permission`. |
-
-All take `limit` and `cursor`; the document lists take `tag`. A non-member
-throws 404.
-
-```ts
-let cursor: string | undefined;
-do {
-  const page = await ctx.api.documents.listOwnedByUser({ userId, cursor });
-  for (const doc of page.items) await ctx.api.documents.delete({ documentId: doc.documentId });
-  cursor = page.hasMore ? page.nextCursor : undefined;
-} while (cursor);
-```
-
-Gotchas:
-
-- **Loop on `hasMore`.** A page can be short or empty while `hasMore` is
-  `true`; stopping on an empty page leaves documents unlisted.
-- **No capability gates these calls.** A run with no caller, or one an app
-  owner or admin invoked, can list any member's holdings, so keep such a
-  function admin-only or trigger-only.
-- **Shared means direct, applied grants.** `listSharedWithUser` excludes the
-  root document, group- or collection-only access, and an email share not yet
-  applied to the member; it never applies one. `me.sharedDocuments()` applies
-  pending email shares when the member lists their own.
-
-### A function may be a document's first writer
-
-Push includes `models/models.toml` in each function version. A first write to a
-declared model initializes its schema; existing document schemas are preserved.
-Declare collection fields such as `stringset` before writing them. Changing
-the schema creates new function versions on push.
 
 ## Ceilings
 
@@ -810,7 +779,7 @@ calls but does not undo completed side effects.
 [function]
 key = "stripe-events"
 entry = "functions/stripe-events/index.ts"
-access = "false"                       # trigger-only: no member calls it over HTTP; fires skip the gate
+# authorize: allowCallers({ webhook: true, cron: true }) in the handler — trigger-only, no member calls it over HTTP
 
 [function.triggers.webhook]           # one per function; answers on the function's own key
 verificationScheme = "stripe"          # required; "none" is refused
@@ -837,22 +806,70 @@ An app can have up to **50 webhooks**. A function can declare one webhook and
 up to ten cron entries. `overlapPolicy = "skip"` skips a scheduled invocation
 while the previous run remains active, including while it sleeps.
 
+Operate triggers with `primitive functions triggers`, by function key (and a
+cron entry's name):
+
+| Verb | Does |
+| --- | --- |
+| `events <key>` | The webhook's delivery log. |
+| `test <key> [--deliver]` | Signs a test delivery; `--deliver` posts it and runs the function. |
+| `verify <key> --header … --body-file …` | Checks captured provider bytes without running code. |
+| `rotate-secret <key> --secret "{{secrets.NEXT}}"` | Moves the signing secret, keeping the old one for the grace period. |
+| `fire <key> <name>` | Starts a cron entry's task run now. |
+| `disable <key> <name>` / `enable <key> <name>` | Takes an entry out of service and back. `enable` also resumes an entry a hard failure paused. |
+
+### Database change triggers
+
+```toml
+[[function.triggers.db3]]
+type = "orders"                        # the db3 type to watch; at most ten per function, each named once
+```
+
+Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. The input is `{ db3Id, type, from, to, principal, changes: [{ model, id, kind }] }` (`kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`.
+
+- **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Inspect `input.changes` and skip what your own writes produced.
+
 ### Webhook verification schemes
 
 Choose `stripe`, `github`, `slack`, `discord`, `jwt`, `plaid`, or `custom`.
 Shared-secret schemes require a whole `{{secrets.KEY}}` reference. Public-key
 schemes use their verification settings instead.
 
-Rotate to a second key with `primitive webhooks rotate-secret`; the old key
-remains valid during `secretGracePeriodMs` (24 hours by default, up to 30 days).
+Rotate to a second key with `primitive functions triggers rotate-secret`; the
+old key remains valid during `secretGracePeriodMs` (24 hours by default, up to
+30 days).
 
 Duplicate signed events do not run the function again. GitHub and custom
 signatures without freshness timestamps keep duplicate entries permanently.
 Make handlers idempotent because a re-signed logical event can be new.
 
-`webhooks test` previews a signed payload. Add `--deliver` only when you intend
-real side effects. `webhooks verify` checks captured provider bytes without
-running code. Find the webhook ID and receiver URL in `functions get`.
+`triggers test` previews a signed payload. Add `--deliver` only when you intend
+real side effects. `triggers verify` checks captured provider bytes without
+running code. Find the receiver URL in `functions get`.
+
+A provider that confirms an endpoint first (Slack `url_verification`, Discord
+PING) is answered by a handshake rule. `allowedIpCidrs` refuses deliveries
+from any other IPv4 address or prefix, before verification; a handshake rule
+runs after verification, in turn.
+
+A handshake `when` is a request matcher, not an access rule: by the time it
+runs, the IP allowlist and signature verification have already decided
+whether the delivery is admitted, so it doesn't authorize anything. It sees
+no caller — no `user`, no memberships, no `md`, none of the access-control
+identity context — only the shape of this request: `body`, `query`,
+`headers`, `rawBody`. The first rule that matches answers with its `response` and the
+function does not run.
+
+```toml
+[function.triggers.webhook]
+verificationScheme = "slack"
+signingSecret = "{{secrets.SLACK_SIGNING_SECRET}}"
+allowedIpCidrs = ["203.0.113.0/24"]
+
+[[function.triggers.webhook.handshakeRules]]
+when = "body.type == 'url_verification'"   # CEL over this request's body, query, headers, rawBody — no caller
+response = { status = 200, contentType = "text/plain", body = "{{ body.challenge }}" }
+```
 
 Removing a webhook block stops delivery; restoring it resumes the same URL.
 Removing a cron entry cancels the schedule.
@@ -878,7 +895,9 @@ attempt. Owners and admins can read them for seven days.
 A shortened record ends with
 `… truncated: the platform's per-record cap dropped later lines`.
 
-- Pre-execution refusals have no invocation log; inspect the HTTP error.
+- Pre-execution refusals have no invocation log; inspect the HTTP error. An
+  `authorize` denial is different: it writes no run row, but the call's
+  invocation log records it `denied`.
 - Task logs contain output from the finishing slice. Output before earlier
   pauses is unavailable. Store important progress as data.
 - Never log credentials. Redaction cannot recognize transformed values;
@@ -922,13 +941,15 @@ which `primitive functions list` prints beside each key.
 | `130` | Ctrl-C, same resume line; a second one exits at once |
 | Flag | Identity | Notes |
 |---|---|---|
-| *(none)* | Your app user | `Ran as <user-id> (<role>)`; the gate is bypassed for an owner or admin |
+| *(none)* | Your app user | `Ran as <user-id> (<role>)`; a legacy `access` gate is bypassed for an owner or admin — an `authorize` method is not |
 | `--user <user-id>` | That app user | Mints a ten-minute token, invokes with it, revokes it on every path including Ctrl-C; the value is never printed. Owner and admin only |
 | `--as system` | No caller at all | `ctx.user` null, `ctx.trigger` `{ kind: "manual", userId: <you> }`, the app's system authority — the shape a cron or webhook fire has. Owner and admin only |
 
 
 `--user` and `--as system` are mutually exclusive. Use a member identity when
-testing access rules because owners and admins bypass them.
+testing a legacy `access` rule, because owners and admins bypass it; an
+`authorize` method gives them no such bypass, so invoking it as yourself
+already exercises it.
 
 ### Versions and rollback
 
@@ -938,8 +959,8 @@ code and configuration. Existing tasks keep their starting version.
 
 ## Gotchas
 
-- Check a signed-in caller’s resource access explicitly; function code has app
-  authority. Triggers have no caller.
+- Check a signed-in caller’s access to a database they name explicitly;
+  function code has app authority. Triggers have no caller.
 - Completed task steps reuse results, but interrupted attempts can run again.
   Keep side effects idempotent and nondeterministic reads inside `step.do`.
 - Reusing a run key returns the existing run, even after failure. Retry with a
@@ -952,6 +973,6 @@ code and configuration. Existing tasks keep their starting version.
 ## Related
 
 - [Configuration](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md) — the sync loop that pushes `functions/<key>.toml` and its code.
-- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — database types, models and the records surface.
+- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — types, records, synced databases and access.
 - [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md), [Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md), [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) — what a function calls out to.
-- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the CEL the `access` gate is written in.
+- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the `authorize` method every version defines, and the CEL a legacy version's `access` gate is written in.

@@ -30,7 +30,7 @@ Guidelines for AI agents implementing app membership: access modes, invitations 
 
 ## Mental Model
 
-Invitations grant app membership. Sharing with a new user by email also creates pending access, which takes effect when the recipient signs up. Use the document, group, or collection API to grant access; the platform manages pending state.
+Invitations grant app membership. Sharing with a new user by email also creates pending access, which takes effect when the recipient signs up. Use the database, group, or collection API to grant access; the platform manages pending state.
 
 -----------|--------|-------|
 | `AppInvitation` | Right to join the app | App |
@@ -40,10 +40,10 @@ Invitations grant app membership. Sharing with a new user by email also creates 
 
 | Primitive | Purpose |
 |-----------|---------|
-| `DeferredDocumentPermission` | Tracks an email-based document share until the recipient signs up |
-| `DeferredGroupAdd` | Tracks an email-based group or collection add until the recipient signs up |
+| Deferred share (`type: "document"` in `listDeferredGrants`) | Tracks an email-based database share until the recipient signs up |
+| Deferred group add (`type: "group"`) | Tracks an email-based group or collection add until the recipient signs up |
 
-The deferred types make email-based sharing work — the platform remembers the intent until a matching user account exists. **Do not interact with them directly in product code.** The sharing APIs (documents, groups, collections) accept emails transparently. `client.invitations.listDeferredGrants(...)` exists only for admin debugging tools.
+The deferred grants make email-based sharing work — the platform remembers the intent until a matching user account exists. **Do not interact with them directly in product code.** The sharing APIs (databases, groups, collections) accept emails transparently. `client.invitations.listDeferredGrants(...)` exists only for admin debugging tools.
 
 **Decision rules:**
 
@@ -153,7 +153,7 @@ Check `quota()` before showing the invitation form. Handle server codes using th
 | Where the token comes back | Field |
 |---------------------------|-------|
 | `client.invitations.create()` | `AppInvitationInfo.inviteToken` |
-| `client.documents.updatePermissions(...)` deferred result | `DeferredPermissionGrant.inviteToken` |
+| `client.db3.permissions(id).set(...)` deferred result | `inviteToken` |
 | `client.groups.addMember(...)` deferred result | `DeferredGroupAdd.inviteToken` |
 | `client.collections.addMember(...)` deferred result | `inviteToken` |
 
@@ -179,7 +179,7 @@ For the cases where the platform can't infer intent from the recipient's email:
 
 Email-matched signup resolves deferred grants automatically — your app does NOT call accept for that path. Use `invitations.accept` only when the invitee is already authenticated as someone other than (or in addition to) the email the invitation was sent to.
 
-The accept call (shown in [Accept an invite token](#accept-an-invite-token) above) returns `{ status: "accepted", invitationId, grantsResolved: { groups, documents } }`, and throws `401 INVITE_TOKEN_INVALID` for any bad token (invalid, expired, or already redeemed — the server returns one code to avoid leaking invitation existence).
+The accept call (shown in [Accept an invite token](#accept-an-invite-token) above) returns `{ status: "accepted", invitationId, grantsResolved: { groups, documents } }` (`documents` counts database shares), and throws `401 INVITE_TOKEN_INVALID` for any bad token (invalid, expired, or already redeemed — the server returns one code to avoid leaking invitation existence).
 
 Resolve the URL with `client.links`. Accept immediately when signed in; otherwise retain `inviteToken` and pass it through sign-in. For a returning Apple identity, call `invitations.accept` after sign-in. Handle `INVITE_TOKEN_INVALID` by offering to request another invitation.
 
@@ -187,7 +187,7 @@ Resolve the URL with `client.links`. Accept immediately when signed in; otherwis
 
 ## Deferred Grants
 
-Email-based shares remain pending until the recipient joins. The document, group, and collection APIs manage these grants.
+Email-based shares remain pending until the recipient joins. The database, group, and collection APIs manage these grants.
 
 ### Lifecycle
 
@@ -198,7 +198,7 @@ Email-based shares remain pending until the recipient joins. The document, group
 
 ### Path A — automatic email-match (the common case)
 
-Alice signs in with `alice@outside.com` (any auth method). The signup flow resolves *every* pending deferred grant for that email in one transaction — app membership, document shares, group adds, collection memberships — **with no manual `accept` call**. Don't re-grant after signup; the access is already there.
+Alice signs in with `alice@outside.com` (any auth method). The signup flow resolves *every* pending deferred grant for that email in one transaction — app membership, database shares, group adds, collection memberships — **with no manual `accept` call**. Don't re-grant after signup; the access is already there.
 
 ### Path B — explicit `accept(inviteToken)` (cross-identity)
 
@@ -222,7 +222,7 @@ Deferred grants are re-validated at resolution time. In a `domain`-restricted ap
   let nextCursor = result.nextCursor
 ```
 
-Reserve this for admin/debug UIs. For end-user "people with access + pending invitations" UI, use the per-resource `listPendingInvitations` endpoints on documents/groups/collections (see the [Documents guide](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#building-a-members--pending-ui)).
+Reserve this for admin/debug UIs. For end-user "people with access + pending invitations" UI, use the per-resource `listPendingInvitations` on databases, groups and collections (`client.db3.permissions(db3Id).listPendingInvitations()` for a database — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#sharing-a-synced-database)).
 
 ---
 
@@ -230,7 +230,7 @@ Reserve this for admin/debug UIs. For end-user "people with access + pending inv
 
 ### Onboard a teammate end-to-end
 
-Check quota, mint the app invitation, share the project document by email, and add the email to the team group. After signup all three resolve in one server-side transaction.
+Check quota, mint the app invitation, share the project's database by email, and add the email to the team group. After signup all three resolve in one server-side transaction.
 
 ```swift
   // 1. Invite a teammate
@@ -238,15 +238,13 @@ Check quota, mint the app invitation, share the project document by email, and a
     params: CreateInvitationParams(email: "newhire@example.com", role: "member")
   )
 
-  // 2. Share a project document with them (pending until signup)
-  _ = try await client.documents.updatePermissions(
-    documentId: projectDocId,
-    params: .email("newhire@example.com", permission: "read-write")
+  // 2. Share the project's database with them (pending until signup)
+  _ = try await client.db3.permissions(projectDb3Id).set(
+    .email("newhire@example.com", permission: "read-write")
   )
 
   // 3. Add them to the engineering group (pending until signup)
   _ = try await client.groups.addMember(
-    groupType: "team",
     groupId: "engineering",
     params: .email("newhire@example.com")
   )
@@ -285,6 +283,6 @@ Server-emitted body codes, surfaced on the thrown HTTP error.
 
 ## Related Guides
 
-- [Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md) — Document sharing, access requests, and collections (the grant side of deferred email shares)
+- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — Database sharing and access requests (the grant side of deferred email shares)
 - [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md) — Group membership by email and CEL
 - [Authentication](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) — How signup triggers deferred-grant resolution

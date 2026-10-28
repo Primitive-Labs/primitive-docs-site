@@ -6,16 +6,16 @@ Use an error’s `code` to choose a user-facing message or recovery action. Code
 
 ```typescript
   try {
-    await client.documents.open(documentId);
+    await client.db3.get(db3Id);
   } catch (err) {
     if (err instanceof JsBaoApiError) {
       switch (err.code) {
         case "DOC_ACCESS_DENIED":
         case "ACCESS_DENIED":
-          show(t("errors.noAccessToDocument"));
+          show(t("errors.noAccessToDatabase"));
           return;
         case "NOT_FOUND":
-          show(t("errors.documentGone"));
+          show(t("errors.databaseGone"));
           return;
         case "UNAUTHENTICATED":
         case "INVALID_TOKEN":
@@ -24,12 +24,9 @@ Use an error’s `code` to choose a user-facing message or recovery action. Code
         case "RATE_LIMITED":
           show(t("errors.slowDown"));
           return;
-        case "STATE_CONFLICT":
-          show(t("errors.alreadyExists"));
-          return;
         case undefined:
           // No code: the response did not come from the platform's error
-          // path — an older server, or an intermediary's HTML 502.
+          // path — an intermediary's HTML 502.
           show(t("errors.unknown"));
           return;
         default:
@@ -63,11 +60,11 @@ Every 4xx and 5xx response with a body, on both `/app/{appId}/api/*` and `/admin
 
 | Field | Contract |
 |---|---|
-| `code` | Non-empty string, always present. The handler's own explicit code where it has one (`DOC_ACCESS_DENIED`, `FUNCTION_DISABLED`, `VALIDATION_FAILED`, `RATE_LIMITED`, …), otherwise the status-derived default below. An explicit code always wins. **This is the only field to branch on.** |
+| `code` | Non-empty string, always present. The handler's own explicit code where it has one (`DB3_SYNC_OFF_NO_SHARING`, `FUNCTION_DISABLED`, `VALIDATION_FAILED`, `RATE_LIMITED`, …), otherwise the status-derived default below. An explicit code always wins. **This is the only field to branch on.** |
 | `error` | Human-readable text, written for a developer reading a log. **It may change without notice** — never parse it, never show it to a user. |
 | `status` | The numeric HTTP status, repeated in the body. |
 | `timestamp` | ISO 8601, when the server produced the failure. |
-| `details` | Present only when a handler attaches structured context: offending field names on a validation failure, or `retryAfter` (seconds) on a `RATE_LIMITED` refusal such as a document access request or a sign-in verification. Exception: a server function's `FUNCTION_RATE_LIMITED` carries `retryAfter` at the top level of the body, plus a `Retry-After` header. |
+| `details` | Present only when a handler attaches structured context: offending field names on a validation failure, or `retryAfter` (seconds) on a `RATE_LIMITED` refusal such as a sign-in verification. Exception: a server function's `FUNCTION_RATE_LIMITED` carries `retryAfter` at the top level of the body, plus a `Retry-After` header. |
 
 Two field rules an agent must encode:
 
@@ -112,9 +109,10 @@ Any other 4xx is `INVALID_REQUEST`; any other 5xx is `INTERNAL_ERROR`.
 - **3xx is not an error**: the blob download's `304 Not Modified` is bodyless, and the OAuth initiation redirects.
 - **A failing `HEAD` has no body** — HTTP forbids one. It answers the same status and headers its `GET` counterpart would; issue the `GET` when the code is needed.
 - **WebSocket error frames** are a separate surface with their own shape.
-- **A server function that throws answers HTTP `200`**, not a 4xx/5xx: the envelope carries `status: "failed"` and an `errorCode` (`FUNCTION_THREW`, `OUTPUT_SCHEMA_VIOLATION`, …). Only a refusal before the code ran (gate, unknown key, rate ceiling) is an error response. See [Server Functions — Invoking](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#invoking).
+- **A server function that throws answers HTTP `200`**, not a 4xx/5xx: the envelope carries `status: "failed"` and an `errorCode` (`FUNCTION_THREW`, `FUNCTION_OUTPUT_INVALID`, …). Only a refusal before the code ran (gate, unknown key, rate ceiling) is an error response. See [Server Functions — Invoking](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#invoking).
 
 ## Related Guides
 
 - [Authentication](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md) — the sign-in codes (`INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `OTP_MAX_ATTEMPTS`, …).
 - [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — where the `<DOMAIN>_ACCESS_DENIED` refusals come from.
+- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — database sharing and its `DB3_SYNC_OFF_NO_SHARING` refusal.

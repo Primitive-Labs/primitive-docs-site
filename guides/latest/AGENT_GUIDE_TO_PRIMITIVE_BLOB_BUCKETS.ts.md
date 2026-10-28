@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Blob Buckets
 
-Guidelines for AI agents implementing bucket storage in Primitive apps. **Blob buckets** are general-purpose binary storage that isn't tied to a document — use them for avatars, public assets, server-generated files, short-lived exports, and anywhere you need a signed URL. Binary files attached to a specific document live in the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
+Guidelines for AI agents implementing bucket storage in Primitive apps. **Blob buckets** are general-purpose binary storage that isn't tied to a database — use them for avatars, public assets, server-generated files, short-lived exports, and anywhere you need a signed URL. Files stored with a specific database are database blobs — see the [Blobs guide](AGENT_GUIDE_TO_PRIMITIVE_BLOBS.md).
 
 ## Bucket operations
 
@@ -70,7 +70,7 @@ Admin/owner only. Deleting a bucket cascades to every blob inside it.
 
 ## Overview
 
-Buckets hold files independently of documents. Configure an access preset and a retention tier, then upload and read blobs. A blob can hold up to 100 MB.
+Buckets hold files independently of databases. Configure an access preset and a retention tier, then upload and read blobs. A blob can hold up to 100 MB.
 
 ## Bucket configuration
 
@@ -235,9 +235,9 @@ A blob a task run reads as input must outlive the run: a retried or replayed ste
 
 ## Gotchas
 
-- Storing user-uploaded documents in a bucket when they should be document-scoped blobs with permission inheritance.
+- Storing user-uploaded files in a bucket when they belong to one database's data and should be database blobs that follow its access.
 - Leaving a bucket on `permanent` when blobs are only needed briefly. Object storage is billed; pick the shortest tier.
 - Using `public` and then trying to enforce per-user access. `public` bypasses all per-user checks at read time. Use `authenticated` (or `personal-uploads` for owner-scoped blobs) and gate access in your own code before issuing signed URLs.
 - Calling `getSignedUrl` on every render. Each call is a network round-trip; cache the URL until `expiresAt - 60s`.
 - Writing to the underlying object store outside of Primitive. Side-channel objects don't appear in `list()` and won't be cleaned up by bucket deletion.
-- Reusing a `documentId` as a `bucketKey`. Different namespaces; offers no benefit and is confusing.
+- Reusing a database id as a `bucketKey`. Different namespaces; offers no benefit and is confusing.

@@ -85,7 +85,9 @@ link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
 {{#lang ts}}
-`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
+`emailSignInRequest(email, { redirectUri? })` picks the link's target in this order: the call's `redirectUri` (`null` asks for a code-only email), the client's `oauthRedirectUri`, the page's origin + `/oauth/callback`, and otherwise none (code only, e.g. in Node). `client.emailSignInLinkTarget(redirectUri?)` returns that target without sending anything.
+
+**Gotcha:** when `[auth].emailRedirectUris` is non-empty, the chosen target must be on it, or the request is rejected `Invalid redirect URI` and no email is sent; the client does not retry without it. With an empty allow-list the email carries the code alone. Add the target and `primitive config push`, or pass `redirectUri: null`.
 {{/lang}}
 {{#lang swift}}
 `auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
@@ -108,7 +110,23 @@ The callback delivers the token as a `magic_token` value — **not** `token`, `m
 {{ example: auth/magic-link-callback }}
 
 {{#lang ts}}
-The callback URL may also carry `?purpose=login-add-passkey`. The server appends this when the link was sent for an existing user the platform thinks should add a passkey (e.g. they signed in via OTP/magic-link but have no passkey on file). The `magicLinkVerify` call itself is unchanged — apps that read `purpose` from the URL can use it as a hint to route the user to passkey registration after sign-in instead of straight to the home screen.
+`handleSignInCallback(url?, { inviteToken? })` defaults to `window.location.href` and finishes both an emailed link (`magic_token`) and an OAuth redirect (`code` + `state`). It resolves with a `SignInCallbackResult`: `method`, `userId`, and for a link `user`, `isNewUser`, `promptAddPasskey`; `purpose` is `"login-add-passkey"` when the server suggests a passkey; `continueUrl` and `state` come from a base64 JSON `state` the app put on the link.
+
+It accepts a URL only when every rule holds:
+
+| # | Rule |
+|---|---|
+| 1 | A URL is given, or `window.location.href` exists |
+| 2 | It is an `http:` or `https:` URL |
+| 3 | Its origin is the page's origin or `oauthRedirectUri`'s |
+| 4 | Its path is `oauthRedirectUri`'s path when set, else `/oauth/callback` |
+| 5 | `magic_token`, `code` and `state` each appear at most once, and never empty |
+| 6 | Not both `magic_token` and `code` |
+| 7 | A `code` comes with a `state` |
+| 8 | It carries `magic_token`, or `code` with `state` |
+| 9 | A `state` decodes as base64 JSON to an object |
+
+Anything else rejects before any request with `AuthError` code `INVALID_TOKEN` and a message starting `Sign-in callback refused:` that names the rule. A link's `state.inviteToken` is accepted with the sign-in unless `inviteToken` is passed.
 {{/lang}}
 
 To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
@@ -285,7 +303,7 @@ let apple = try await client.signInWithApple()      // AppleSignInResult(userId,
 - `signInWithGoogle(presentationAnchor:redirectUri:continueUrl:waitlist:inviteToken:)` — when `redirectUri` is nil it derives the URI from the bundled `GoogleService-Info.plist`; it throws if neither is available. Throws `OAuthSignInError.cancelled` when the user dismisses the sheet.
 - `signInWithApple(presentationAnchor:inviteToken:)` — uses the app's "Sign in with Apple" entitlement and the server's configured Apple audiences. Throws `AppleSignInError.cancelled` on dismissal, `.notConfigured` when the server has no Apple audiences.
 
-Both take an optional `inviteToken: String?`. When present, the server accepts the named invitation as part of that sign-in and resolves its deferred grants (document/collection/group access) to the new user atomically — no follow-up `client.invitations.accept(inviteToken:)` call needed:
+Both take an optional `inviteToken: String?`. When present, the server accepts the named invitation as part of that sign-in and resolves its deferred grants (database/collection/group access) to the new user atomically — no follow-up `client.invitations.accept(inviteToken:)` call needed:
 
 ```swift
 let apple = try await client.signInWithApple(
@@ -353,7 +371,7 @@ const result = await client.passkeyRegisterFinish(
 // }
 ```
 
-When `inviteToken` is supplied and the invitation resolves successfully, the `invitation` field reports how many deferred grants (group memberships + document permissions) were resolved to the new user — useful for a post-registration confirmation toast (e.g. "Joined 2 groups, 3 documents").
+When `inviteToken` is supplied and the invitation resolves successfully, the `invitation` field reports how many deferred grants were resolved to the new user — `groups` counts group memberships and `documents` counts database shares — useful for a post-registration confirmation toast (e.g. "Joined 2 groups and 3 projects").
 
 **Don't:**
 
@@ -425,7 +443,7 @@ Passkey sign-in requires `passkeyEnabled` plus a non-empty `passkeyRpConfig`, an
 
 ## Deep links and universal links
 
-A native app receives Primitive URLs through universal links (an `NSUserActivity`) or a custom scheme — an invitation accept link, a shared-document link, or a magic-link callback. `client.links` turns an incoming URL into a typed `LinkTarget` so the app can route it without parsing query strings by hand, and builds the canonical outbound URLs.
+A native app receives Primitive URLs through universal links (an `NSUserActivity`) or a custom scheme — an invitation accept link, a shared-database link, or a magic-link callback. `client.links` turns an incoming URL into a typed `LinkTarget` so the app can route it without parsing query strings by hand, and builds the canonical outbound URLs.
 
 Point it at the app's base URL once (the same value as the server's `app.baseUrl`); the builders return `nil` until it is set, and the host is automatically trusted for resolution:
 
@@ -442,23 +460,22 @@ client.links.trustedLinkHosts = ["links.example.com"]
 let target = try await client.links.resolve(userActivity: activity)
 
 switch target {
-case .document(let id):              openDocument(id)
-case .documentAlias(let ref):        openDocument(/* ref resolved server-side */)
+case .document(let id):              showDatabase(id)   // a shared database's id
 case .invitation(let token):         acceptInvite(token)
 case .magicLink(let token, _):       try await client.auth.magicLinkVerify(token: token)
 case .unknown(let url):              route(url)   // not a Primitive link — hand to your own router
 }
 ```
 
-- `resolve(url:)` / `resolve(userActivity:)` are `async throws` — they hit the network only to resolve a document **alias** to its ID (`GET /document-aliases/...`), throwing `JsBaoError(.aliasNotFound)` if it doesn't resolve, or `.invalidArgument` when an activity carries no URL.
-- `parse(url:)` is the synchronous, offline counterpart — same `LinkTarget` shapes, but a `.documentAlias` comes back unresolved (no network). Use it when you only need to branch on the kind.
+- `resolve(userActivity:)` throws `JsBaoError(.invalidArgument)` when the activity carries no URL. `parse(url:)` is the synchronous counterpart for a URL in hand; neither touches the network.
+- A share link names a database by its id (`/document/{id}`); a trailing segment that is not an id parses as `.unknown`.
 
-`LinkTarget` cases: `.document(id:)`, `.documentAlias(_:)`, `.invitation(token:)`, `.magicLink(token:purpose:)`, `.unknown(_:)`.
+`LinkTarget` cases: `.document(id:)` (a shared database), `.invitation(token:)`, `.magicLink(token:purpose:)`, `.unknown(_:)`.
 
 ### Build outbound links
 
 ```swift
-let share  = client.links.shareURL(forDocument: documentId)        // {appBaseURL}/document/{id}
+let share  = client.links.shareURL(forDocument: db3Id)             // {appBaseURL}/document/{id}
 let invite = client.links.inviteAcceptURL(inviteToken: token)      // {appBaseURL}/invite/accept?inviteToken=...
 ```
 
@@ -481,6 +498,9 @@ These are the canonical events.
 {{ example: auth/auth-events }}
 
 A rejected token refresh reports a `reason` from a small, stable set. The launch-time refresh emits no failure event at all — a signed-out start is not an auth failure. A refresh triggered by a 401 on a request reports `reason: "refresh_failed"` (with no message). A refresh from any other trigger reports the trigger itself as the `reason` (the same cause vocabulary as the success event, e.g. `"networkMode:online"`, `"ws-challenge"`), with `"refresh_invalid"` as the fallback when no trigger is attached. Branch on `reason`, and treat unknown values as a generic failure — the set may grow.
+{{#lang ts}}
+An access token the server refuses reports `reason: "access_token_rejected"` with the server's `code` (see [Headless Sign-In](#headless-sign-in-access-token)).
+{{/lang}}
 
 {{#lang ts}}
 **Don't:**
@@ -543,18 +563,34 @@ To read or manually set the token:
 // WRONG — there is no client.auth.setToken. It's client.setToken(...).
 client.auth.setToken(jwt);
 
-// WRONG — opening documents before auth is ready throws or fails silently.
-const doc = await client.openDocument(id);     // before await client.waitForAuthReady()
+// WRONG — subscribing to a database before auth is ready throws or fails silently.
+const sub = client.db3.subscribe(id);          // before await client.waitForAuthReady()
 ```
 {{/lang}}
 {{#lang swift}}
 ```swift
-// WRONG — opening documents before auth is ready throws or fails silently.
-let doc = try await client.openDocument(id)  // before try await client.waitForAuthReady()
+// WRONG — subscribing to a database before auth is ready throws or fails silently.
+let sub = try client.db3.subscribe(id)  // before try await client.waitForAuthReady()
 ```
 {{/lang}}
 
 ---
+{{#lang ts}}
+
+## Headless Sign-In (Access Token)
+
+A Node script, cron job or CI step signs in with an app access token (`prim_…`) passed as `token` — no browser, no password, no refresh cookie. Mint it for the user the job runs as with `primitive tokens create --name <name> --user <userId>` and keep it in a secret. `--ttl <duration>` (`m`/`h`/`d`/`w`/`mo`/`y`) sets an expiry; without it the token never expires. `primitive tokens list` and `primitive tokens revoke <token-id>` manage existing tokens.
+
+{{ example: auth/access-token-sign-in }}
+
+- `initializeClient` resolves once `GET /me` has confirmed the token; the client then works as that user (`getUserId()`, `me.get()`, local stores scoped to the user).
+- A refused token rejects `initializeClient` with a 401 `JsBaoApiError` (`code: "INVALID_TOKEN"`); an unreachable server rejects with a `JsBaoNetworkError`.
+- `setToken(accessToken)` signs in asynchronously: `getUserId()` is null until it resolves. Await `waitForUserId()` before doing work as the new user.
+
+**Watch out when a token stops working:** the client never refreshes, persists or discards an access token. A revoked or expired token emits one `auth-failed { reason: "access_token_rejected", code }` (`INVALID_TOKEN` over HTTP, `TOKEN_REVOKED` on the socket) and the token stays set. Handle that event: mint a new token and `setToken` it, or exit.
+
+---
+{{/lang}}
 
 ## JWT Persistence
 
@@ -606,7 +642,7 @@ Call `waitForAuthBootstrap()` before checking sign-in state. It restores a usabl
 ```typescript
 await client.logout({
   redirectTo: "/signed-out",
-  wipeLocal: true,         // delete all locally cached document data + KV cache
+  wipeLocal: true,         // delete all locally stored database copies + KV cache
   revokeOffline: true,     // also delete the persisted offline grant
   clearOfflineIdentity: true, // default true — drop in-memory offline identity
   waitForDisconnect: true, // wait for WS close before resolving
@@ -616,7 +652,7 @@ await client.logout({
 Logout fires `auth:logout` immediately and `auth:logout:complete` when finished.
 {{/lang}}
 {{#lang swift}}
-`auth.logout(options:)` takes a `LogoutOptions` — `wipeLocal` (delete locally cached document data + KV cache), `revokeOffline` (also revoke any stored offline grant), `clearOfflineIdentity` (defaults `true`), `waitForDisconnect` (await WebSocket teardown before returning; defaults `false`). Logout fires `auth:logout` immediately and `auth:logout:complete` when finished — the same event names as JS.
+`auth.logout(options:)` takes a `LogoutOptions` — `wipeLocal` (delete locally stored database copies + KV cache), `revokeOffline` (also revoke any stored offline grant), `clearOfflineIdentity` (defaults `true`), `waitForDisconnect` (await WebSocket teardown before returning; defaults `false`). Logout fires `auth:logout` immediately and `auth:logout:complete` when finished — the same event names as JS.
 {{/lang}}
 
 ---
@@ -697,20 +733,20 @@ authManager.$isAuthenticated
 ### Initialization order
 
 1. Auth ready (`isAuthenticated` true, or `await client.waitForAuthReady()`)
-2. Open documents (`documents.open(...)`)
+2. Subscribe to databases (`db3.subscribe(...)`)
 3. Query data
 
-Don't open documents or hit data APIs before step 1.
+Don't subscribe to databases or hit data APIs before step 1.
 
 ---
 
 ## Deferred Grant Resolution at Signup
 
-Sign-in resolves any pending `DeferredDocumentPermission` and `DeferredGroupAdd` records for the user's email automatically inside `UserProvisioningService`.
+Sign-in resolves any pending database shares and group adds addressed to the user's email automatically.
 
 Implications:
 
-1. **Don't re-grant after signup.** If a doc was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
+1. **Don't re-grant after signup.** If a database was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
 2. **Domain-mode apps re-validate at resolution.** Deferred grants for emails outside allowed domains are silently dropped.
 3. **No WebSocket event announces the resolution.** Refresh the inviter's UI on their next read.
 
@@ -794,13 +830,14 @@ The `email-sign-in` email is one of the transactional types Primitive sends; ove
 ## Gotchas {#implementation-checklist}
 
 - **Check method availability before rendering sign-in controls.** Use `getAuthConfig()` so disabled providers are not offered.
-- **Wait for authentication before loading app data.** Initialize auth, open documents, then run queries. React to later sign-out as well as sign-in.
+- **Wait for authentication before loading app data.** Initialize auth, subscribe to databases, then run queries. React to later sign-out as well as sign-in.
 - **Preserve invitation tokens through redirects.** Pass the token into sign-in verification; use explicit acceptance for an already signed-in user.
 - **Keep email code entry available.** A sign-in link may be opened on a device without the app.
 - **Use error codes for recovery.** Show your own message and retain a generic fallback for unknown errors.
 
 {{#lang ts}}
 - **A network interruption is not proof of sign-out.** Use `auth-failed` and `auth:onlineAuthRequired` to decide when to request sign-in again.
+- **A headless job must handle `access_token_rejected`.** The client keeps a refused access token; set a new token or stop the job.
 - **Offer passkey registration after sign-in.** The template’s onboarding route handles this; custom UI should check `promptAddPasskey`.
 {{/lang}}
 {{#lang swift}}

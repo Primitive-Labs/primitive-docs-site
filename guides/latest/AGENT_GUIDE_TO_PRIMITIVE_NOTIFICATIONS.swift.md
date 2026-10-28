@@ -94,22 +94,25 @@ Use live events for immediate UI updates. Read `list()` or `unreadCount()` after
 
 ## Sending from a Server Function
 
-Call `ctx.api.notifications.send({ body })` with the same send fields. The function’s access rule controls who may trigger the send.
+Call `ctx.api.notifications.send({ body })` with the same send fields. The function’s `authorize` method controls who may trigger the send.
 
 ```ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { userId: string; jobId: string }, ctx) => {
-  const sent = await ctx.api.notifications.send({
-    body: {
-      title: "Your report is ready",
-      body: "Tap to view this week's summary.",
-      target: { userId: input.userId },
-      channels: ["in-app", "ios"],
-      idempotencyKey: `report-ready:${input.jobId}`,
-    },
-  });
-  return { results: sent.results };
+export default defineFunction({
+  authorize: requireSignedIn(),
+  handler: async (input: { userId: string; jobId: string }, ctx) => {
+    const sent = await ctx.api.notifications.send({
+      body: {
+        title: "Your report is ready",
+        body: "Tap to view this week's summary.",
+        target: { userId: input.userId },
+        channels: ["in-app", "ios"],
+        idempotencyKey: `report-ready:${input.jobId}`,
+      },
+    });
+    return { results: sent.results };
+  },
 });
 ```
 

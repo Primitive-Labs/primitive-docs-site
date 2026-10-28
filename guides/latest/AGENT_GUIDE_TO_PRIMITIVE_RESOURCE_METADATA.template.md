@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Resource Metadata
 
-Resource metadata stores typed values about users, groups, collections, and databases. Define categories with schemas and read/write rules, then read or replace each category’s values.
+Resource metadata stores typed values about users, groups, and collections. Define categories with schemas and read/write rules, then read or replace each category’s values.
 
 ## Category configs
 
@@ -36,7 +36,7 @@ primitive config push
 | `unique` | One `string` or `id` field per category; declare before storing values |
 | Limits | 100 keys and 16 KB per category item; unique values up to 512 UTF-8 bytes |
 
-App owners and admins bypass category rules. Resource owners and managers do not. Use `resource.attrs` only for supported database and collection attributes.
+App owners and admins bypass category rules. Resource owners and managers do not. Use `resource.attrs` only for supported group and collection attributes.
 
 ## Values: read, write, batch read, list, delete, resolve
 
@@ -159,33 +159,33 @@ The selector's key is the `resourceType#category` pair the file declared, NOT it
 - Errors on single read/write: `404 NOT_FOUND` (no such category on that resource type), `403 FORBIDDEN` (`readRule`/`writeRule` denied), `400` (schema validation failure, or writing the reserved `attrs` category → `RESERVED_CATEGORY`).
 - All CLI text output (`keyValue`/`success`/`info`) goes to **stderr** — only `--json` output goes to stdout. A `primitive metadata get ... > out.txt` without `--json` produces an empty file.
 - `set --data` and `--data-file` are mutually available; `--data-file` wins if both are passed. The payload must be a JSON object.
-- **Reads are polling-only.** Metadata reads return point-in-time values; changes are not pushed to clients, and there is no subscription surface. Poll on whatever interval the use case's freshness requires. State that must react in real time on the client belongs in a [document](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md) — connected clients receive document updates automatically; metadata is for configuration and state the server reads.
+- **Reads are polling-only.** Metadata reads return point-in-time values; changes are not pushed to clients, and there is no subscription surface. Poll on whatever interval the use case's freshness requires. State that must react in real time on the client belongs in a synced [database](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — subscribed clients receive its changes automatically; metadata is for configuration and state the server reads.
 
 ## Declaring metadata for CEL rules
 
-A rule reads a resource's own metadata as `md.self.<category>.<key>`. These self-reads are **inferred** — referencing a category loads it automatically, so you don't declare it on the owning config (a group type, collection type, or database type). An explicit `[metadata.self]` declaration is also supported and unions with the inferred set (declare a category the rule doesn't name directly, and it loads too). A category's own `readRule` gates the read API only, not a rule author's use of it (trusted-author model).
+A rule reads a resource's own metadata as `md.self.<category>.<key>`. These self-reads are **inferred** — referencing a category loads it automatically, so you don't declare it on the owning config (a rule set, or a metadata category config). An explicit `[metadata.self]` declaration is also supported and unions with the inferred set (declare a category the rule doesn't name directly, and it loads too). A category's own `readRule` gates the read API only, not a rule author's use of it (trusted-author model).
 
 ```toml
-# on the owning config (group-type-config shown; same shape for collection/database type configs)
+# on the owning config (a metadata category config shown)
 [metadata.self]
 categories = ["config"]
 ```
 
 ```toml novalidate
-member.create = "md.self.config.tier == \"pro\""
+writeRule = "md.self.config.tier == \"pro\""
 ```
 
 ### A category rule's own manifest
 
-The declaration above is for *other* configs (group/collection/database type) reading the resource they're attached to. A metadata **category config** can declare the same manifest shape on itself, letting its `readRule`/`writeRule` reach the resource's *other* categories:
+The declaration above can sit on a rule set or on a metadata category config; on a category config it lets its `readRule`/`writeRule` reach the resource's *other* categories:
 
 ```toml
 # primitive/dev/metadata-category-configs/class-post.post.toml
 [metadataCategoryConfig]
 resourceType = "class-post"
 category = "post"
-readRule = "isMemberOf('class-teachers', md.self.classLink.classId)"
-writeRule = "isMemberOf('class-teachers', md.self.classLink.classId)"
+readRule = "isMemberOf(md.self.classLink.classId + '-teachers')"
+writeRule = "isMemberOf(md.self.classLink.classId + '-teachers')"
 
 [metadataCategoryConfig.schema.fields.title]
 type = "string"
@@ -204,7 +204,7 @@ Groups and collections expose a reserved, read-only `attrs` category with no sch
 | `collection` | `collectionId`, `collectionType`, `name`, `createdBy` |
 
 ```toml novalidate
-group.get = "md.self.attrs.createdBy == user.userId"
+writeRule = "md.self.attrs.createdBy == user.userId"
 ```
 
 ### Declared paths — a related resource's metadata
@@ -238,10 +238,10 @@ categories = ["billing"]
 ```
 
 ```toml novalidate
-access = "md.caller.billing.status in ['trialing', 'active', 'past_due']"
+list = "md.caller.billing.status in ['trialing', 'active', 'past_due']"
 ```
 
-`md.caller` is bindable in database trigger `when`/`set`, and in a **group or collection rule set** whose traversal path declares `rootFrom = "user.userId"` (the rule-set example below). With no authenticated caller, `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
+`md.caller` is bindable in a metadata category's `readRule`/`writeRule` whose traversal path declares `rootFrom = "user.userId"` (the rule entry example below). With no authenticated caller, `md.caller` binds `null` — a rule that dereferences it denies rather than erroring; guard explicitly (`md.caller != null && ...`) on a strict evaluation path where errors surface instead of denying.
 
 ### Declaring a path on the rule entry (rule sets)
 
@@ -252,13 +252,13 @@ bare CEL string, where `loads.paths` takes the same shape as
 `[metadata.paths.*]`.
 
 ```toml novalidate
-[rules.member]
-create = "true"
+[rules.blob]
+write = "true"
 
-[rules.member.list]
+[rules.blob.list]
 expr = "md.caller.billing.status == 'active'"
 
-[rules.member.list.loads.paths.caller]
+[rules.blob.list.loads.paths.caller]
 rootFrom = "user.userId"
 type = "user"
 categories = ["billing"]
@@ -282,27 +282,24 @@ That is how to make a server-owned category: give it a `writeRule` no client sat
 
 ## Create-time initial metadata
 
-A collection, database, or group create can stamp metadata in the same operation — category name → values, applied once the resource exists (so `md.self` resolves) instead of via a follow-up write. From the CLI:
+A collection or group create can stamp metadata in the same operation — category name → values, applied once the resource exists (so `md.self` resolves) instead of via a follow-up write. From the CLI:
 
 ```bash
-primitive databases create "Class Roster" --type roster --initial-metadata '{"settings":{"visibility":"class-only"}}'
 primitive collections create "Class 42" --initial-metadata '{"settings":{"visibility":"class-only"}}'
-primitive groups create --type class-reading-group --name "Reading group" --initial-metadata '{"classLink":{"classId":"class-A"}}'
+primitive groups create --name "Reading group" --initial-metadata '{"classLink":{"classId":"class-A"}}'
 ```
 
 - Each category is schema-validated **before** the resource is created — an invalid entry fails the whole create (all-or-nothing), not a partial create with dropped metadata.
 - The category's `writeRule` is **waived** for this stamp — creation authority already covers it. The waiver is unreachable from the regular REST write route and applies only to the resource the create makes, so it can't be used to bypass `writeRule` on an existing resource.
 - Capped at 10 categories per create.
 
-In the client, `collections.create()` and `groups.create()` take an optional `initialMetadata` — category name → that category's values:
+`collections.create()` takes an optional `initialMetadata` — category name → that category's values — from the client:
 
-{{ example: documents/collection-initial-metadata }}
+{{ example: collections/initial-metadata }}
 
-{{ example: users-and-groups/group-initial-metadata }}
+`groups.create()` takes the same `initialMetadata`, but only a server function or the admin API calls it — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#creating-groups) — so from the CLI it's the same `--initial-metadata` flag shown above.
 
-Staging `initialMetadata` at create time can also gate the create rule itself — see [Gating Collection Creation on Staged Metadata](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#gating-collection-creation-on-staged-metadata) in the Documents guide and [Gating group creation on staged metadata](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#gating-group-creation-on-staged-metadata) in the Users and Groups guide. A database create has no caller create rule to gate.
-
-A group's stamp only writes fresh rows. Group metadata is keyed by `groupId` alone (no type), so a category already stored under that id — another type's group, or a deleted group's retained metadata — fails the create with `409 METADATA_EXISTS`; neither the group nor any metadata is created, and the stored row is untouched. Pick another `groupId`, or delete the stored category first.
+A group's stamp only writes fresh rows: a category already stored under the new group's id fails the create with `409 METADATA_EXISTS` (delete the stored category, or leave it out of `initialMetadata`), and a staged unique value another resource already holds fails it with `409 UNIQUE_VALUE_CONFLICT` (change the value). Either way neither the group nor any metadata is created, and a stored row is untouched.
 
 ## Metadata lifecycle
 
@@ -320,8 +317,8 @@ A write never checks that the target resource exists — a write for a not-yet-c
 - Relying on resource deletion to clean up its metadata — there's no cascade; delete metadata explicitly in the same flow.
 - Trying to create or list category configs from the client SDK — that surface is TOML-sync/admin-REST only.
 - Treating `set()` as a merge — it's a full replace of the category's data.
-- Expecting a metadata change to appear on other clients without a new read — updates are never pushed; poll for freshness, or model live client state in a document instead.
-- Using `hasCollectionAccess` in a category rule expecting it to resolve — it's rejected at save time; it only works in collection rules.
+- Expecting a metadata change to appear on other clients without a new read — updates are never pushed; poll for freshness, or model live client state in a synced database instead.
+- Declaring `[metadata.self]`/`[metadata.paths.*]` expecting it to gate a group or collection operation — groups and collections have no rule set to bind it to; see [Group Roles](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles) and collection roles for what governs them instead.
 - Expecting the create-time initial-metadata `writeRule` waiver to also apply to a later write on the same resource — it's create-only and unreachable once the resource exists.
 
 ## Related guides

@@ -9,12 +9,12 @@ Every Primitive app ships a dev-only inspection surface for working against a
 running, authenticated client. Across platforms it gives you the same three core
 capabilities:
 
-1. **Data inspection** — browse and mutate the documents, models, and records the
-   client holds.
+1. **Data inspection** — browse and mutate the databases (`db3` in code), models,
+   and records the client holds.
 2. **Test running** — run tests in the same authenticated session as the app and
    read their pass/fail output.
-3. **Blob inspection** — list, preview, upload, download, and delete blobs in a
-   document.
+3. **Blob inspection** — list, preview, upload, download, and delete the blobs
+   stored with a database.
 
 The tools are active only in development builds and never ship to production.
 
@@ -52,27 +52,27 @@ update on their own. Every mutation you trigger calls the corresponding
 ## The tabs
 
 The inspector opens on an **Overview** dashboard (read-only): connection state,
-current user, a document summary, a storage summary, and a tail of the last ~20
+current user, a summary of the data on the device, a storage summary, and a tail of the last ~20
 events. The other tabs are below.
 
 ## Documents
 
-Three-column CRUD for documents plus a per-model records browser.
+Three-column CRUD for the databases on the device plus a per-model records browser.
 
-- **Left** — filterable document list, color-coded for open / pending / local-only.
-  Clicking a document auto-opens it.
+- **Left** — filterable database list, color-coded by sync state.
+  Clicking a database opens it.
 - **Middle** — the **Records** table: pick one of the registered models for the
-  selected document, read its rows, add a record via a schema-typed form (inputs
+  selected database, read its rows, add a record via a schema-typed form (inputs
   dispatched by field `kind`: string/number/boolean/date/id/stringset/json), and
   delete rows.
-- **Right** — detail for the selected document: rename / close / delete / share,
+- **Right** — detail for the selected database: rename / close / delete / share,
   plus raw metadata.
 
 ### Common tasks
 
 ```
 Verify a record exists / its field values:
-  1. Left list → click the document (auto-opens)
+  1. Left list → click the database (opens it)
   2. Middle "Records" → pick the model
   3. Read the rows directly
 
@@ -87,25 +87,7 @@ Create a record by hand:
 
 ### Surfacing your models
 
-Registered models appear automatically for each open document. Register a model with `client.registerModels([...])` or use it through its generated model API.
-
-For a hand-built runtime-schema `DynamicModel` that doesn't go through the
-facade, `override` the `open var inspectableModels` and append:
-
-```swift
-class MyAppState: PrimitiveAppState {
-  override var inspectableModels: [InspectableModel] {
-    guard let docId = modelsDocId else { return super.inspectableModels }
-    var out = super.inspectableModels        // keep the auto-surfaced models
-    if let m = runtimeTaskModel { out.append(.from(m, documentId: docId)) }
-    return out
-  }
-}
-```
-
-`InspectableModel.from(...)` takes the `DynamicModel` and wires `loadAll` /
-`deleteById` / `createWith` so the table, delete buttons, and create form all
-work with no extra code. Field descriptors come from the model's schema.
+Registered models appear automatically for each open database. Register a model with `client.registerModel(Model)` or use it through its generated model API.
 
 ## Tests
 
@@ -145,14 +127,14 @@ repro and iterate.
 
 ## Collections
 
-Two-column CRUD for collections of documents. Left = filter + list + create.
-Right = the selected collection's detail: rename / delete, the documents in it
-(per-row remove, add by documentId), and its access (raw `getAccess()` dump plus
+Two-column CRUD for collections of databases. Left = filter + list + create.
+Right = the selected collection's detail: rename / delete, the databases in it
+(per-row remove, add by database id), and its access (raw `getAccess()` dump plus
 grant-group and add-member prompts).
 
 ## Blobs
 
-Two-column file browser, scoped to whichever document is selected on the Documents
+Two-column file browser, scoped to whichever database is selected on the Documents
 tab.
 
 - **Left** — blob list + a file-picker "upload" button.
@@ -162,7 +144,7 @@ tab.
 
 ## Performance
 
-Use the timeline to see when documents load and sync. Filter by document to inspect one operation's duration and data source.
+Use the timeline to see when databases load and sync. Filter by database to inspect one operation's duration and data source.
 
 ## Storage inspection
 
@@ -180,9 +162,9 @@ Read inspector errors here when an action fails.
 
 ```
 1. Open the banner URL in a browser
-2. Act in the app → switch to Documents → pick the document → read the records
+2. Act in the app → switch to Documents → pick the database → read the records
 3. To run tests: Tests tab → Run all (or Run selected) → read pass/fail + output
-4. To inspect blobs: Documents tab → select the document → Blobs tab → preview
+4. To inspect blobs: Documents tab → select the database → Blobs tab → preview
 5. To cross-check query behavior: Memory SQL → run the same SELECT and compare
 ```
 

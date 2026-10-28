@@ -10,7 +10,7 @@ A lock is a last resort. Rule out cheaper serialization before acquiring one:
 
 - **Partition the work** so concurrent workers cannot select the same rows — shard a batch by user, resource, or another stable key.
 - **Make writes idempotent** so a retry or an overlapping run is harmless rather than something to serialize against.
-- **Guard the write with a conditional write** instead of locking around it — a `condition` on the record write (a field-equality precondition, commonly a `version` field; in a server function, `ctx.db(id, "<type>").model("<Model>").patch(recordId, { data, condition })`) checked in the same transaction as the write. This is the actual integrity boundary in most "concurrent workers hit the same record" cases: the database, not a held lock, guarantees exactly one writer succeeds. See [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md).
+- **Guard the write with a conditional write** instead of locking around it — a `condition` on the record write (commonly on a `version` field; in a server function, `ctx.db3(db3Id, "<type>").model("<model>").patch(recordId, { data, condition })`, refused with `DB3_CONDITION_NOT_MET` when the record no longer matches) checked in the same transaction as the write. This is the actual integrity boundary in most "concurrent workers hit the same record" cases: the database, not a held lock, guarantees exactly one writer succeeds. See [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#writes).
 - **For scheduled work, use a cron trigger's `overlapPolicy`** instead of locking inside the job body — `"skip"` (the default) already refuses to start a firing while the previous one is still running. A server function's cron trigger carries it: see [Server Functions — Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers).
 
 Reach for a lock only when none of these fit: a critical section spanning multiple independent writes, or non-database work (an external API call, a multi-step task) that must run exclusively. Even then, a held lease is not a correctness guarantee for a long-running critical section — see [lease expiry](#gotchas-lease-expiry): a lease that expires mid-operation lets a second run in.
@@ -105,7 +105,7 @@ renew = "record.key.startsWith('user:' + user.userId + ':')"
 primitive config push --only rule-set/lock-policy
 ```
 
-- **Context**: `user.userId` / `user.role` (the caller) and `record.key` (the exact requested key) — scope by prefix (`record.key.startsWith('jobs:')`), caller, or group (`isMemberOf('ops', 'core')`).
+- **Context**: `user.userId` / `user.role` (the caller) and `record.key` (the exact requested key) — scope by prefix (`record.key.startsWith('jobs:')`), caller, or group (`isMemberOf('01JD7E8V3K9Q2N6R4T5W0X1Y2Z')`).
 - App admins/owners always pass; rules govern regular members only.
 - **No `lock` rule set installed → open** — any member may operate on any key. This is the explicit default; installing a rule set is the opt-in.
 - **With a rule set installed, every operation it does not define is denied.** A set naming only `acquire` denies `renew` for members. Only `acquire` and `renew` are gated — `release` is authorized by the handle itself.

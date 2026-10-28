@@ -308,7 +308,7 @@ let apple = try await client.signInWithApple()      // AppleSignInResult(userId,
 - `signInWithGoogle(presentationAnchor:redirectUri:continueUrl:waitlist:inviteToken:)` — when `redirectUri` is nil it derives the URI from the bundled `GoogleService-Info.plist`; it throws if neither is available. Throws `OAuthSignInError.cancelled` when the user dismisses the sheet.
 - `signInWithApple(presentationAnchor:inviteToken:)` — uses the app's "Sign in with Apple" entitlement and the server's configured Apple audiences. Throws `AppleSignInError.cancelled` on dismissal, `.notConfigured` when the server has no Apple audiences.
 
-Both take an optional `inviteToken: String?`. When present, the server accepts the named invitation as part of that sign-in and resolves its deferred grants (document/collection/group access) to the new user atomically — no follow-up `client.invitations.accept(inviteToken:)` call needed:
+Both take an optional `inviteToken: String?`. When present, the server accepts the named invitation as part of that sign-in and resolves its deferred grants (database/collection/group access) to the new user atomically — no follow-up `client.invitations.accept(inviteToken:)` call needed:
 
 ```swift
 let apple = try await client.signInWithApple(
@@ -380,7 +380,7 @@ Passkey sign-in requires `passkeyEnabled` plus a non-empty `passkeyRpConfig`, an
 
 ## Deep links and universal links
 
-A native app receives Primitive URLs through universal links (an `NSUserActivity`) or a custom scheme — an invitation accept link, a shared-document link, or a magic-link callback. `client.links` turns an incoming URL into a typed `LinkTarget` so the app can route it without parsing query strings by hand, and builds the canonical outbound URLs.
+A native app receives Primitive URLs through universal links (an `NSUserActivity`) or a custom scheme — an invitation accept link, a shared-database link, or a magic-link callback. `client.links` turns an incoming URL into a typed `LinkTarget` so the app can route it without parsing query strings by hand, and builds the canonical outbound URLs.
 
 Point it at the app's base URL once (the same value as the server's `app.baseUrl`); the builders return `nil` until it is set, and the host is automatically trusted for resolution:
 
@@ -397,23 +397,22 @@ client.links.trustedLinkHosts = ["links.example.com"]
 let target = try await client.links.resolve(userActivity: activity)
 
 switch target {
-case .document(let id):              openDocument(id)
-case .documentAlias(let ref):        openDocument(/* ref resolved server-side */)
+case .document(let id):              showDatabase(id)   // a shared database's id
 case .invitation(let token):         acceptInvite(token)
 case .magicLink(let token, _):       try await client.auth.magicLinkVerify(token: token)
 case .unknown(let url):              route(url)   // not a Primitive link — hand to your own router
 }
 ```
 
-- `resolve(url:)` / `resolve(userActivity:)` are `async throws` — they hit the network only to resolve a document **alias** to its ID (`GET /document-aliases/...`), throwing `JsBaoError(.aliasNotFound)` if it doesn't resolve, or `.invalidArgument` when an activity carries no URL.
-- `parse(url:)` is the synchronous, offline counterpart — same `LinkTarget` shapes, but a `.documentAlias` comes back unresolved (no network). Use it when you only need to branch on the kind.
+- `resolve(userActivity:)` throws `JsBaoError(.invalidArgument)` when the activity carries no URL. `parse(url:)` is the synchronous counterpart for a URL in hand; neither touches the network.
+- A share link names a database by its id (`/document/{id}`); a trailing segment that is not an id parses as `.unknown`.
 
-`LinkTarget` cases: `.document(id:)`, `.documentAlias(_:)`, `.invitation(token:)`, `.magicLink(token:purpose:)`, `.unknown(_:)`.
+`LinkTarget` cases: `.document(id:)` (a shared database), `.invitation(token:)`, `.magicLink(token:purpose:)`, `.unknown(_:)`.
 
 ### Build outbound links
 
 ```swift
-let share  = client.links.shareURL(forDocument: documentId)        // {appBaseURL}/document/{id}
+let share  = client.links.shareURL(forDocument: db3Id)             // {appBaseURL}/document/{id}
 let invite = client.links.inviteAcceptURL(inviteToken: token)      // {appBaseURL}/invite/accept?inviteToken=...
 ```
 
@@ -523,8 +522,8 @@ To read or manually set the token:
 **Don't:**
 
 ```swift
-// WRONG — opening documents before auth is ready throws or fails silently.
-let doc = try await client.openDocument(id)  // before try await client.waitForAuthReady()
+// WRONG — subscribing to a database before auth is ready throws or fails silently.
+let sub = try client.db3.subscribe(id)  // before try await client.waitForAuthReady()
 ```
 
 ---
@@ -568,7 +567,7 @@ Call `waitForAuthBootstrap()` before checking sign-in state. It restores a usabl
   ))
 ```
 
-`auth.logout(options:)` takes a `LogoutOptions` — `wipeLocal` (delete locally cached document data + KV cache), `revokeOffline` (also revoke any stored offline grant), `clearOfflineIdentity` (defaults `true`), `waitForDisconnect` (await WebSocket teardown before returning; defaults `false`). Logout fires `auth:logout` immediately and `auth:logout:complete` when finished — the same event names as JS.
+`auth.logout(options:)` takes a `LogoutOptions` — `wipeLocal` (delete locally stored database copies + KV cache), `revokeOffline` (also revoke any stored offline grant), `clearOfflineIdentity` (defaults `true`), `waitForDisconnect` (await WebSocket teardown before returning; defaults `false`). Logout fires `auth:logout` immediately and `auth:logout:complete` when finished — the same event names as JS.
 
 ---
 
@@ -604,20 +603,20 @@ authManager.$isAuthenticated
 ### Initialization order
 
 1. Auth ready (`isAuthenticated` true, or `await client.waitForAuthReady()`)
-2. Open documents (`documents.open(...)`)
+2. Subscribe to databases (`db3.subscribe(...)`)
 3. Query data
 
-Don't open documents or hit data APIs before step 1.
+Don't subscribe to databases or hit data APIs before step 1.
 
 ---
 
 ## Deferred Grant Resolution at Signup
 
-Sign-in resolves any pending `DeferredDocumentPermission` and `DeferredGroupAdd` records for the user's email automatically inside `UserProvisioningService`.
+Sign-in resolves any pending database shares and group adds addressed to the user's email automatically.
 
 Implications:
 
-1. **Don't re-grant after signup.** If a doc was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
+1. **Don't re-grant after signup.** If a database was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
 2. **Domain-mode apps re-validate at resolution.** Deferred grants for emails outside allowed domains are silently dropped.
 3. **No WebSocket event announces the resolution.** Refresh the inviter's UI on their next read.
 
@@ -673,7 +672,7 @@ The `email-sign-in` email is one of the transactional types Primitive sends; ove
 ## Gotchas {#implementation-checklist}
 
 - **Check method availability before rendering sign-in controls.** Use `getAuthConfig()` so disabled providers are not offered.
-- **Wait for authentication before loading app data.** Initialize auth, open documents, then run queries. React to later sign-out as well as sign-in.
+- **Wait for authentication before loading app data.** Initialize auth, subscribe to databases, then run queries. React to later sign-out as well as sign-in.
 - **Preserve invitation tokens through redirects.** Pass the token into sign-in verification; use explicit acceptance for an already signed-in user.
 - **Keep email code entry available.** A sign-in link may be opened on a device without the app.
 - **Use error codes for recovery.** Show your own message and retain a generic fallback for unknown errors.

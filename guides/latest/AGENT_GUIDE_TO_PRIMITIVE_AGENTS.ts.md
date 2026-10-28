@@ -3,8 +3,9 @@
 An agent is a prompt of kind `agent`: it declares tools (server functions or client tools),
 event kinds, turn context and who may answer a paused call. A session is one running
 conversation with an agent, created by a server function; members then send messages,
-answer calls, record events and cancel through the sessions API and the typed clients. The
-session's conversation is an ordinary document.
+attach files, answer calls, record events and cancel through the sessions API and the typed
+clients — by `sessionId` alone, with no storage ID, permission or blob route in app code.
+The platform stores the session's conversation and keeps every open view of it in sync.
 
 ## Declare an agent
 
@@ -180,9 +181,9 @@ for a call's id.
 ### Every tool function checks rights on its first line
 
 A tool call runs as the system, with the turn's initiator in `ctx.user` and the session in
-`ctx.tool` (set only for a tool call). The function's `access` gate still
+`ctx.tool` (set only for a tool call). The function's `authorize` method still
 runs first, against that same initiator. In a call about one user it may name
-only the initiator (`SUBJECT_USER_FORBIDDEN` otherwise), and so may anything it starts. The model chooses when to call a
+only the initiator (`SUBJECT_USER_FORBIDDEN` otherwise), whatever capabilities it declares, and so may anything it starts. The model chooses when to call a
 tool and with what arguments, and the SAME function can also be invoked directly over HTTP —
 so make `assertTrigger(ctx, "tool")` the first line, then check the caller's current rights
 before doing anything else, reading the session's `variables` for whatever the check needs.
@@ -194,7 +195,6 @@ before doing anything else, reading the session's `variables` for whatever the c
 [function]
 key = "cashflow"
 entry = "functions/cashflow/index.ts"
-access = "!isAnonymous()"   # the gate checks the turn's initiator; household membership is the body's own check below
 
 [function.inputSchema]
 type = "object"
@@ -215,20 +215,25 @@ type = "number"
 
 ```ts
 // functions/cashflow/index.ts
-import { assertTrigger, defineFunction } from "primitive-functions";
+import { allowCallers, assertTrigger, defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (_input, ctx) => {
-  assertTrigger(ctx, "tool"); // refuses any other trigger
-  const { householdId } = ctx.tool.variables as { householdId: string };
+export default defineFunction({
+  // the gate checks the turn's initiator; household membership is the body's own check below
+  authorize: allowCallers({ agents: true, users: requireSignedIn() }),
+  handler: async (_input, ctx) => {
+    assertTrigger(ctx, "tool"); // refuses any other trigger
+    const { householdId } = ctx.tool.variables as { householdId: string };
 
-  await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
+    await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
 
-  return await loadCashflow(householdId);
+    return await loadCashflow(householdId);
+  },
 });
 ```
 
 `ctx.tool` fields: `sessionId`, `turnId`, `callId` (stable across retries — use it as an
-idempotency key), `toolName`, `documentId`, `ownerUserId`, `members: { viewerUserIds,
+idempotency key), `toolName`, `documentId` (deprecated — act through `ctx.agents` and
+`ctx.api.agentSessions`, not this id), `ownerUserId`, `members: { viewerUserIds,
 participantUserIds }`, `variables` (grant nothing by themselves), `timezone` and `locale`
 (what the turn's send carried — the prompt's `turn.timezone`/`turn.locale`; `null` when
 absent), `context` (the turn's validated turn context — the prompt's `turn.*`; `null` when the
@@ -244,7 +249,6 @@ A `task` tool is the same function, started durably instead of synchronously —
 [function]
 key = "advisor-report"
 entry = "functions/advisor-report/index.ts"
-access = "!isAnonymous()"
 
 [function.inputSchema]
 type = "object"
@@ -262,17 +266,20 @@ type = "string"
 
 ```ts
 // functions/advisor-report/index.ts
-import { assertTrigger, defineFunction } from "primitive-functions";
+import { allowCallers, assertTrigger, defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (_input, ctx) => {
-  assertTrigger(ctx, "tool"); // refuses any other trigger
-  const { householdId } = ctx.tool.variables as { householdId: string };
+export default defineFunction({
+  authorize: allowCallers({ agents: true, users: requireSignedIn() }),
+  handler: async (_input, ctx) => {
+    assertTrigger(ctx, "tool"); // refuses any other trigger
+    const { householdId } = ctx.tool.variables as { householdId: string };
 
-  await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
+    await assertHouseholdMember(ctx.user.userId, householdId); // check rights FIRST
 
-  const report = await buildSpendingReport(householdId);
-  await ctx.tool.attachArtifact({ reportId: report.id });
-  return { summary: report.summary };
+    const report = await buildSpendingReport(householdId);
+    await ctx.tool.attachArtifact({ reportId: report.id });
+    return { summary: report.summary };
+  },
 });
 ```
 
@@ -281,7 +288,7 @@ export default defineFunction(async (_input, ctx) => {
 `turnContext.function` runs as the turn's initiator (`ctx.trigger.kind === "context"`) with
 the session's variables, timezone and language on `input`; its return, validated against
 `turnContext.schema`, renders as `turn.*` in the system prompt for every model call of that
-turn, and never enters the document. With no `function`, a send's own `context` is
+turn, and never enters the conversation. With no `function`, a send's own `context` is
 validated against the schema instead — declaring both on one agent is a contradiction a send
 with a client `context` is refused for.
 
@@ -290,15 +297,19 @@ with a client `context` is refused for.
 [function]
 key = "advisor-snapshot"
 entry = "functions/advisor-snapshot/index.ts"
-access = "!isAnonymous()"
 ```
 
 ```ts
 // functions/advisor-snapshot/index.ts
-export default defineFunction(async (input: { variables: { householdId: string } }, ctx) => {
-  if (ctx.trigger.kind !== "context") throw new Error("advisor-snapshot only runs as turn context");
-  const { householdId } = input.variables;
-  return { plan: await currentPlan(householdId) };
+import { allowCallers, defineFunction, requireSignedIn } from "primitive-functions";
+
+export default defineFunction({
+  authorize: allowCallers({ agents: true, users: requireSignedIn() }),
+  handler: async (input: { variables: { householdId: string } }, ctx) => {
+    if (ctx.trigger.kind !== "context") throw new Error("advisor-snapshot only runs as turn context");
+    const { householdId } = input.variables;
+    return { plan: await currentPlan(householdId) };
+  },
 });
 ```
 
@@ -343,25 +354,34 @@ the model's context fails the turn `AGENT_HISTORY_TOO_LARGE`.
 
 ```ts
 // functions/start-advisor/index.ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { householdId: string }, ctx) => {
-  await assertHouseholdMember(ctx.user!.userId, input.householdId); // your own authorization
+export default defineFunction({
+  authorize: requireSignedIn(),
+  handler: async (input: { householdId: string }, ctx) => {
+    await assertHouseholdMember(ctx.user!.userId, input.householdId); // your own authorization
 
-  return await ctx.agents.createSession({
-    agent: "advisor",
-    scope: input.householdId,
-    variables: { householdId: input.householdId },
-  });
-  // => { sessionId, documentId }; ctx.user becomes the session's owner
+    return await ctx.agents.createSession({
+      agent: "advisor",
+      scope: input.householdId,
+      variables: { householdId: input.householdId },
+    });
+    // => { sessionId, documentId }; ctx.user becomes the session's owner
+  },
 });
 ```
 
+Drive everything from `sessionId`: open, send, upload and read all take it alone. The result's
+`documentId` is deprecated, as is the same field on `getSession`, `listSessions`' items and the
+view — `client.agents.sessions.inspect.storage(sessionId)` answers it for support or
+diagnostics only, never for driving the session.
+
 The owner is `userId`, else the invoking user. `createSession` works from any kind of run:
 one with no caller (cron, a webhook) must pass `userId` (`FUNCTION_SUBJECT_REQUIRED`), and
-naming another member needs a run with no caller or one an app owner or admin invoked. A
+naming another member needs a run with no caller, one an app owner or admin invoked, or a
+function declaring `users:actAsAny`. A
 tool, context or history function, and anything it starts, acts only for the turn's
-initiator (`SUBJECT_USER_FORBIDDEN`). The function's `access` rule is the entire
+initiator (`SUBJECT_USER_FORBIDDEN`). The function's `authorize` method is the entire
 authorization for who may use the agent — nothing on the agent prompt itself gates it.
 Variables are re-validated against `inputSchema`; a declared agent key and bad variables are
 compile errors once a tree has pushed.
@@ -369,13 +389,14 @@ compile errors once a tree has pushed.
 `ctx.agents.getSession(sessionId, { userId })`, `listSessions({ userId })`,
 `recordEvent(sessionId, event, { userId })` and `deleteSession(sessionId, { userId })` follow
 the same rule: they act as that member, with no admin arm, and never return a session's
-`object`, `turnContexts` or `lastTurn`.
+`object`, `turnContexts` or `lastTurn`. `listSessions` only reads, so a member-invoked
+function needs `users:readAny` for it rather than `users:actAsAny`.
 
 `deleteSession` deletes as the owner, with the same outcome as the client's delete, and
 answers `{ deleted: true, sessionId, documentId }`. It is the way to remove a member's
 sessions from an account-deletion or reset function (list with `listSessions({ userId })`
-and delete the items whose `role` is `"owner"`). A session whose document is already gone
-can still be deleted. A participant or viewer is refused `AGENT_SESSION_OWNER_ONLY`, anyone
+and delete the items whose `role` is `"owner"`). A session whose stored conversation is already
+gone can still be deleted. A participant or viewer is refused `AGENT_SESSION_OWNER_ONLY`, anyone
 else `AGENT_SESSION_NOT_FOUND`. A `userId` passed as `null` or a non-string is refused
 `SUBJECT_USER_INVALID`, never read as the invoking user. None of the five ever sends,
 answers, cancels, marks a session read, renames or manages members — those are the
@@ -386,7 +407,7 @@ members', from a client.
 ### Listing sessions and unread activity
 
 `client.agents.sessions.list()` answers the signed-in user's sessions, newest first, without
-opening any document. An item's `hasUnread` is true when the session has activity the user has
+opening any session. An item's `hasUnread` is true when the session has activity the user has
 not marked read: an agent's answer, a turn paused for an answer, a turn's end, or another
 member's message or event. The user's own messages, events and cancels never count, and a
 session they have never marked is unread. Mark it read when the user opens it:
@@ -413,7 +434,7 @@ it is refused `AGENT_SESSION_MEMBER_ONLY`.
 ### Keeping a session list live
 
 `client.agents.sessions.watch(options)` answers the first page of `list()` kept current from
-the server's changes, with no polling and no document opened: activity turns the dot on and
+the server's changes, with no polling and no session opened: activity turns the dot on and
 moves the session up, a read on another device clears it, and title, `status` and members
 update in place. Items are ordered by last activity, newest first; `loadMore()` reads the next
 page, `onChange` fires on every change, and the list reads its loaded pages again after a
@@ -447,8 +468,8 @@ the same changes.
 
 ### Opening a session
 
-`client.agents.sessions.open(sessionId)` runs `get`, registers the platform models, opens the
-session's document and returns a live view.
+`client.agents.sessions.open(sessionId)` runs `get`, loads the session's conversation onto the
+device and returns a live view.
 
 ```typescript
   const view = await client.agents.sessions.open(sessionId);
@@ -481,6 +502,28 @@ A send's `timezone` and `locale` render as `turn.timezone` and `turn.locale` for
 reach the context function's `input`. With no `turnContext.function`, the send also carries
 `context`, validated against the schema (`AGENT_SESSION_CONTEXT_NOT_ALLOWED`,
 `AGENT_SESSION_CONTEXT_INVALID`); a failed message keeps it for a retry.
+
+Attach a file by uploading it with `view.attachments.upload`, then sending a message naming the
+upload's `blobId`. The upload is retried in the background and survives the view's `close()`; a
+send naming one still queued shows `waiting` on the message until it lands, and fails with the
+upload's error if it never does. A message's files must be an image (png, jpeg, webp, gif) or a
+PDF:
+
+```typescript
+  const file = await view.attachments.upload(receipt, {
+    filename: "receipt.png",
+    contentType: "image/png",
+  });
+  await view.send("Here's the receipt from today.", { files: [{ blobId: file.blobId }] });
+```
+
+Read any file of the session — including one another member sent — with
+`view.attachments.read(blobId)`: a copy this client already holds (an upload it made, or an
+earlier read) answers at once, else it downloads through the session and is kept for next time;
+an id the session does not hold rejects `AGENT_SESSION_ATTACHMENT_NOT_FOUND`. Nothing in this
+flow names a storage ID, a permission or a blob route. For support or diagnostics only,
+`client.agents.sessions.inspect.storage(sessionId)` answers `{ documentId }`, the id of the
+session's stored conversation; it grants nothing, and nothing in your app should drive off it.
 
 A turn pauses on an approval or a client tool that takes an answer, surfacing every call of
 one model response together. Find a pending call from the view's parts (`tool_call`, state
@@ -520,7 +563,7 @@ which resolves a referenced number to that call's part in the view's window:
 
 The view's `artifact` method answers a tool call's artifact (from `ctx.tool.attachArtifact`
 or a client tool handler's `artifact`), the same value whether it was stored on the row or,
-being large, as a blob on the session's document. Pass a `tool_call` part; a blob is
+being large, as a blob stored with the session. Pass a `tool_call` part; a blob is
 downloaded only by this call.
 
 ```typescript
@@ -548,7 +591,7 @@ downloaded only by this call.
 current user's (their message started it), each call of a named tool that waits for its
 result runs the handler, and the handler's `output` (and optional `artifact`, read back with
 `view.artifact`) answers the call. Calls already waiting when you register, or found again
-when the document re-syncs after a reconnect, run too. It returns a function that removes the handlers; a run in flight
+when the conversation re-syncs after a reconnect, run too. It returns a function that removes the handlers; a run in flight
 still answers.
 
 ```typescript
@@ -631,29 +674,29 @@ approval and result. A call that ends unanswered is `failed` with `AGENT_CALL_CA
 
 A test case on an agent runs one real model round from a history you write, then checks
 what the model did. Only the model call happens: no tool runs and no session is created.
-For an agent that declares a `query` tool and a turn context with a `snapshot`:
+For `advisor`, declared above, with its `get_cashflow` tool and `plan` turn context:
 
 ```toml
-# prompts/spending.tests/corrects-a-refused-input.toml
+# primitive/dev/prompts/advisor.tests/corrects-a-refused-input.toml
 [test]
 name = "corrects-a-refused-input"
 inputVariables = '{"householdId": "h1"}'
 
 [test.agent]
 history = '''[
-  {"role": "user", "text": "How much did we spend at Costco last month?"},
-  {"role": "assistant", "calls": [{"callId": "call_1", "name": "query", "arguments": {"dimension": "vendor", "filter": "Costco"}}]},
-  {"role": "tool", "callId": "call_1", "error": {"code": "INVALID_DIMENSION", "message": "dimension must be one of: merchant, category"}}
+  {"role": "user", "text": "How much did we spend in August 2026?"},
+  {"role": "assistant", "calls": [{"callId": "call_1", "name": "get_cashflow", "arguments": {"month": "08-2026"}}]},
+  {"role": "tool", "callId": "call_1", "error": {"code": "INVALID_MONTH", "message": "month must be YYYY-MM"}}
 ]'''
-context = '{"snapshot": {"month": "2026-09"}}'
+context = '{"plan": "Cut dining out by 15%"}'
 timezone = "Europe/Madrid"
 locale = "es-ES"
-expectedToolCall = '{"name": "query", "arguments": {"dimension": "merchant"}}'
+expectedToolCall = '{"name": "get_cashflow", "arguments": {"month": "2026-08"}}'
 ```
 
 ```bash
-primitive config push --only prompt/spending
-primitive prompts tests run-all spending
+primitive config push --only prompt/advisor
+primitive prompts tests run-all advisor
 ```
 
 | Key | Meaning |
@@ -684,18 +727,33 @@ assertions.
 - Removing a tool or event kind a stored case uses makes its runs fail the `Test case input`
   check with `AGENT_TEST_CASE_INVALID`; update the case.
 
-## Admin: inspecting sessions (no member actions)
+## Inspecting sessions from the CLI
 
 ```bash
 primitive agent-sessions list --user-id <user-id> [--agent <key>] [--scope <scope>]
 primitive agent-sessions get <session-id>
+primitive agent-sessions transcript <session-id> [--turn <turn-id>] [--json]
+primitive agent-sessions steps <session-id> [--turn <turn-id>] [--json]
+primitive agent-sessions artifacts <session-id> [--json]
+primitive agent-sessions artifacts <session-id> <part-id>
+primitive agent-sessions upload <session-id> <file-path> [--blob-id <id>]
+primitive agent-sessions download <session-id> <blob-id> [--output <path>]
 primitive agent-sessions delete <session-id>
 ```
 
-`list` marks the listed user's unread sessions with `•` in its `UNREAD` column. `get` never
-copies the conversation's rows — those are read by opening `documentId` with
-`primitive documents records query`. The CLI has no send/answer/cancel/events/members/rename
-— those are the clients' (a recorded principle-11 deferral). A client signed in as an app
+Every command takes the session ID alone and answers as the signed-in user: a member reads
+their own sessions, app owners and admins any — except that `transcript`, `steps` and
+`artifacts` read the rows under the session's own permissions, so a tenant-side app
+owner or admin outside the session is refused them (403); a
+console admin of the app reads them. `list` marks the listed user's unread sessions
+with `•` in its `UNREAD` column. `transcript` prints one page of messages (`--limit`,
+`--cursor`) with every part; under `--json` each message carries a `parts` array and JSON
+columns (`input`, `output`, `artifact`, `data`) are decoded. `artifacts <session-id>
+<part-id>` prints one tool call's artifact, inline or blob-backed. `upload` (owner and
+participants) prints the blob ID a message's `files` references; `download` reads any session
+file. The pinned system prompt and turn contexts are never in the rows: only `get` shows them,
+to app owners and admins. The CLI has no send/answer/cancel/events/members/rename — those are
+the clients' (a recorded principle-11 deferral). A client signed in as an app
 owner or admin reads the kept turn contexts from `get()`'s `turnContexts`; a member's `get()`
 never carries them.
 
@@ -707,10 +765,11 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | Code | When |
 | --- | --- |
 | `FUNCTION_SUBJECT_REQUIRED` | A `ctx.agents` call from a run with no caller named no `userId`. |
-| `SUBJECT_USER_FORBIDDEN` | The run may not name that member: an ordinary member invoked it, or an agent drives it. |
+| `SUBJECT_USER_FORBIDDEN` | The run may not name that member: an ordinary member invoked it and the function does not declare `users:actAsAny` (`users:readAny` for listing), or an agent drives it. |
 | `AGENT_SESSION_VARIABLES_INVALID` | Session variables fail `inputSchema`. `details.errors` lists each path. |
 | `AGENT_TOOL_ARGUMENTS_INVALID` | A model call's arguments failed the tool's input schema — the model sees this and may retry; it is not thrown at you. |
 | `AGENT_SESSION_PARTICIPANT_ONLY` | A viewer tried to send, upload a file or record an event. |
+| `AGENT_SESSION_ATTACHMENT_NOT_FOUND` | `view.attachments.read`'s blob isn't the session's: absent, or another session's or app's. |
 | `AGENT_SESSION_MEMBER_ONLY` | An app owner or admin who is not in the session tried to mark it read. |
 | `AGENT_SESSION_RATE_LIMITED` | Past the send limit. `details.retryAfter` names the wait in seconds. |
 | `AGENT_SESSION_NOT_FOUND` | The caller is not a member (and not an app owner or admin), or the id doesn't exist. |
@@ -721,7 +780,7 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | `AGENT_ARTIFACT_TOO_LARGE` | `ctx.tool.attachArtifact` over 4 MiB of JSON. |
 | `AGENT_TURN_ROW_TOO_LARGE` | A tool result or client answer would make its row larger than `maxRowBytes`; the turn fails. |
 | `AGENT_HISTORY_TOO_LARGE` | The selected history does not fit the model's context; add or tighten `[prompt.agent.history]`. |
-| `AGENT_SESSION_DOCUMENT_MISSING` | The session's document was deleted directly; every operation but delete answers this. |
+| `AGENT_SESSION_DOCUMENT_MISSING` | The session's stored conversation is gone; every operation but delete answers this. |
 | `AGENT_TEST_CASE_INVALID` | A test case's `[test.agent]` block cannot be a round of this agent. `details.refusals` lists every problem. |
 | `AGENT_PRESENTATION_REFERENCE_INVALID` | A presentation's `references` named a refused call, one of the same response, or a number the turn never gave; the model sees it and retries. |
 
@@ -760,4 +819,3 @@ Every refusal and failure here carries a stable `code` under the standard error 
 
 - [Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md)
 - [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md)
-- [Documents](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md)

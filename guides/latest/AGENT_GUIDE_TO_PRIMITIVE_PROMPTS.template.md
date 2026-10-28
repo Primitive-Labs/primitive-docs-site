@@ -39,21 +39,25 @@ primitive config push
 ## Run a prompt from a server function
 
 ```ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { text: string }, ctx) => {
-  const result = await ctx.prompts.run("summarizer", {
-    variables: { text: input.text },
-  });
-  if (!result.success) throw new Error(result.error ?? "prompt failed");
-  return { summary: result.output };
+export default defineFunction({
+  authorize: requireSignedIn(),
+  handler: async (input: { text: string }, ctx) => {
+    const result = await ctx.prompts.run("summarizer", {
+      variables: { text: input.text },
+    });
+    if (!result.success) throw new Error(result.error ?? "prompt failed");
+    return { summary: result.output };
+  },
 });
 ```
 
 Pass values under `variables`; templates read them under `input`.
 `configId` selects one of the prompt's configurations (any other id answers
-`PROMPT_NO_CONFIG`) and `modelOverride` changes the model for one call. No prompt capability is required; the function’s `access` rule
-controls callers.
+`PROMPT_NO_CONFIG`) and `modelOverride` changes the model for one call. No
+prompt capability is required. The calling function’s `authorize` decides who
+may run the prompt; the prompt carries no access rule of its own.
 
 ## Template syntax
 

@@ -43,19 +43,17 @@ primitive blob-buckets head <bucket> <blob-id>         # object metadata without
 primitive connections list --user-id <id>              # active WebSocket connections
 primitive sessions list --user-id <id>                 # auth sessions
 
-# Records and documents
-primitive databases list --owner <user-id>             # databases one user created
-primitive databases records query <database> ...       # read database records
-primitive databases records get <database> <model-name> <record-id>
-primitive databases records count <database> <model-name> [--filter '{...}']
-primitive databases records aggregate <database> <model-name> --op <count|sum|avg|min|max>
-primitive documents records query <document> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
-primitive documents records get <document> <model-name> <record-id>
-primitive documents records count <document> <model-name> [--filter '{...}']
-primitive documents records aggregate <document> <model-name> --op <count|sum|avg|min|max>
-primitive documents dump <document-id>                 # every model's records as JSON
-primitive documents stats <document-id>                # counts and size; `sizeBasis` says what the size measures
-primitive documents export <document-id>               # dump a document's contents
+# Databases and their records
+primitive db3 list --custodian user:<user-id>          # databases one user holds
+primitive db3 get <db3-id>                             # title, type, sync and who holds it
+primitive db3 records query <db3-id> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
+primitive db3 records count <db3-id> <model-name> [--filter '{...}']
+primitive db3 records aggregate <db3-id> <model-name> --op <count|sum|avg|min|max> [--field <f>] [--group-by <f>]
+primitive db3 schema <db3-id>                          # models and fields, declared and observed
+primitive db3 type get <db3-id>                        # the type the database has
+primitive db3 indexes list <db3-id>                    # its indexes
+primitive db3 stats <db3-id>                           # record counts and size
+primitive db3 inspect <db3-id>                         # sync diagnostics for one database
 
 # Metadata
 primitive metadata get <type> <id> <category>          # resource metadata
@@ -123,7 +121,7 @@ Outcome mapping, by source:
 
 The `function-log` source is a server function's invocation records. Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind` (`http`, `webhook`, `cron`, `function`, `manual`), `runtime` (`request` or `task`), `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated`, `logsUnavailable` and `contentSuppressed`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId` (the invocation id), the `runId` of a trigger fire or task run, and the attributed `userId`. Records are kept seven days and outlive an archived function.
 
-The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test`, `workflow` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`, plus `stepAttempt` for a call made inside a function's `step.do` (which run of the body, from 1; it restarts after the task pauses, exactly as the function log's attempt does). Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a workflow step or a function step, `functionId` for a server function, and `runId` for either one's run. A function step also carries `correlation.stepOccurrence`, which use of the step name it was (from 0), so `runId`, `stepId` and `stepOccurrence` together identify one step of the run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
+The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`, plus `stepAttempt` for a call made inside a function's `step.do` (which run of the body, from 1; it restarts after the task pauses, exactly as the function log's attempt does). Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a function step, `functionId` for a server function, and `runId` for its run. A function step also carries `correlation.stepOccurrence`, which use of the step name it was (from 0), so `runId`, `stepId` and `stepOccurrence` together identify one step of the run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
 
 Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run`/`--step` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
 

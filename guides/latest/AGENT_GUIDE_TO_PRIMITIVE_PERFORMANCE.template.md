@@ -39,7 +39,7 @@ Both look correct in isolation. Both are bugs.
 
 ### Anti-pattern
 
-A page needs several collections from the same database and makes one function call per collection — `list-groups`, `list-accounts`, `list-holdings`, `list-targets`, `latest-snapshot` — one after another. Each call has its own request/response overhead, and they serialize even though none depends on another.
+A page needs several models from the same sync-off database and makes one function call per model — `list-groups`, `list-accounts`, `list-holdings`, `list-targets`, `latest-snapshot` — one after another. Each call has its own request/response overhead, and they serialize even though none depends on another.
 
 ### Pattern
 
@@ -47,25 +47,28 @@ Write one function that reads every model the page needs, in parallel, and retur
 
 ```ts
 // primitive/dev/functions/dashboard-bundle/index.ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { databaseId: string }, ctx) => {
-  const db = ctx.db(input.databaseId, "portfolio");
-  const owner = ctx.user!.userId;
-  const [groups, accounts, holdings, targets, latest] = await Promise.all([
-    db.model("groups").query({ filter: { ownerId: owner }, options: { limit: 50 } }),
-    db.model("accounts").query({ filter: { ownerId: owner }, options: { limit: 100 } }),
-    db.model("holdings").query({ filter: { ownerId: owner }, options: { limit: 1000 } }),
-    db.model("targets").query({ options: { limit: 1000 } }),
-    db.model("snapshots").query({ filter: { ownerId: owner }, options: { sort: { createdAt: -1 }, limit: 1 } }),
-  ]);
-  return {
-    groups: groups.items,
-    accounts: accounts.items,
-    holdings: holdings.items,
-    targets: targets.items,
-    latestSnapshot: latest.items[0] ?? null,
-  };
+export default defineFunction({
+  authorize: requireSignedIn(),
+  handler: async (input: { db3Id: string }, ctx) => {
+    const db = ctx.db3(input.db3Id, "portfolio");
+    const owner = ctx.user!.userId;
+    const [groups, accounts, holdings, targets, latest] = await Promise.all([
+      db.model("groups").query({ filter: { ownerId: owner }, limit: 50 }),
+      db.model("accounts").query({ filter: { ownerId: owner }, limit: 100 }),
+      db.model("holdings").query({ filter: { ownerId: owner }, limit: 1000 }),
+      db.model("targets").query({ limit: 1000 }),
+      db.model("snapshots").query({ filter: { ownerId: owner }, sort: { createdAt: -1 }, limit: 1 }),
+    ]);
+    return {
+      groups: groups.items,
+      accounts: accounts.items,
+      holdings: holdings.items,
+      targets: targets.items,
+      latestSnapshot: latest.items[0] ?? null,
+    };
+  },
 });
 ```
 
@@ -75,14 +78,13 @@ Then call it once:
 
 ### When to reach for it
 
-Whenever a page reads three or more independent collections. Always when you're in a `for` loop calling the same function with different input (see Pattern 2).
+Whenever a page reads three or more independent models through functions. A synced database needs none of this: the device already holds every model and reads them locally. Always when you're in a `for` loop calling the same function with different input (see Pattern 2).
 
 ### Gotchas
 
 - Each `query` answers one page. Set `limit` to comfortably cover real data, and page with `nextCursor` inside the function when a model can outgrow it — the client still pays one round trip.
-- A function can open several databases (`ctx.db(otherId, "securities-ref")`) and read them in the same `Promise.all`, so a per-user database plus a shared reference database is still one call.
-- A read that many callers repeat can be registered with `defineQuery` and `cache: { ttlMs }` — honored only when the run touched nothing but its declared `models` and wrote nothing, and capped at one minute. See [Registered queries](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#registered-queries).
-- The function's response counts against its output ceiling; return the fields the page renders, not whole records it ignores (`options.projection`).
+- A function can open several databases (`ctx.db3(otherId, "securities-ref")`) and read them in the same `Promise.all`, so a per-user database plus a shared reference database is still one call.
+- The function's response counts against its output ceiling; map each record to the fields the page renders rather than returning whole records it ignores.
 
 ## Pattern 2 — Replace N+1 with a bulk query
 
@@ -108,7 +110,8 @@ One query for every row, grouped in memory:
 const ids = groups.items.map((g) => g.id);
 const targets = await db.model("targets").query({
   filter: { groupId: { $in: ids } },           // up to 1,000 values per list
-  options: { sort: { groupId: 1 }, limit: 1000 },
+  sort: { groupId: 1 },
+  limit: 1000,
 });
 const byGroup = new Map<string, typeof targets.items>();
 for (const t of targets.items) {
@@ -310,7 +313,7 @@ Screens that actually need the data kick off `loadAuthConfig()` in a detached `T
 
 ### Gotcha — the re-block trap
 
-If you cache a value in `userPrefs` (which itself loads via the root doc) and then `await ensurePrefsReady()` before reading the cache, you just re-serialized the same work you were trying to background. Either:
+If you cache a value in `userPrefs` (which itself has to load first) and then `await ensurePrefsReady()` before reading the cache, you just re-serialized the same work you were trying to background. Either:
 
 - Use the cached value optimistically and fire a fallback in parallel (see Pattern 7), OR
 - Cache somewhere that doesn't need to be loaded first (on-device key/value storage), OR
@@ -551,15 +554,15 @@ You're calling the same third-party API for the same set of values on behalf of 
 
 ### Pattern
 
-1. Add the cached fields to the relevant database rows (no schema change needed — the database is schemaless; the function just writes them).
-2. Add a function with a cron trigger that queries rows whose value is stale, calls the integration in bulk (Pattern 4), and writes back with one `batch`:
+1. Declare the cached fields on the relevant model in its type.
+2. Add a function with a cron trigger that queries records whose value is stale, calls the integration in bulk (Pattern 4), and writes back with one `bulk`:
 
 ```toml
 # primitive/dev/functions/refresh-security-prices.toml
 [function]
 key = "refresh-security-prices"
 entry = "functions/refresh-security-prices/index.ts"
-access = "hasRole('admin')"                    # members cannot run it by hand
+# authorize: allowCallers({ cron: true }) in the handler — members cannot run it by hand
 capabilities = ["integration:yahoo-finance"]
 
 [[function.triggers.cron]]
@@ -569,7 +572,7 @@ cron = "*/15 * * * *"
 
 3. The client-side fetch goes away entirely. The page reads the cached value from the same function call it already makes.
 
-Every cron fire starts a task run (`primitive functions runs refresh-security-prices` lists them); see [Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers).
+Every cron fire starts a task run (`primitive functions runs <function-id>` lists them, with the ID `primitive functions list` prints beside `refresh-security-prices`); see [Triggers](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#triggers).
 
 ### Wins
 
@@ -580,7 +583,7 @@ Every cron fire starts a task run (`primitive functions runs refresh-security-pr
 
 ## Pattern 9 — Bound how often you talk to your own server
 
-The Primitive client persists auth tokens locally and caches local-first documents on the device. That makes it easy to forget that some things genuinely require a round trip.
+The Primitive client persists auth tokens locally and keeps synced databases on the device. That makes it easy to forget that some things genuinely require a round trip.
 
 ### Useful questions before adding a new fetch on a hot path
 
