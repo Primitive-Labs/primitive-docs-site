@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-10-28",
+    "stampedAt": "2026-10-29",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
@@ -344,7 +344,7 @@
     {
       "topic": "locks",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.ts.md",
-      "description": "Named locks: mutual exclusion by key from client, CLI, and server functions; leases",
+      "description": "Named locks: mutual exclusion by key, taken in a server function; leases; CLI force-release",
       "keywords": [
         "lock",
         "named lock",
@@ -355,17 +355,21 @@
         "release",
         "renew",
         "status",
-        "LockTimeoutError",
+        "LOCK_TIMEOUT",
+        "ctx.locks.withLock",
         "ctx.api.locks.tryAcquire",
+        "FUNCTION_ROUTE_FUNCTION_ONLY",
+        "locks force-release",
         "serialize",
         "concurrency"
       ],
       "useCases": [
         "Serializing an operation so it never runs twice at once for the same key",
+        "Taking a lock in a server function with ctx.locks.withLock and invoking it from the app",
+        "Deciding who may lock which key in the function's authorize",
         "Acquiring a lock with a timeout and handling contention",
         "Releasing or renewing a held lock by handle",
-        "Checking who holds a key without acquiring it",
-        "Taking a lock from a server function with ctx.api.locks.tryAcquire",
+        "Checking who holds a key, or freeing a stuck key, from the CLI",
         "Re-taking a task run's own lease on a later slice (owner: ctx.runId)",
         "Sizing a lock lease so it covers the work"
       ],
@@ -373,14 +377,14 @@
         "named lock",
         "lease",
         "ttlMs",
-        "LockHandle",
-        "client.locks.acquire",
-        "client.locks.tryAcquire",
+        "ctx.locks.withLock",
+        "ctx.locks.acquire",
         "ctx.api.locks.tryAcquire",
         "re-taking your own lease",
-        "LockTimeoutError",
-        "lock rate limit",
-        "lock rule set"
+        "LOCK_TIMEOUT",
+        "FUNCTION_ROUTE_FUNCTION_ONLY",
+        "locks force-release",
+        "lock rate limit"
       ],
       "prerequisites": [],
       "relatedGuides": [
@@ -980,14 +984,13 @@
         "rule sets",
         "rule-sets",
         "FUNCTION_ACCESS_DENIED",
-        "lock rule set",
         "entitlement",
         "billing",
         "paywall"
       ],
       "useCases": [
         "Writing a server function's access gate",
-        "Writing rule sets for groups, collections, buckets, database types, and locks",
+        "Writing blob bucket rule sets and metadata read and write rules",
         "Scoping what a caller reaches inside function code",
         "Governing who can create groups or manage members",
         "Testing and debugging CEL rules",

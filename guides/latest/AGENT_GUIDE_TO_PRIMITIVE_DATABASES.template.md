@@ -98,6 +98,10 @@ Every codegen reads the **same type file**, so clients and functions agree on mo
 
 A database that grew without a type: `primitive db3 schema <db3-id> --toml --output primitive/dev/db3-types/<name>.toml` writes its observed fields as a type file to review, push and attach.
 
+{{#lang ts}}
+**More than one client in one process** (a Node script, a worker, a test harness). A model class binds to the first client that uses it: a second `initializeClient` call in the same process shares that binding, and its model calls — reads, writes, subscriptions — route to the first client instead of its own. Give each client its own model classes, or read and write through `client.db3.records(id)` instead of the generated models; it takes the same verbs and needs no bound class.
+{{/lang}}
+
 ## Records
 
 On a device, the generated models read and write the **local copy** of a synced database. Name the database with `{ db3: id }` on `query`/`count`/`aggregate`/`save`/`increment` (Swift: `QueryOptions(db3: [id])`, `AggregateOptions(db3: [id])`, `save(in: id)`, `Model.increment(id:fields:in: id)`), or set a default with `BaseModel.setDefaultDb3(id)` (Swift: `client.setDefaultDb3(id)`). Unless you name a database, a read applies to every database on the device.
@@ -105,6 +109,8 @@ On a device, the generated models read and write the **local copy** of a synced 
 In a server function, `ctx.db3(db3Id, "<type>").model("<key>")` reads and writes on the server with the app's authority — any database, synced or not, no grant needed. A model handle has `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment` and `bulk`. Over HTTP from a client — admin tooling, or a database with sync off — `client.db3.records(id)` offers the same verbs with the same options and refusals.
 
 ### Querying
+
+A query answers one page, never every matching row: 100 records when you omit `limit`, up to the `limit` you pass, capped at 10,000. Loop on `hasMore`, passing `nextCursor` back as the next call's cursor, to read everything a filter matches.
 
 {{ example: databases/records-query }}
 
@@ -230,10 +236,10 @@ Every index costs on every write (server and each synced device), so declare `in
 
 `phase`: `idle`, `opening`, `loading`, `catching-up`, `live`, `reconnecting`, `gone`. Events: `db3:state`, `db3:ready`, `db3:rows` (`changes`, `origin`: `local`\|`remote`\|`sibling`), `db3:write-refused`, `db3:evicted`, `db3:gone` (`reason`: `permission`\|`sync-off`\|`client-outdated`), `db3:error`.
 
-A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) works offline: it resolves at once with `pendingCreate` true in the state and is saved under the same id on reconnect (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
+A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) resolves at once, online or offline, with `pendingCreate` true in the state, and the client saves it under the same id in the background (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A refusal only the server decides (`DB3_TYPE_NOT_FOUND`, `DB3_TYPE_REFUSED`) arrives as that event, never as a rejection of `create`. Await `commitOfflineCreate` with the id to get the server's answer (`created`, or `refused` with the reason); `client.db3` calls that ask the server about the database wait for the commit on their own, rejecting `PENDING_CREATE` offline or after 30 s. A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
 
 {{#lang ts}}
-Storage: web clients need `databaseConfig: { type: "opfs", options: { workerURL } }` (add `brokerURL` to share across tabs; serve `sql-wasm.wasm` beside the worker); Node uses `databaseConfig: { type: "node-sqlite", options: { recordLogDirectory } }` with a persistent directory. Without suitable storage the client reports `FORMAT2_STORAGE_UNAVAILABLE`. The browser's answer to the persistent-storage request is `persisted`, `granted`, `declined` or `unsupported`; on the last two it may clear the copy under storage pressure.
+Storage: web clients need `databaseConfig: { type: "opfs", options: { workerURL } }` (add `brokerURL` to share across tabs; serve `sql-wasm.wasm` beside the worker, copied from the `sql.js` package js-bao installed — a wasm from another `sql.js` version fails startup with `sql.js wasm mismatch`; the template's `pnpm codegen` copies it); Node uses `databaseConfig: { type: "node-sqlite", options: { recordLogDirectory } }` with a persistent directory. Without suitable storage the client reports `FORMAT2_STORAGE_UNAVAILABLE`. The browser's answer to the persistent-storage request is `persisted`, `granted`, `declined` or `unsupported`; on the last two it may clear the copy under storage pressure.
 {{/lang}}
 
 ### Re-rendering on change
@@ -252,7 +258,7 @@ Different fields of a record both survive; the same field converges on one write
 
 ### Write refusals
 
-A device write applies locally first (a conditional write shows only once the database accepts it; `confirm: true`, in Swift `Db3WriteOptions(confirm: true)`, awaits that). If the database refuses it at sync, the record reverts and `db3:write-refused` carries `writes` (every affected write, in order, to redo), `error.code`, and `conflictingRecord`/`current` where relevant.
+A device write (save, patch, delete, increment) applies to the local copy and resolves before the database has seen it. If the database refuses it at sync, the record reverts and `db3:write-refused` carries `writes` (every affected write, in order, to redo), `error.code`, and `conflictingRecord`/`current` where relevant. Pass `confirm: true` (Swift `Db3WriteOptions(confirm: true)`) on the write instead to wait for the database's answer at the call site and reject there if it's refused, rather than handling `db3:write-refused` afterward.
 
 {{ example: databases/write-refused }}
 
@@ -314,6 +320,7 @@ A collection is a set of databases shared together: its members reach every data
 - Members are user ids or `group:<groupId>` (a group can hold any role but `owner`). Collection grants add to a database's own; the highest wins. Deleting a collection keeps its databases.
 - A sync-off database can't be added, and a group can't be granted a role on a collection holding one (`DB3_SYNC_OFF_NO_SHARING`).
 - Group sharing changes and deletion are refused above 200 databases, and deletion also above databases × groups 400 (`COLLECTION_FANOUT_LIMIT`).
+- Custodian: who holds the collection, `user:<userId>` (that member holds `owner`) or `app` (no owner). A client's create is held by its creator; a client can't name a custodian (`403 CUSTODIAN_NOT_ALLOWED`). A function's `ctx.api.collections.create({ body: { name } })` is held by the invoking member, who can use the `owner` role directly; `body.custodian` names `"app"` or any member instead (`404 SUBJECT_USER_NOT_FOUND` for a non-member). A run with no caller (cron, webhook) must name one (`CUSTODIAN_REQUIRED`), and a run an agent drives may name `"app"` or its initiator but no other member (`SUBJECT_USER_FORBIDDEN`). The admin API (`primitive collections create --owner`) also names one.
 - Functions: `ctx.api.collections` creates, deletes and shares collections and adds databases; `ctx.api.collections.listDb3({ collectionId })` lists them. Rules the roles don't express go in a function whose `authorize` uses `requireCollectionRole`.
 - CLI: `primitive collections create|get|delete|transfer`, `collections documents add|remove <collection-id> <db3-id>`, `collections members add|set-role|list|remove`.
 
@@ -346,6 +353,8 @@ export default defineFunction("class-grades", {
 
 `auth.db3` is read-only (`get`, `query`). A function creates databases with `ctx.api.db3.create({ body: { title, type, sync, custodian } })`; `custodian: "app"` needs capability `db3:transfer` and `sync: false` needs `db3:setSync`. To react to changes in databases of a type, declare `[[function.triggers.db3]]` with `type = "<type>"` in the function's TOML; the run receives the database id and the changed record keys.
 
+A sync-off database grants nothing to its members (roster rows like the one above are app data, not a grant), so `listMine()` never lists it and the client has no way to discover `classDb` on its own. Keep a directory it can read: the same function that adds or removes someone from the roster also writes the database's id into a record of theirs — a field on their profile, or a row in a database they do hold — and a lookup function (or the client reading that record directly) answers which ids to pass in.
+
 ## Partitioning patterns
 
 | Data | Partition | Access | Sync |
@@ -366,6 +375,7 @@ Store another system's id in a `unique` field and import with `upsertOn` it; let
 - **The first subscribe downloads the whole database** — show `state.progress`; keep databases partitioned so a device holds only what its user needs.
 - **Unsent writes live only on the device** — surface `state.pendingWrites`.
 - **One type file for every codegen.** Two schema files drift, and a typed database refuses models its type doesn't declare.
+- **A new database's uploads wait for the server to have it** — an upload right after `create` is queued (`bytesTransferred: 0`) and sent once the create commits; await `commitOfflineCreate` first to upload at once.
 - **`confirm: true` on a device write waits for the next subscribe** when the database isn't subscribed.
 - **Upgrade client libraries forward only.** A local copy written by a newer client doesn't open in an older one; reload web tabs left open across a deploy.
 - **Generated fields are optional in practice** — older records may lack newer fields.

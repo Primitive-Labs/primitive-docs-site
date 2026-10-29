@@ -202,20 +202,19 @@ primitive functions authorize --cases --all          # run every case file in th
 | Function `access` (legacy only) | Who can invoke or start an already-deployed version with no `authorize` | Denied without a rule; frozen — a new or changed version can no longer set it |
 | Function `authorize` | Who can invoke it, decided in code | Required — push refuses a new or changed version with none |
 | Blob bucket preset or rule set | Reads, uploads, listing, deletion, sharing | A preset or rule set is required |
-| Lock rule set | Acquiring and renewing keys | Open without a rule set; omitted operations deny once installed |
 | Metadata `readRule` / `writeRule` | Reading or writing category values | Denied without the rule |
 
-Resource rules add context such as `record.key` or `record.blobCreatedBy`. See the feature guide for its variables. Metadata rules govern API reads and writes, not another rule's metadata lookups.
+Resource rules add context such as `record.blobCreatedBy`. See the feature guide for its variables. Metadata rules govern API reads and writes, not another rule's metadata lookups.
 
 Groups and collections have no rule set: every group and collection has the same fixed, platform-enforced roles — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles); collections: owner, manager, editor, contributor, viewer. A rule the roles don't express goes in a server function's `authorize` (`requireMember`, `requireCollectionRole`, above).
 
-A function’s gate also authorizes its use of prompts and integrations; integrations require the declared capability. Admin routes and notification sending use app roles rather than CEL.
+A function’s gate also authorizes its use of prompts, integrations and named locks, which carry no rule of their own; integrations require the declared capability. Admin routes and notification sending use app roles rather than CEL.
 
 [Metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) supplies `md.self.*` and declared related-resource paths. [Secrets and config variables](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) must be declared before a rule can read them.
 
 ## Rule sets (management operations)
 
-A function's `access` gate decides who may run its code; **rule sets** govern who may manage platform resources directly — blob buckets, locks. Groups and collections don't use one: every group and collection has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file. Put a rule those roles don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above).
+A function's `access` gate decides who may run its code; **rule sets** govern who may manage platform resources directly — blob buckets. Groups and collections don't use one: every group and collection has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file. Put a rule those roles don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above).
 
 ```toml
 # primitive/dev/rule-sets/bucket-access.toml
@@ -269,6 +268,7 @@ Client equivalent: `client.ruleSets.test()`, `client.ruleSets.schema()`. For end
 - **A module-scope `assertRuntime` hides behind a uniform deny.** `authorize` shares the handler's module scope: a task-only function's module-scope `assertRuntime("task")` throwing while `authorize` loads settles as an `authorize-error` (uniform `403`), not the clear `FUNCTION_RUNTIME_REFUSED` a direct call to a legacy function gets. Call it the runtime it expects.
 - **Agent calls answer their own way.** An agent-call deny is `AGENT_TOOL_ACCESS_DENIED`; on context/history it fails the turn.
 - **Deep in a chain, `ctx.user` is still the root.** Inside a nested start, `ctx.user` names the member who started the chain's first function, never whoever called the function directly above you. Scope by what this function's own `authorize` resolved into `ctx.auth`, not by re-trusting `ctx.user` at each level.
+- **Write `authorize` above `handler`.** `ctx.auth` is typed from `authorize`'s `allow` with no annotations, but only when `authorize` comes first: after the handler, an unannotated `authorize` arrow leaves `ctx.auth` typed `WriteAuthorizeBeforeHandler | null`, and every field read fails to compile.
 - **A task run's `ctx.auth` is capped.** Over 64 KB, the task start fails `500 FUNCTION_AUTH_TOO_LARGE` (a cron fire records a failed run); over 16 KB, each step of the run logs a warning. Resolve ids and the rows the handler needs.
 - **A flagged `inputSchema` defaults closed.** A build with `authorize` defaults `additionalProperties: false` on an `inputSchema` that doesn't set it; a schema whose `anyOf`/`oneOf` members declare their own `properties` is left open instead, and push warns.
 

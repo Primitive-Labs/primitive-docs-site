@@ -9,7 +9,7 @@ Use an error’s `code` to choose a user-facing message or recovery action. Code
 {{#lang ts}}
 Read `JsBaoApiError.code`, including for file transfers and failed token refreshes.
 
-`JsBaoApiError` is the transport error; `isJsBaoError` deliberately excludes it, so a client-side `JsBaoError` (`LOCK_TIMEOUT`, `INVALID_ARGUMENT`, …) and a server code never get confused even when they spell a value the same way.
+`JsBaoApiError` is the transport error; `isJsBaoError` deliberately excludes it, so a client-side `JsBaoError` (`FUNCTION_WAIT_TIMEOUT`, `INVALID_ARGUMENT`, …) and a server code never get confused even when they spell a value the same way.
 
 The CLI's `ApiError` exposes the same value as `code`, with `statusCode` and `details` beside it.
 {{/lang}}

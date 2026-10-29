@@ -74,15 +74,14 @@ issued — a sign-in link. Nothing chooses a method: the user types the code or
 opens the link, and consuming either one retires both.
 
 ```swift
-  // `redirectUri` is optional, and OMITTING it is how a code-only email is
-  // requested: the server renders one from the same template and consults no
-  // allow-list. A target that IS supplied must match the app's non-empty
-  // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
-  // URI` — nothing degrades to code-only on your behalf.
-  _ = try await client.auth.emailSignInRequest(
-    email: email,
-    redirectUri: "myapp://auth/magic-link"
-  )
+  // The link lands on `options.auth.oauthRedirectUri` when set, else on
+  // `client.links.appBaseURL`'s origin + /oauth/callback. When the app's
+  // `emailRedirectUris` is non-empty, that target must be on it, or the
+  // request is rejected 400 `Invalid redirect URI`; with an empty list the
+  // email carries the code alone. Pass `target: .uri("https://...")` to name
+  // another target, or `target: .codeOnly` for an email that carries the
+  // code alone.
+  _ = try await client.auth.emailSignInRequest(email: email)
 
   // Finish by typing the code from the email...
   let result = try await client.auth.otpVerify(email: email, code: code)
@@ -102,7 +101,9 @@ allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
 link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
 no endpoint renders any other sign-in template, so that removal holds.
 
-`auth.emailSignInRequest(email:redirectUri:)` takes an optional `redirectUri`; omitting it is how a code-only email is requested, and no allow-list is consulted. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
+`auth.emailSignInRequest(email:)` picks the link's target in this order: the call's `redirectUri` or `target`, `options.auth.oauthRedirectUri`, `links.appBaseURL`'s origin + `/oauth/callback`, and otherwise none (code only). Pass `target: .codeOnly` for an email that carries the code alone; `auth.emailSignInLinkTarget()` returns the target without sending anything. `auth.magicLinkVerify(token:inviteToken:)` returns a `MagicLinkVerifyResult` (`.user`, `.promptAddPasskey?`, `.isNewUser?`) and `auth.otpVerify(email:code:)` an `OtpVerifyResult`.
+
+**Gotcha:** when `[auth].emailRedirectUris` is non-empty, the chosen target must be on it, or the request is rejected `Invalid redirect URI` and no email is sent; the client does not retry without it. Add the target and `primitive config push`, or pass `target: .codeOnly`.
 
 ### Make the emailed sign-in link open your app (iOS)
 
@@ -110,6 +111,8 @@ The iOS template sends code-only emails by default. To add a link:
 
 - **With a web app:** set the environment’s `webUrl`, allow-list its `/oauth/callback` URL, and set `iosAppId`. Deploy the association document before enabling the `applinks:` entitlement. The template receives universal links through `.onContinueUserActivity` and custom schemes through `.onOpenURL`.
 - **Without a web app:** add `<scheme>://auth/magic-link` to `[auth].emailRedirectUris`, then set `authManager.sendsEmailSignInLink = true`. Init supplies the scheme registration and URL routing.
+
+Without the template, a client sends scheme links when `options.auth.oauthRedirectUri` is `<scheme>://oauth/callback` and that URL is in `[auth].emailRedirectUris`.
 
 Merge redirect URLs into the existing allow-list; pushing only the new URL removes existing entries. Keep URLs used by installed app builds. Custom-scheme links require the app to be installed; retain code entry as an alternative.
 
@@ -119,17 +122,31 @@ Merge redirect URLs into the existing allow-list; pushing only the new URL remov
 The callback delivers the token as a `magic_token` value — **not** `token`, `magicToken`, or `code`:
 
 ```swift
-  let magicToken = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
-    .queryItems?.first(where: { $0.name == "magic_token" })?.value
-
-  if let magicToken {
-    let result = try await client.auth.magicLinkVerify(token: magicToken)
-    // Token is now stored on the client and WS auto-connects.
-    if result.isNewUser == true { showOnboarding() }
-    if result.promptAddPasskey == true { offerPasskeyRegistration() }
-  }
+  let result = try await client.auth.handleSignInCallback(callbackURL)
+  // Token is now stored on the client and WS auto-connects.
+  if result.isNewUser == true { showOnboarding() }
+  if result.promptAddPasskey == true { offerPasskeyRegistration() }
 ```
 
+`auth.handleSignInCallback(_:inviteToken:)` finishes both an emailed link (`magic_token`) and an OAuth redirect (`code` + `state`). It returns a `SignInCallbackResult`: `method` (`.magicLink` or `.oauth`), `userId`, and for a link `user`, `isNewUser`, `promptAddPasskey`; `purpose` is `"login-add-passkey"` when the server suggests a passkey; `continueUrl` and `state` come from a base64 JSON `state` the app put on the link.
+
+It accepts a URL only when every rule holds:
+
+| # | Rule |
+|---|---|
+| 1 | A URL is given |
+| 2 | Its scheme is `http` or `https`, or the scheme of a non-http(s) `options.auth.oauthRedirectUri` |
+| 3 | An http(s) URL is on `links.appBaseURL`'s origin |
+| 4 | Its path is `oauthRedirectUri`'s path when the option is the same kind of URL (http(s) or scheme), else `/oauth/callback`; `myapp://oauth/callback` reads as `/oauth/callback` |
+| 5 | `magic_token`, `code` and `state` each appear at most once, and never empty |
+| 6 | Not both `magic_token` and `code` |
+| 7 | A `code` comes with a `state` |
+| 8 | It carries `magic_token`, or `code` with `state` |
+| 9 | A `state` decodes as base64 JSON to an object |
+
+Anything else throws before any request: `AuthError` with code `.invalidToken` and a message starting `Sign-in callback refused:` that names the rule. A link's `state.inviteToken` is accepted with the sign-in unless `inviteToken` is passed.
+
+**Gotcha:** an http(s) `oauthRedirectUri` is accepted as a callback only on `links.appBaseURL`'s origin. On another origin the link is sent, but `handleSignInCallback` refuses it; use `<scheme>://oauth/callback` for links that open the app.
 
 To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
 
@@ -182,7 +199,7 @@ Gate email sign-in UI on `emailSignInEnabled` from `getAuthConfig()`.
 
 `AuthCode` also carries the SDK-generated cases `.tokenInvalid`, `.refreshFailed`, `.networkError`, and `.unauthorized`, plus `.passkeyNotEnabled`, `.passkeyRpNotConfigured`, `.passkeyUserVerificationFailed` and `.memberInvitationsDisabled` from the server. Server codes outside the enum (e.g. rate limiting) arrive with `code == nil` — fall back to `error.message`.
 
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`.
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify` and `handleSignInCallback`, which refuses a URL outside its grammar with `.invalidToken`.
 
 **Don't sign the user out on every failed call.** When a request gets a 401 the client refreshes the token and retries. If the refresh itself can't reach the server, the call does not fail as an HTTP 401 — it fails as a transport error carrying no HTTP status, because that is a transient outage rather than a rejected credential. Retry it instead of clearing the session. Only a refresh the server actually rejects surfaces as `HttpError(status: 401, message: "Invalid credentials")`, and that is the one to sign out on.
 

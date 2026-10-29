@@ -362,11 +362,15 @@ reports as in sync keeps its bytes, comments and key order included.
   TOML. A prompt configuration’s `[[configs]] status` remains TOML-owned.
 - Archive preserves a function, integration, or prompt and its key. To reuse
   the key, pull, prune the archived object, then add it again.
+- Pruning a function, integration, or prompt needs `admin`. Run
+  `primitive login --step-up --scope write,admin` first; without it the push
+  stops before applying anything.
 - Deleting a metadata category leaves its values unreachable. Delete values
   first if they must be removed.
 
-Review prune output before confirming. `--yes` skips confirmation for an
-already-reviewed automated operation.
+Review prune output before confirming. Prune skips objects edited on the
+server or still referenced; any other refused delete fails the push. `--yes`
+skips confirmation for an already-reviewed automated operation.
 
 ### Restore a pull
 

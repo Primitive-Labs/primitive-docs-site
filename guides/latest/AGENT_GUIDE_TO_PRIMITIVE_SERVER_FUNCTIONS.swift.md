@@ -346,6 +346,7 @@ may have completed some work. Report repeated platform failures.
 | `ENGINE_INTERNAL_ERROR` | The task runtime reported an internal error. | Retry with a new run key and idempotent steps. |
 | `ENGINE_SLICE_DEADLINE` | A platform call was refused because the slice's token deadline had passed. | The slice outlived its token. Look for a step that runs longer than the slice ceiling and split it. |
 | `ENGINE_INSTANCE_LOST` | The engine no longer reports the instance, and nothing recorded how the run ended. | `primitive functions logs <function-id> --run <run-id>` shows what the platform did record. Start a new run with a new `runKey` if the work still needs doing. |
+| `ENGINE_START_FAILED` | The task runtime could not begin the run, so no step ran. The start answered `500` `INSTANCE_CREATE_FAILED`. | Start the run again with a new `runKey`. |
 
 An engine failure's `errorMessage` is the **engine's own text**, not a
 code-leading sentence: for these the code is on `error.code` and
@@ -358,7 +359,7 @@ an attempt the run row's code is the whole statement; there is nothing in
 
 ### Locks
 
-Wait for a named lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs, owner? }, fn)`: it acquires, runs `fn(handle)` while the key is held, and releases in `finally` — on a return and on a throw. It answers `fn`'s value; `fn`'s own error propagates unchanged after the release.
+Wait for a named lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs, owner? }, fn)`: it acquires, runs `fn(handle)` while the key is held, and releases in `finally` — on a return and on a throw. It answers `fn`'s value; `fn`'s own error propagates unchanged after the release. A function is the only caller that can take a lock (the lock routes refuse anything else `FUNCTION_ROUTE_FUNCTION_ONLY`), so its `authorize` decides who may take its keys.
 
 ```ts
 import { defineFunction, requireSignedIn } from "primitive-functions";
@@ -452,7 +453,8 @@ validate resource access in your code when the result must be caller-scoped.
 ### Checking a user's access
 
 A database id in the input is a claim, not a permission: `ctx.db3` reaches
-every database in the app. Gate in `authorize` with the caller's effective
+every database in the app (both reject `NOT_FOUND`, 404, for an id naming
+none). Gate in `authorize` with the caller's effective
 level, `auth.db3(id, type).permissions()` → `"reader" | "read-write" | "owner" | null`:
 
 ```ts
@@ -524,6 +526,11 @@ Use typed `ctx.api` methods for app services. Methods take an options object
 with path/query parameters and `body` where needed. Use `ctx.prompts.run` and
 `ctx.integrations.call` for prompt and external-service calls.
 
+Each method's `body` and answer are typed from the platform's API spec.
+`config push` refuses a function that sends a body key or reads an answer field
+the spec does not declare; `primitive config push --no-typecheck` ships it
+unchecked.
+
 Direct internet `fetch` calls are denied. Missing capabilities return
 `FUNCTION_INTEGRATION_GRANT_MISSING`, `FUNCTION_SECRET_GRANT_MISSING`, or
 `FUNCTION_HIGH_BLAST_GRANT_MISSING`.
@@ -541,7 +548,7 @@ operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#lim
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
 | High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
-| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, documents, root document, inbox, devices, agent sessions, user aliases, holdings); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
+| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), inbox, devices, agent sessions, user aliases, holdings); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
 
 **Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
 
@@ -722,7 +729,7 @@ The handle's contract:
 - **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
 - **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `bulk`. `ctx.db3(id, type).bulk([...])` spans models, each op naming its `model`.
-- **Refusals reject:** `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
+- **Refusals reject:** `NOT_FOUND` (404, `db3Id` names no database in the app — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
 - **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
@@ -767,6 +774,12 @@ And the ones that are the same under both:
 | Response size | 1 MiB, kept on the run row | — |
 | Values per `$in` / `$nin` list | 1 000 | — |
 
+Task runs have no cap on how many run at once, per app or per function; only
+the start rate bounds them. Under heavy load on the deployment a run waits
+longer between steps. A start the runtime does not accept is retried for about
+a second, then answers `500` `INSTANCE_CREATE_FAILED` and the run settles
+`failed` `ENGINE_START_FAILED`: start again with a new `runKey`, since the old
+one replays the failed run.
 
 Use request `timeoutMs` for a precise wall-clock bound. `cpuMs` includes a
 runtime allowance of roughly two seconds. A timeout denies further platform

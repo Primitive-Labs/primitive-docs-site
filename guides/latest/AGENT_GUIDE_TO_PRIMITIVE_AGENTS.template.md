@@ -232,8 +232,7 @@ export default defineFunction({
 ```
 
 `ctx.tool` fields: `sessionId`, `turnId`, `callId` (stable across retries — use it as an
-idempotency key), `toolName`, `documentId` (deprecated — act through `ctx.agents` and
-`ctx.api.agentSessions`, not this id), `ownerUserId`, `members: { viewerUserIds,
+idempotency key), `toolName`, `ownerUserId`, `members: { viewerUserIds,
 participantUserIds }`, `variables` (grant nothing by themselves), `timezone` and `locale`
 (what the turn's send carried — the prompt's `turn.timezone`/`turn.locale`; `null` when
 absent), `context` (the turn's validated turn context — the prompt's `turn.*`; `null` when the
@@ -366,15 +365,14 @@ export default defineFunction({
       scope: input.householdId,
       variables: { householdId: input.householdId },
     });
-    // => { sessionId, documentId }; ctx.user becomes the session's owner
+    // => { sessionId }; ctx.user becomes the session's owner
   },
 });
 ```
 
-Drive everything from `sessionId`: open, send, upload and read all take it alone. The result's
-`documentId` is deprecated, as is the same field on `getSession`, `listSessions`' items and the
-view — `client.agents.sessions.inspect.storage(sessionId)` answers it for support or
-diagnostics only, never for driving the session.
+Drive everything from `sessionId`: open, send, upload and read all take it alone. The
+session's conversation is a db3 with the same id, held by the session: its members read it,
+and nothing writes, shares or deletes it except the session's own calls.
 
 The owner is `userId`, else the invoking user. `createSession` works from any kind of run:
 one with no caller (cron, a webhook) must pass `userId` (`FUNCTION_SUBJECT_REQUIRED`), and
@@ -393,7 +391,7 @@ the same rule: they act as that member, with no admin arm, and never return a se
 function needs `users:readAny` for it rather than `users:actAsAny`.
 
 `deleteSession` deletes as the owner, with the same outcome as the client's delete, and
-answers `{ deleted: true, sessionId, documentId }`. It is the way to remove a member's
+answers `{ deleted: true, sessionId }`. It is the way to remove a member's
 sessions from an account-deletion or reset function (list with `listSessions({ userId })`
 and delete the items whose `role` is `"owner"`). A session whose stored conversation is already
 gone can still be deleted. A participant or viewer is refused `AGENT_SESSION_OWNER_ONLY`, anyone
@@ -458,9 +456,7 @@ Read any file of the session — including one another member sent — with
 `view.attachments.read(blobId)`: a copy this client already holds (an upload it made, or an
 earlier read) answers at once, else it downloads through the session and is kept for next time;
 an id the session does not hold rejects `AGENT_SESSION_ATTACHMENT_NOT_FOUND`. Nothing in this
-flow names a storage ID, a permission or a blob route. For support or diagnostics only,
-`client.agents.sessions.inspect.storage(sessionId)` answers `{ documentId }`, the id of the
-session's stored conversation; it grants nothing, and nothing in your app should drive off it.
+flow names a storage ID, a permission or a blob route.
 
 A turn pauses on an approval or a client tool that takes an answer, surfacing every call of
 one model response together. Find a pending call from the view's parts (`tool_call`, state
@@ -537,8 +533,9 @@ dependency; it targets the structural types). Platform-only fields ride in `meta
 {{/lang}}
 
 {{#lang swift}}
-There is no `uiMessages()` in Swift: read a part's `content` (`PrimitivePartContent`: `.text`,
-`.reasoning`, `.toolCall`, `.file`, `.event`, `.unknown(kind:)`) directly.
+There is no `uiMessages()` in Swift: read a view part directly. It is `.part(AgentSessionPartRecord)`,
+whose `content` (`AgentSessionPartContent`) is `.text`, `.reasoning`, `.file`, `.event` or
+`.unknown(kind:)`, or `.toolCall(AgentSessionToolCallRecord)` for a tool call.
 {{/lang}}
 
 A message sent while a turn runs queues; one from the owner or whoever `answeredBy` allows,
@@ -674,7 +671,7 @@ Every refusal and failure here carries a stable `code` under the standard error 
 | `AGENT_ARTIFACT_TOO_LARGE` | `ctx.tool.attachArtifact` over 4 MiB of JSON. |
 | `AGENT_TURN_ROW_TOO_LARGE` | A tool result or client answer would make its row larger than `maxRowBytes`; the turn fails. |
 | `AGENT_HISTORY_TOO_LARGE` | The selected history does not fit the model's context; add or tighten `[prompt.agent.history]`. |
-| `AGENT_SESSION_DOCUMENT_MISSING` | The session's stored conversation is gone; every operation but delete answers this. |
+| `AGENT_SESSION_DB3_MISSING` | The session's stored conversation (its db3) is gone; every operation but delete answers this. |
 | `AGENT_TEST_CASE_INVALID` | A test case's `[test.agent]` block cannot be a round of this agent. `details.refusals` lists every problem. |
 | `AGENT_PRESENTATION_REFERENCE_INVALID` | A presentation's `references` named a refused call, one of the same response, or a number the turn never gave; the model sees it and retries. |
 
