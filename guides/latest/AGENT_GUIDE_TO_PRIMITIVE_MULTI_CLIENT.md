@@ -61,18 +61,18 @@ Server function and database type **definitions** are per app — they live in t
 
 ## The database schemas
 
-A database's models are declared once, in `primitive/<env>/db3-types/<name>.toml`. Every client's codegen and `ctx.db3(id, "<name>")` in server functions read that same file, so model and field names never diverge.
+A database's models are declared once, in `primitive/<env>/db3-types/<name>.toml`. Every client's codegen and `ctx.db3(id, "<name>")` in server functions read those same files, so model and field names never diverge.
 
-Each client points at it by path:
+Each client points at the type files by path; the `db3-types/` directory covers every kind of database the app opens:
 
-- **Web** — the codegen input in `web/package.json` (`js-bao-codegen-v2 -i ../primitive/dev/db3-types/workspace.toml -o src/models`).
+- **Web** — the template's `pnpm codegen` reads every type file in the selected environment's `db3-types/` and generates one `src/models/<type>/` per type, plus a `src/models/index.ts` whose `allModels` holds them all. Outside the template, `js-bao-codegen-v2 -i ../primitive/dev/db3-types -o src/models` generates the whole directory in one run.
 - **Swift** — `bao-codegen.json` at the root of the target's source directory:
 
   ```json
   { "input": "../../../primitive/dev/db3-types/workspace.toml" }
   ```
 
-  The path resolves against the target directory.
+  The path resolves against the target directory. The Swift template's scripts read one type file as `input`. To generate from the whole `db3-types/` directory, use `{ "inputs": ["../../../primitive/dev/db3-types"] }` where `swift build` runs the SwiftPM codegen plugin without the template's scripts, or run `swift-bao-codegen --input <type file or directory> --output <dir>` yourself.
 
 To add or change a model: edit the type file, `primitive config push`, then run each client's codegen (`pnpm codegen` in the web client, `bash scripts/codegen.sh` in the Swift one). Never edit generated model files. See the databases guide (`primitive guides get databases`) for the type file and codegen setup.
 

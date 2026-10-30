@@ -77,6 +77,10 @@ primitive waitlist remove <waitlist-id>                  # drop an entry
 
 Use `create`, `list`, `get`, `delete`, `quota`, and `accept` to manage invitations. Admins and owners manage all invitations; members manage their own. See the examples below and the generated client reference for signatures.
 
+The invitation email is stored trimmed and lowercased; a case variant of a member or pending email is refused as a duplicate (`USER_ALREADY_MEMBER`, `INVITATION_PENDING`).
+
+A server function invites through `ctx.api.invitations` (everything but `accept`, member role only) — see [Server Functions — Inviting someone with no account](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#inviting-someone-with-no-account).
+
 ### Admin / member create
 
 Admins/owners can invite at any role; members can invite only at `role: "member"` and only when `memberInvitationsEnabled` is true (check `quota()` first). `sendEmail` defaults to `false` — when `true` the server delivers a default invitation email, otherwise you deliver the `inviteToken` yourself. `source` (≤64 chars) and `note` are optional audit/admin-UI metadata; `expiresAt` overrides the default expiry.

@@ -440,8 +440,8 @@ validate resource access in your code when the result must be caller-scoped.
 ### Checking a user's access
 
 A database id in the input is a claim, not a permission: `ctx.db3` reaches
-every database in the app (both reject `NOT_FOUND`, 404, for an id naming
-none). Gate in `authorize` with the caller's effective
+every database in the app (both reject `DB3_NOT_FOUND`, 404, for an id naming
+none, or one that was deleted). Gate in `authorize` with the caller's effective
 level, `auth.db3(id, type).permissions()` → `"reader" | "read-write" | "owner" | null`:
 
 ```ts
@@ -655,6 +655,28 @@ can publish; no capability is required.
 
 Check the caller’s access to the resource before authorizing its channel.
 
+## Inviting someone with no account
+
+`ctx.api.invitations` creates an app invitation with no grant attached; the
+invitee passes an invite-only app's gate and becomes a member at sign-up.
+Branch on `ctx.api.users.lookup` (`{ exists, user? }` for a member of THIS
+app), then deliver the returned `inviteToken` yourself:
+
+```ts
+const found = await ctx.api.users.lookup({ email });
+if (!found.exists) {
+  const inv = await ctx.api.invitations.create({ body: { email } });
+  const url = `https://myapp.example/invite/accept?inviteToken=${inv.inviteToken}`;
+  await ctx.api.email.send({ body: { to: email, subject: "You're invited", htmlBody: `<a href="${url}">Join</a>` } });
+}
+```
+
+- `get({ invitationId })` (with `inviteToken` and `status`), `list({ limit, cursor })` and `delete({ invitationId })` reach every invitation in the app; member invitation settings and quotas do not apply.
+- `role` is `"member"` only: `admin`/`owner` answers `403 FUNCTION_INVITE_MEMBER_ONLY`. Promote after sign-up with `ctx.api.users.setRole` (`users:setRole` capability).
+- Duplicates answer `400 USER_ALREADY_MEMBER` or `400 INVITATION_PENDING` (`error.errorCode`). The email is stored lowercased; a case variant is a duplicate.
+- `ctx.api.invitations.accept` is refused (`403 FUNCTION_ROUTE_NOT_ALLOWED`); the invitee accepts in the client.
+- With no caller, `invitedBy` is `sys:<appId>` and `sendEmail: true` sends nothing.
+
 ## Sending email
 
 No capability — a cron-fired function sending a digest is the point of it:
@@ -717,10 +739,10 @@ await orders.patch(open.items[0].id, { data: { status: "picked" }, condition: { 
 The handle's contract:
 
 - **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
-- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers (writes leave them out). The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
 - **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `bulk`. `ctx.db3(id, type).bulk([...])` spans models, each op naming its `model`.
-- **Refusals reject:** `NOT_FOUND` (404, `db3Id` names no database in the app — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
+- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
 - **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
@@ -765,12 +787,17 @@ And the ones that are the same under both:
 | Response size | 1 MiB, kept on the run row | — |
 | Values per `$in` / `$nin` list | 1 000 | — |
 
-Task runs have no cap on how many run at once, per app or per function; only
-the start rate bounds them. Under heavy load on the deployment a run waits
-longer between steps. A start the runtime does not accept is retried for about
-a second, then answers `500` `INSTANCE_CREATE_FAILED` and the run settles
-`failed` `ENGINE_START_FAILED`: start again with a new `runKey`, since the old
-one replays the failed run.
+The platform adds no cap of its own on how many task runs run at once; the
+start rate above is its only control. The task runtime has its own
+ceilings: at most 50 000 task runs running at once per
+Cloudflare account, shared by every environment on that account, and up to 100 new starts per second per
+environment, shared by every app and function. A run only sleeping, waiting
+on a retry, or waiting on an event does not count toward the running ceiling;
+once it is reached, a waiting run that becomes ready waits for a free slot. Under this shared load a run waits longer
+between steps. A start the runtime refuses is retried for about a second,
+then answers `500` `INSTANCE_CREATE_FAILED` and the run settles `failed`
+`ENGINE_START_FAILED`: start again with a new `runKey`, since the old one
+replays the failed run.
 
 Use request `timeoutMs` for a precise wall-clock bound. `cpuMs` includes a
 runtime allowance of roughly two seconds. A timeout denies further platform

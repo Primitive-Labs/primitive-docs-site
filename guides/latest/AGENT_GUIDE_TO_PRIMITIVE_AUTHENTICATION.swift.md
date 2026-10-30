@@ -32,7 +32,7 @@ All flows below run on a plain client — no starter template needed:
   }
 ```
 
-In the starter template this wiring is owned for you by `PrimitiveAppState.initialize()` + `PrimitiveAuthManager`.
+In the starter template this wiring is owned for you by `AppState.initialize()` + `AuthModel`.
 
 ## Discovering Available Methods
 
@@ -110,7 +110,7 @@ no endpoint renders any other sign-in template, so that removal holds.
 The iOS template sends code-only emails by default. To add a link:
 
 - **With a web app:** set the environment’s `webUrl`, allow-list its `/oauth/callback` URL, and set `iosAppId`. Deploy the association document before enabling the `applinks:` entitlement. The template receives universal links through `.onContinueUserActivity` and custom schemes through `.onOpenURL`.
-- **Without a web app:** add `<scheme>://auth/magic-link` to `[auth].emailRedirectUris`, then set `authManager.sendsEmailSignInLink = true`. Init supplies the scheme registration and URL routing.
+- **Without a web app:** add `<scheme>://oauth/callback` to `[auth].emailRedirectUris`, then add the `PrimitiveOAuthRedirectURI` key to `Info-Partial.plist` with that same URI. Init supplies the scheme registration.
 
 Without the template, a client sends scheme links when `options.auth.oauthRedirectUri` is `<scheme>://oauth/callback` and that URL is in `[auth].emailRedirectUris`.
 
@@ -213,7 +213,7 @@ Set authentication fields in the environment’s `app.toml`, then run `primitive
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
-| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://` covers `myapp://oauth/callback` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
 | Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `appleSignInEnabled`, `appleAudiences`) → `config push`. Enable Sign in with Apple by setting `appleSignInEnabled = true` and `appleAudiences = ["<bundle-id>"]` (`hasApple` then reports true). |
 
@@ -337,7 +337,7 @@ let apple = try await client.signInWithApple(
 
 For Apple, this only resolves on **first** sign-in (`isNewUser == true`); a repeat sign-in from an existing Apple identity takes a different internal path and does not resolve `inviteToken` grants — call `client.invitations.accept(inviteToken:)` afterward for that case, or for any other post-hoc acceptance. The invite token is validated server-side only after the Apple identity token is cryptographically verified, and only before any user/grant mutation — so any bad, expired, or already-used token throws `HttpError` with `serverCode == "INVITE_TOKEN_INVALID"` (one code for every invalid-token reason, by design, to avoid a validity oracle). A domain-restricted app also throws `DOMAIN_NOT_ALLOWED` when the Apple-verified email itself falls outside `allowedDomains`.
 
-Gate the buttons on the auth config: `googleSignInAvailable` for Google — the provider enabled and this app's `ios` client entry usable — and `hasApple` for Apple (`AuthConfigInfo` also carries `appleSignInEnabled`). The starter template's `PrimitiveAuthManager` wraps both helpers and renders only the providers `availableProviders` reports.
+Gate the buttons on the auth config: `googleSignInAvailable` for Google — the provider enabled and this app's `ios` client entry usable — and `hasApple` for Apple (`AuthConfigInfo` also carries `appleSignInEnabled`). The starter template's `AuthModel` wraps both helpers and renders only the providers `availableProviders` reports.
 
 ---
 
@@ -378,8 +378,8 @@ let reg = try await client.auth.registerPasskey(deviceName: "My iPhone")
 A native request sends no `Origin`, so name the relying party (RP ID) for every ceremony; with none, the server picks among the app's configured relying parties and a multi-RP app can get the wrong one. The RP ID must be a key of `passkeyRpConfig` and appear in the app's `webcredentials:` entitlement; an unconfigured one fails with `PASSKEY_RP_NOT_CONFIGURED`.
 
 - Client-wide: `AuthConfig(passkeyRpId:)`. Per call: the `rpId:` argument on `signInWithPasskey` / `registerPasskey`, which wins over the config value.
-- `PrimitiveAppState.initialize()` sets `passkeyRpId` from the selected environment's `webUrl` host. When the configured relying party is another host (e.g. `passkeyRpConfig` names `example.com`, `webUrl` is `https://app.example.com`), every ceremony fails with `PASSKEY_RP_NOT_CONFIGURED` — override `passkeyRpId(for:)` on your `PrimitiveAppState` subclass to return the configured host (or `nil` to let the server pick), or add the `webUrl` host to `passkeyRpConfig`.
-- One ceremony in a `PrimitiveApp` app: `authManager.signInWithPasskey(rpId:)` / `authManager.enrollPasskey(deviceName:rpId:)`.
+- The starter template's `AppState.initialize()` sets `passkeyRpId` from the selected environment's `webUrl` host (`AppConfig.defaultPasskeyRpId(webUrl:)`). When the configured relying party is another host (e.g. `passkeyRpConfig` names `example.com`, `webUrl` is `https://app.example.com`), every ceremony fails with `PASSKEY_RP_NOT_CONFIGURED` — change what `AppState.clientOptions(config:storage:)` passes as `passkeyRpId` (this is app code) to return the configured host (or `nil` to let the server pick), or add the `webUrl` host to `passkeyRpConfig`.
+- One ceremony: `client.auth.signInWithPasskey(rpId:)` / `client.auth.registerPasskey(deviceName:rpId:)`, which the template's `AuthModel` calls directly.
 
 ### Manage
 
@@ -592,24 +592,24 @@ Call `waitForAuthBootstrap()` before checking sign-in state. It restores a usabl
 
 The neutral signal is the client's own auth state: `client.isAuthenticated()` is the live boolean, and `client.waitForAuthReady()` waits until a user is authenticated, returning the `userId` and auth `mode` (`online`/`offline`) — it resolves on sign-in, not on mere client readiness, and times out if nobody signs in. See [Token Inspection & Manual Token](#token-inspection--manual-token) for the compiled calls. Gate the app's main layout on that signal so child views can assume an authenticated user, and react to auth loss centrally. The patterns below are **framework wiring** around that flag — the starter template implements them; if you're not using it, replicate them.
 
-The template ([primitive-swift-template](https://github.com/Primitive-Labs/primitive-swift-template)) provides `PrimitiveAppState` + `PrimitiveAuthManager` (`@Published isAuthenticated`/`userId`/`loginState`, and `authFailure` — the last failed sign-in with its typed `AuthCode` and message, so branch on `authFailure?.code` rather than on message text) and `AuthGateView` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state.
+The template ([primitive-swift-template](https://github.com/Primitive-Labs/primitive-swift-template)) provides `AppState` + `AuthModel` (`@Published isAuthenticated`/`userId`/`loginState`, and `authFailure` — the last failed sign-in with its typed `AuthCode` and message, so branch on `authFailure?.code` rather than on message text) and `AuthGate` — SwiftUI glue that mirrors `client.isAuthenticated()` into observable state. All of it is app code: read and change it like the rest of your source.
 
 ### Layout gate (recommended default)
 
-SwiftUI glue (PrimitiveApp package) — `AuthGateView(appState:appName:authManager:) { content }` is the layout gate; it walks initializing → login (`PrimitiveLoginView`) → connecting → connected and only renders `content` when connected, so views inside never null-check the user:
+The template's `AuthGate(appState:appName:) { content }` is the layout gate; it walks initializing → restoring a session → login (`LoginView`) → connecting → connected and only renders `content` when connected, so views inside never null-check the user:
 
 ```swift
-AuthGateView(appState: appState, appName: "MyApp", authManager: authManager) {
+AuthGate(appState: appState, appName: "MyApp") {
   RootView()  // user guaranteed non-nil inside here
 }
 ```
 
 ### Reactive observers (downstream state)
 
-SwiftUI/Combine glue reacting to auth-state transitions — subscribe to `authManager.$isAuthenticated` to initialize or reset downstream state:
+SwiftUI/Combine glue reacting to auth-state transitions — subscribe to `auth.$isAuthenticated` (the `AuthModel` `AppState` owns) to initialize or reset downstream state:
 
 ```swift
-authManager.$isAuthenticated
+appState.auth.$isAuthenticated
   .sink { isAuth in
     if isAuth { Task { await myStore.initialize() } }
     else { myStore.reset() }

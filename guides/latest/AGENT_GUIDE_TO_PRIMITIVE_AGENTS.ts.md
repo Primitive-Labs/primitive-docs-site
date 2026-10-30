@@ -485,6 +485,11 @@ device and returns a live view.
   await view.close();
 ```
 
+The view is the session's own synced database, read from the device's copy. A member removed
+while a view is open sees it empty — `gone` set, one more `onChange`, the copy evicted; a
+removal that lands before the view is live rejects `open` with `DB3_ACCESS_REFUSED` and subscribes
+nothing. Close the view; a fresh `open` after being re-added works as before.
+
 ```typescript
   try {
     const { timeZone, locale } = Intl.DateTimeFormat().resolvedOptions();

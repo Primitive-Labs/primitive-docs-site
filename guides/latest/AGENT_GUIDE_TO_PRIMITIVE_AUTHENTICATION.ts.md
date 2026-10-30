@@ -218,7 +218,7 @@ Set authentication fields in the environment’s `app.toml`, then run `primitive
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
-| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://` covers `myapp://oauth/callback` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
 | Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
 
@@ -564,6 +564,7 @@ A Node script, cron job or CI step signs in with an app access token (`prim_…`
 - `initializeClient` resolves once `GET /me` has confirmed the token; the client then works as that user (`getUserId()`, `me.get()`, local stores scoped to the user).
 - A refused token rejects `initializeClient` with a 401 `JsBaoApiError` (`code: "INVALID_TOKEN"`); an unreachable server rejects with a `JsBaoNetworkError`.
 - `setToken(accessToken)` signs in asynchronously: `getUserId()` is null until it resolves. Await `waitForUserId()` before doing work as the new user.
+- In Node.js the session lives in SQLite through `better-sqlite3` when it is installed and built, in memory when it is not installed; an installed but unbuilt `better-sqlite3` rejects `initializeClient` with `JsBaoError` `code: "STORAGE_UNAVAILABLE"` — run `pnpm rebuild better-sqlite3`, or pass `storageConfig: { type: "memory" }` for a run that needs no store.
 
 **Watch out when a token stops working:** the client never refreshes, persists or discards an access token. A revoked or expired token emits one `auth-failed { reason: "access_token_rejected", code }` (`INVALID_TOKEN` over HTTP, `TOKEN_REVOKED` on the socket) and the token stays set. Handle that event: mint a new token and `setToken` it, or exit.
 
@@ -665,7 +666,7 @@ Components inside the gate **don't** need to null-check `currentUser` or watch `
 
 ### Onboarding hand-off (template)
 
-Every sign-in method in the template funnels through a shared `/onboarding` route (`PrimitiveOnboarding`): `PrimitiveLogin` (OTP verify and passkey conditional UI) and the OAuth/magic-link callback push to it with `continueURL`, `isNewUser`, and `promptAddPasskey` as query params (state survives a refresh), and the route handles profile completion and the passkey prompt before navigating to the continue URL. Configure the target with `onboardingRoute` or `onboardingUrl` on `PrimitiveLogin`/`PrimitiveOauthCallback`; omit both and sign-in navigates straight to the continue URL. Customize the step (name/avatar required or optional, passkey prompt) via the `PrimitiveOnboarding` props where the route is declared.
+Every sign-in method in the template funnels through a shared `/onboarding` route (`PrimitiveOnboarding`): `PrimitiveLogin` (OTP verify and passkey conditional UI) and `PrimitiveSignInCallback` (the emailed-link/OAuth callback page) push to it with `continueURL`, `isNewUser`, and `promptAddPasskey` as query params (state survives a refresh), and the route handles profile completion and the passkey prompt before navigating to the continue URL. `PrimitiveLogin` takes `onboardingRoute` or `onboardingUrl` to configure the target (omit both and sign-in navigates straight to the continue URL); `PrimitiveSignInCallback` always hands off to the route named `"onboarding"` — rename it in `src/router/routes.ts` if you rename the route. Customize the step (name/avatar required or optional, passkey prompt) in `PrimitiveOnboarding.vue` directly — it's template code, not a props contract.
 
 ### Reactive watchers (downstream stores)
 

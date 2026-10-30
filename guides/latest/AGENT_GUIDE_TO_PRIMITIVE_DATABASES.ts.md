@@ -50,7 +50,9 @@ type = "number"
 type = "number"
 ```
 
-2. Point the client codegen at that file (see [Codegen](#codegen)), then `primitive config push`.
+A model needs no `id` field; every record gets one, minted on create.
+
+2. Point the client codegen at the `db3-types/` directory (see [Codegen](#codegen)), then `primitive config push`.
 3. Create (or get-or-create) a database of the type and subscribe:
 
 ```typescript
@@ -89,8 +91,9 @@ A type is the schema for every database of that type, every client, and every fu
 | `[type] name` | The type's name — what `create({ type })`, `ctx.db3(id, "<name>")` and `--type` take |
 | `[type] timestamps` | `{ create = "<field>", update = "<field>" }` — epoch-ms numbers stamped on every create/update by any writer; declare the fields `number` |
 | `[type] autoPopulatedFields` | `{ field = "user.userId" }` fills on create; `{ field = { value = "…", on = ["update"] } }` names lifecycles. Fills only absent/`null` fields |
+| `[type] models` | `["<key>", …]` — models this type holds that another file in `db3-types/` declares. Push includes those declarations. Once any file names one, a name no file declares, or one model declared differently in two files, is refused at push |
 | `[models.<key>]` | A model. `<key>` is the stored model name (used by functions, the CLI, includes); `class_name` is the generated class/struct |
-| `[models.<key>.fields.<field>]` | `type` = `string` \| `number` \| `boolean` \| `date` \| `id` \| `stringset`; options `required`, `default`, `indexed`, `unique`, `enum` (string only; types the generated field, writes unchecked), `max_count` / `max_length` (stringset: member count / each member's length, client-checked), `auto_assign`, `auto_stamp` (`create`\|`update`\|`both`; epoch ms, stamped by whichever side writes). A `date` field takes an ISO 8601 string (or a number) |
+| `[models.<key>.fields.<field>]` | `type` = `string` \| `number` \| `boolean` \| `date` \| `id` \| `stringset` (declare `id` only to set its options; an undeclared `id` is minted on create); options `required`, `default`, `indexed`, `unique`, `enum` (string only; types the generated field, writes unchecked), `max_count` / `max_length` (stringset: member count / each member's length, client-checked), `auto_assign`, `auto_stamp` (`create`\|`update`\|`both`; epoch ms, stamped by whichever side writes). A `date` field takes an ISO 8601 string (or a number) |
 | `[[models.<key>.unique_constraints]]` | `name` + `fields` — a compound unique key (upsert target). A unique constraint applies to scalar fields only. A `stringset` is refused `UNIQUE_ON_STRINGSET` at push, and a client model declaring one throws `UniqueStringsetError` |
 | `[models.<key>.relationships.<rel>]` | `type` = `refersTo` \| `hasMany` (`model`, `related_id_field`, optional `order_by_field`, `order_direction`) or `hasManyThrough` (`model`, `join_model`, `join_model_local_field`, `join_model_related_field`) |
 | `[triggers.<key>] triggers = [...]` | `{ on = "create"\|"update"\|"save", when = "<CEL>", set = { field = "<CEL>" } }` or `refuse = { code = "…", message = "…" }` |
@@ -107,10 +110,10 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `record.*`, `da
 
 ## Codegen
 
-Every codegen reads the **same type file**, so clients and functions agree on model names and fields (a typed database refuses models it doesn't declare).
+Every codegen reads the **same type files**, so clients and functions agree on model names and fields (a typed database refuses models it doesn't declare). Point client codegen at the `db3-types/` directory: it reads every `*.toml` in it and generates each model once — one set of models and one registration list for every kind of database the app opens. A model two files declare differently is refused, naming both files and the fields. Generated headers name the input files.
 
-- Web: in the template's `codegen` script, set js-bao-codegen-v2's input to the type file (`-i ../primitive/dev/db3-types/workspace.toml -o src/models`); change only `-i` — the script also runs the other generators. It writes `<Class>.generated.ts` per model and an `index.ts` exporting `allModels`; pass `allModels` to the client at initialization. The template's `dev`, `build` and `test` scripts run `pnpm codegen` first.
-- Functions: `primitive config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; `ctx.db3(id, "<type>")` then accepts only existing types, `.model("<key>")` only declared models, and rows are typed.
+- Web: the template's `pnpm codegen` needs no edit. It runs js-bao-codegen-v2 once per type file in the environment's `db3-types/`, writing `src/models/<type>/`, and writes `src/models/index.ts`, whose `allModels` holds every type's classes. Pass `allModels` to the client at initialization. A model shared through `[type] models` is generated only under the type that declares it. The template's `dev`, `build` and `test` scripts run `pnpm codegen` first. Outside the template, run `js-bao-codegen-v2 -i ../primitive/dev/db3-types -o src/models` to get one run over the whole directory (`-i` also takes files, repeated). It writes `<Class>.generated.ts` per model and one `index.ts` exporting `allModels`. `--schema-import` is refused when more than one input declares models.
+- Functions: `primitive config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; `ctx.db3(id, "<type>")` then accepts only existing types, `.model("<key>")` only declared models, and rows are typed (a type's `timestamps` fields required numbers on read rows; writes leave them out).
 
 A database that grew without a type: `primitive db3 schema <db3-id> --toml --output primitive/dev/db3-types/<name>.toml` writes its observed fields as a type file to review, push and attach.
 
@@ -155,7 +158,7 @@ const page = await tasks.query({ filter: { completed: false }, sort: { priority:
 const { count } = await tasks.count({ filter: { completed: false } });
 ```
 
-Operators: `$eq $ne $gt $gte $lt $lte $in $nin $exists`, text `$startsWith $endsWith $containsText`, string sets `$contains $all $size`, and `$and $or`. Values compare as stored (`{ n: 5 }` never matches `"5"`). `{ field: null }` matches unset and stored-null; `$exists: false` only never-written; `$ne`/`$nin` also match unset/null; `{ field: { $eq: null } }` matches nothing. Sorting puts unset and null together — first ascending, last descending.
+Operators: `$eq $ne $gt $gte $lt $lte $in $nin $exists`, text `$startsWith $endsWith $containsText`, string sets `$contains $all $size`, and `$and $or`. Values compare as stored (`{ n: 5 }` never matches `"5"`). `{ field: null }` matches unset and stored-null; `$exists: false` only never-written; `$ne`/`$nin` also match unset/null; `{ field: { $eq: null } }` matches nothing. Sorting puts unset and null together — first ascending, last descending. A field can't go back to never-written once a write names it: assigning `undefined` (or `null`) stores `null`, with no operation that removes the key again; clearing a field means writing `null` to it, after which `$exists: false` stops matching but `{ field: null }` still does.
 
 ### Aggregations
 
@@ -249,7 +252,7 @@ Also group by membership (`{ field: "tags", contains: "urgent" }` → group key 
   const urgent = await Task.query({ tags: { $contains: "urgent" } });
 ```
 
-Batches: `BaseModel.withTransaction(async () => { … })` applies the writes together (one unit per database); `{ atomic: false }` lets each stand alone.
+Batches: `BaseModel.withTransaction(async () => { … })` applies the saves the callback made as one unit per database (the room applies it whole or refuses it whole); `{ atomic: false }` lets each stand alone. "Whole" describes that unit, not the callback: if the callback throws, the saves it already made are not undone — they still land together, and the error rethrows after.
 
 ```typescript
   await BaseModel.withTransaction(async () => {
@@ -309,7 +312,7 @@ Use a bulk load — not saves or `bulk()` — for imports, reference datasets, a
 
 CLI: `primitive db3 ingest <db3-id> --input <dir> -y` (one `<model>.ndjson[.gz]` per model, each line an id and a patch), `primitive db3 ingests get|abort <db3-id> <session-id>`. To move a database: `primitive db3 export <db3-id> --output <dir>`, then `primitive db3 import <dir>` (a new id), `--into <db3-id>`, or `--keep-id` (the exported id, which must be free in the target app).
 
-- A row is `{ model, id, patch }`: values replace fields, `null` removes one, `{ "_deleted": true }` deletes the record.
+- A row is `{ model, id, patch }`: values replace fields, `{ "_deleted": true }` deletes the record. `null` stores `null` on a plain field (it does not remove the key); on a string-set field it empties the set.
 - `mode: "merge"` (default) touches only named records; `mode: "refresh"` also deletes every record of the rows' models no row names.
 - Rows that break the type, a record's value rules, or a unique key are skipped and counted in `refusedRows` (`refusedSample` names a few); the load continues.
 - Records appear together at completion; subscribed devices receive them in chunks. App writes made during the load win over conflicting rows.
@@ -386,19 +389,53 @@ Every index costs on every write (server and each synced device), so declare `in
 
 | Call | Does |
 |---|---|
-| `client.db3.subscribe(id)` | Handle with `available` (readable copy on device), `ready` (caught up), `state`, events, `dispose()`. `ready` rejects `DB3_READY_TIMEOUT` (30 s without progress; `subscribe(id, { readyTimeoutMs })`, Swift `Db3SubscribeOptions(readyTimeout:)`), `DB3_ACCESS_REFUSED`, `DB3_SYNC_OFF`, `NOT_A_DB3` |
+| `client.db3.subscribe(id)` | Handle with `available` (readable copy on device), `ready` (caught up), `state`, events, `dispose()`. `ready` rejects `DB3_READY_TIMEOUT` (30 s without progress; `subscribe(id, { readyTimeoutMs })`, Swift `Db3SubscribeOptions(readyTimeout:)`), `DB3_ACCESS_REFUSED`, `DB3_SYNC_OFF`, `DB3_DELETED` (the database was deleted), `DB3_DISPOSED` (the subscription ended first), `NOT_A_DB3` |
 | `client.db3.unsubscribe(id)` | Disposes every handle for the database |
 | `client.db3.refresh(id)` | Subscribe → caught up → dispose |
 | `client.db3.state(id)` | `{ resident, subscribed, phase, progress, rows, pendingWrites, lastSyncAt, permission, error }` without subscribing |
 | `client.db3.stored()` | Databases this device holds for the signed-in user |
 | `client.db3.evict(id, { force })` | Delete the local copy; `DB3_PENDING_WRITES` unless `force` |
-| `client.db3.setRetentionPolicy(...)` | Evict automatically (session-only, max count/bytes, TTL) |
+| `client.db3.setRetentionPolicy(...)` | Evict automatically (session-only, `maxDocs`, `ttlMs`); never a subscribed copy or one with unsent writes |
 
-`phase`: `idle`, `opening`, `loading`, `catching-up`, `live`, `reconnecting`, `gone`. Events: `db3:state`, `db3:ready`, `db3:rows` (`changes`, `origin`: `local`\|`remote`\|`sibling`), `db3:write-refused`, `db3:evicted`, `db3:gone` (`reason`: `permission`\|`sync-off`\|`client-outdated`), `db3:error`.
+`phase`: `idle`, `opening`, `loading`, `catching-up`, `live`, `reconnecting`, `gone`. Events: `db3:state`, `db3:ready`, `db3:rows` (`changes`, `origin`: `local` this device's own write, applied before the database has seen it \| `sibling` another client on the same local store \| `remote` the database changing the local copy — a change from elsewhere, or the database correcting/reverting this device's own write), `db3:write-refused`, `db3:evicted`, `db3:gone` (`reason`: `permission`\|`sync-off`\|`client-outdated`\|`deleted`), `db3:error`.
+
+`client.db3.delete` ends the deleting client's own subscriptions as evicted (`db3:evicted`; a pending `ready` rejects `DB3_DISPOSED`); the other subscribed clients get `db3:gone` with `deleted`.
 
 A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) resolves at once, online or offline, with `pendingCreate` true in the state, and the client saves it under the same id in the background (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A refusal only the server decides (`DB3_TYPE_NOT_FOUND`, `DB3_TYPE_REFUSED`) arrives as that event, never as a rejection of `create`. Await `commitOfflineCreate` with the id to get the server's answer (`created`, or `refused` with the reason); `client.db3` calls that ask the server about the database wait for the commit on their own, rejecting `PENDING_CREATE` offline or after 30 s. A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
 
-Storage: web clients need `databaseConfig: { type: "opfs", options: { workerURL } }` (add `brokerURL` to share across tabs; serve `sql-wasm.wasm` beside the worker, copied from the `sql.js` package js-bao installed — a wasm from another `sql.js` version fails startup with `sql.js wasm mismatch`; the template's `pnpm codegen` copies it); Node uses `databaseConfig: { type: "node-sqlite", options: { recordLogDirectory } }` with a persistent directory. Without suitable storage the client reports `FORMAT2_STORAGE_UNAVAILABLE`. The browser's answer to the persistent-storage request is `persisted`, `granted`, `declined` or `unsupported`; on the last two it may clear the copy under storage pressure.
+`setRetentionPolicy({ default: "persist", maxDocs })` keeps at most `maxDocs` of the copies `stored()` lists, subscribed ones included, evicting the least recently opened first (`db3:evicted` with `reason: "retention"`). A subscribed copy, one with unsent writes, one still being created (`pendingCreate`) and one another tab holds are never evicted and still count, so the device may keep more. `maxBytes` never removes a database copy; `maxDocs: 0` means no cap.
+
+A `DB3_DISPOSED` rejection carries a `reason` in its details saying why the subscription ended: `disposed` (`dispose()`), `destroyed` (the client was destroyed; `subscribe` on a destroyed client throws the same), `identity-changed` (a sign-out, or another user signed in: subscribe again under the new user) or `evicted` (the local copy was removed).
+
+**Storage on the web.** A web client keeps its databases in the browser's origin-private file system through the `opfs` engine: a worker, a broker that shares one copy across the app's tabs, and two wasm files. The Vue template ships this in `src/config/storage.ts`; any other web app writes the same module and passes `databaseConfig: getDatabaseConfig()` to the client:
+
+```typescript
+// src/config/storage.ts in the Vue template
+import type { DatabaseConfig } from "js-bao-wss-client";
+import workerURL from "js-bao/format2-worker?worker&url";
+import brokerURL from "js-bao/format2-broker?url";
+import sqliteWasmURL from "js-bao/sqlite3.wasm?url";
+
+function locateFile(file: string): string {
+  if (file === "sqlite3.wasm") return sqliteWasmURL;
+  if (file === "sql-wasm.wasm") return "/sql-wasm.wasm"; // copied into public/
+  throw new Error(`locateFile: no URL for ${file}`);
+}
+
+export function getDatabaseConfig(): DatabaseConfig {
+  return { type: "opfs", options: { workerURL, brokerURL, locateFile } };
+}
+// Pass it to the client: initializeClient({ ..., databaseConfig: getDatabaseConfig() })
+```
+
+Node uses `databaseConfig: { type: "node-sqlite", options: { recordLogDirectory } }` with a persistent directory. Without suitable storage the client reports `FORMAT2_STORAGE_UNAVAILABLE`. The browser's answer to the persistent-storage request is `persisted`, `granted`, `declined` or `unsupported`; on the last two it may clear the copy under storage pressure.
+
+Watch out when setting up web storage:
+
+- `brokerURL` is started as a classic script: pass the bundle's URL (`js-bao/format2-broker?url`), never a module or a constructor import. To start a module SharedWorker yourself, pass `spawnBroker: () => new SharedWorker(url, { type: "module" }).port` instead. With neither, a second tab of the same database is refused.
+- `locateFile` is asked for exactly two names, `sql-wasm.wasm` and `sqlite3.wasm` (import it from `js-bao/sqlite3.wasm`): answer each by name and throw on any other. A name passed through resolves to the app's `index.html`, which fails to load as wasm.
+- Import the worker and broker as URLs (`?worker&url`, `?url`), which a Node test run imports as plain strings. Keep `?worker` and `?sharedworker` constructor imports out of any module a test imports: importing one starts a worker.
+- Serve the `sql-wasm.wasm` from the `sql.js` package js-bao installed, and copy it again when that version changes: a wasm from another `sql.js` version fails startup with `sql.js wasm mismatch`. The template's `pnpm codegen` copies it into `public/`.
 
 ### Re-rendering on change
 
@@ -424,7 +461,7 @@ Different fields of a record both survive; the same field converges on one write
 
 ### Write refusals
 
-A device write (save, patch, delete, increment) applies to the local copy and resolves before the database has seen it. If the database refuses it at sync, the record reverts and `db3:write-refused` carries `writes` (every affected write, in order, to redo), `error.code`, and `conflictingRecord`/`current` where relevant. Pass `confirm: true` (Swift `Db3WriteOptions(confirm: true)`) on the write instead to wait for the database's answer at the call site and reject there if it's refused, rather than handling `db3:write-refused` afterward.
+A device write (save, patch, delete, increment) applies to the local copy and resolves before the database has seen it. The device refuses three writes itself, before anything is sent: a write while the user holds `reader`, and, once the device has opened a typed database, a model the type doesn't declare (`DB3_MODEL_NOT_DECLARED`) or a value failing a field's declared kind, e.g. `""` for a `date` (`DOCUMENT_ENTRY_INVALID`, the database's own message). The database remains the authority for every other refusal. If the database refuses a write at sync, the record reverts and `db3:write-refused` carries `writes` (every affected write, in order, to redo), `error.code`, and `conflictingRecord`/`current` where relevant. Pass `confirm: true` (Swift `Db3WriteOptions(confirm: true)`) on the write instead to wait for the database's answer at the call site and reject there if it's refused, rather than handling `db3:write-refused` afterward.
 
 ```typescript
   client.on("db3:write-refused", (event) => {
@@ -484,7 +521,7 @@ App owners/admins read, write and manage every database.
   await permissions.clearLinkAccess();
 ```
 
-Grants by email work before the person joins (pending invitation). Group grants follow group membership.`client.db3.permissions(id).requestAccess({ permission })`lets a member ask the owner. Removing a grant turns the user's subscription `gone` at once: the local copy stays readable, new writes are refused `WRITE_ACCESS_DENIED`, and queued writes stay until access returns or you evict.
+With `sendEmail: true`, each new grantee gets an email; its link is `documentUrl` when you pass one, otherwise the app's base URL. Granting by email with `sendEmail: true` needs the app's base URL set (the invitation links to it). Grants by email work before the person joins (pending invitation). Group grants follow group membership.`client.db3.permissions(id).requestAccess({ permission })`lets a member ask the owner. Removing a grant turns the user's subscription `gone` at once: the local copy stays readable, new writes are refused `WRITE_ACCESS_DENIED`, and queued writes stay until access returns or you evict.
 
 ### App access
 
@@ -559,11 +596,69 @@ A collection is a set of databases shared together: its members reach every data
 
 ### Custody
 
-Every database has a `custodian`: `user:<userId>` (holder and owner; a member's own creates, a function's creates for its caller) or `app` (no owner; created from the CLI's admin token with no custodian, by an app admin naming `custodian: "app"`, or by a function naming it with capability `db3:transfer`). Transfer: owner → another member (old owner keeps `read-write`); to/from the app needs an app admin (`primitive db3 transfer <db3-id> app`) or `ctx.api.db3.transfer({ db3Id, body: { to } })` with `db3:transfer`. When a member leaves the app, databases they hold pass to the app if another user holds an accepted grant, any group is granted, or app access is set (link access and unaccepted invitations don't count); otherwise they are deleted. List by holder: `primitive db3 list --custodian app|user:<id>`; `client.db3.listMine()` lists the databases the signed-in user can open.
+Every database has a `custodian`: `user:<userId>` (holder and owner; a member's own creates, a function's creates for its caller) or `app` (no owner; created from the CLI's admin token with no custodian, by an app admin naming `custodian: "app"`, or by a function naming it with capability `db3:transfer`). Transfer: owner → another member (old owner keeps `read-write`); to/from the app needs an app admin (`primitive db3 transfer <db3-id> app`) or `ctx.api.db3.transfer({ db3Id, body: { to } })` with `db3:transfer`. When a member leaves the app, databases they hold pass to the app if another user holds an accepted grant, any group is granted, or app access is set (link access and unaccepted invitations don't count); otherwise they are deleted. List by holder: `primitive db3 list --custodian app|user:<id>`.
+
+`client.db3.listMine()` lists the databases the signed-in user can open: held, shared with them, then app access, each entry naming its listing as `via`. Pass `via` to read only some; page with `cursor`. A sync-off database is not listed (the admin listing still shows it).
+
+```typescript
+  const ids = new Set<string>();
+  let page = await client.db3.listMine();
+  for (;;) {
+    for (const db of page.items) ids.add(db.id); // db.via: "held" | "shared" | "app"
+    if (!page.hasMore) break;
+    page = await client.db3.listMine({ cursor: page.nextCursor });
+  }
+
+  // Only the ones shared with this user:
+  const shared = await client.db3.listMine({ via: ["shared"] });
+```
+
+### A per-user database the user can only read
+
+A function creates (or finds) a user's database with that user as its only reader in one call: `permission: "reader"` on `ctx.api.db3.getOrCreateWithAlias` writes no owner row and one `reader` grant for the alias's user, who never holds write access. The function declares `db3:setOwnerRow`. Fill its records from a function (`ctx.db3(id, type)` without `asUser`) or with a console-admin credential: the database is synced and user-held, so an app owner or app admin with no grant on it is refused `403` on its records until granted `read-write`.
+
+```toml
+# primitive/dev/functions/open-inbox.toml
+[function]
+key = "open-inbox"
+entry = "functions/open-inbox/index.ts"
+capabilities = ["db3:setOwnerRow"]
+```
+
+```ts
+import { defineFunction } from "primitive-functions";
+
+export default defineFunction("open-inbox", {
+  handler: async (_input, ctx) => {
+    const inbox = await ctx.api.db3.getOrCreateWithAlias({
+      body: {
+        alias: { scope: "user", aliasKey: "inbox", userId: ctx.user!.userId },
+        title: "Inbox",
+        type: "inbox",
+        permission: "reader",
+      },
+    });
+    return { id: inbox.id };
+  },
+});
+```
+
+`permission` (`owner` by default, `read-write`, `reader`) applies only when the call creates the database. Without it, the alias's user holds the database as owner, whoever calls.
+
+An app owner or admin can make the same call from a client; a member passing a level other than `owner` is refused `403`. A `reader` database the caller creates for themselves is read-only on their device at once: a save is refused there and nothing is sent.
+
+```typescript
+  const inbox = await client.db3.getOrCreateWithAlias({
+    alias: { scope: "user", aliasKey: "inbox", userId },
+    title: "Inbox",
+    type: "inbox",
+    permission: "reader",
+  });
+```
 
 ### Sync off
 
-`sync: false` at create (`primitive db3 create … --sync off`) or `client.db3.setSync(id, false)` / `primitive db3 sync set <db3-id> off` / `ctx.api.db3.setSync({ db3Id, body: { sync: false } })` (capability `db3:setSync`); app admins and app owners only. Effects: subscribers dropped (`db3:gone`, `sync-off`), socket opens refused `DB3_SYNC_OFF`, every user content action refused (the owner keeps delete and transfer), grants suspended, new grants refused `DB3_SYNC_OFF_NO_SHARING`, app access refused. Functions and admins keep full read/write. Flipping back restores grants; a flip never rebuilds data.
+`sync: false` at create (`primitive db3 create … --sync off`) or `client.db3.setSync(id, false)` / `primitive db3 sync set <db3-id> off` / `ctx.api.db3.setSync({ db3Id, body: { sync: false } })` (capability `db3:setSync`); app admins and app owners only. Effects: subscribers dropped (`db3:gone`, `sync-off`), socket opens refused `DB3_SYNC_OFF`, every user content action refused (the owner keeps delete and transfer), left out of every member's listing (`listMine`, the group and collection listings), grants suspended, new grants refused `DB3_SYNC_OFF_NO_SHARING`, app access refused. Functions and admins keep full read/write. Flipping back restores grants; a flip never rebuilds data.
 
 Serve a sync-off database through functions that check the caller and filter:
 
@@ -607,7 +702,7 @@ Store another system's id in a `unique` field and import with `upsertOn` it; let
 - **Index what you filter on.** An unindexed equality filter reads every record of the model; development builds log a warning.
 - **The first subscribe downloads the whole database** — show `state.progress`; keep databases partitioned so a device holds only what its user needs.
 - **Unsent writes live only on the device** — surface `state.pendingWrites`.
-- **One type file for every codegen.** Two schema files drift, and a typed database refuses models its type doesn't declare.
+- **One declaration per model.** A model two types hold is declared in one file and named by the other with `[type] models`; a second copy drifts, and push and codegen refuse two that differ.
 - **A new database's uploads wait for the server to have it** — an upload right after `create` is queued (`bytesTransferred: 0`) and sent once the create commits; await `commitOfflineCreate` first to upload at once.
 - **`confirm: true` on a device write waits for the next subscribe** when the database isn't subscribed.
 - **Upgrade client libraries forward only.** A local copy written by a newer client doesn't open in an older one; reload web tabs left open across a deploy.

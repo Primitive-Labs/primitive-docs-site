@@ -156,3 +156,13 @@ Rules:
 - Ctrl-C stops a tail cleanly.
 
 Slow invocations are included when their records become available. The command also reads additional pages when a poll finds more than one page of new records.
+
+## Server Timing
+
+Every REST response carries `Server-Timing: total;dur=<milliseconds>`, readable from any HTTP tooling (not just a browser's Network panel), to attribute slow requests to server-side handler work.
+
+`client.db3.create` / `getOrCreateWithAlias` and alias lookups add one entry per step that ran — `db3Lookup`, `db3Install`, `db3Row` — so a slow create shows which step took the time.
+
+## Response Caching
+
+Authenticated app API responses carry `Cache-Control: no-store`, and every client request bypasses the HTTP cache, so concurrent reads of the same URL reach the server in parallel rather than queuing. A caller using its own `fetch` should pass `cache: "no-store"` for the same behavior. Avatar responses are publicly cacheable. Blob downloads support conditional requests with `ETag` / `If-None-Match`; keep the original body yourself to reuse it after a `304`.

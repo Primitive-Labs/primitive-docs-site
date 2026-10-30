@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-10-29",
+    "stampedAt": "2026-10-30",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
@@ -844,53 +844,6 @@
       ]
     },
     {
-      "topic": "devtools",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md",
-      "description": "Using Document Explorer and Test Harness for debugging and testing",
-      "keywords": [
-        "devtools",
-        "debugging",
-        "testing",
-        "Document Explorer",
-        "Test Harness",
-        "browser",
-        "validation",
-        "inspection"
-      ],
-      "useCases": [
-        "Inspecting document data in the browser",
-        "Validating CRUD operations worked correctly",
-        "Running browser-based tests",
-        "Filtering and sorting records for inspection",
-        "Writing test cases for js-bao models"
-      ],
-      "concepts": [
-        "DevTools",
-        "Document Explorer",
-        "Test Harness",
-        "TestGroup",
-        "test cases",
-        "model inspection",
-        "data validation"
-      ],
-      "prerequisites": [
-        "databases"
-      ],
-      "relatedGuides": [
-        "databases"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.swift.md"
-        }
-      ]
-    },
-    {
       "topic": "configuration",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md",
       "description": "Configuration as code — TOML sync loop, environments, admin scopes, protection levels, CI sessions",
@@ -950,7 +903,9 @@
         "blob-buckets",
         "records",
         "logs",
-        "--json"
+        "--json",
+        "Server-Timing",
+        "caching"
       ],
       "useCases": [
         "Listing a function's runs and a task run's step trace",
@@ -959,10 +914,10 @@
         "Triaging a failing function",
         "Inspecting active connections and sessions for a user",
         "Reading database and document records from the CLI",
-        "Reading blob metadata without downloading the object"
+        "Reading blob metadata without downloading the object",
+        "Attributing a slow request with the Server-Timing header"
       ],
       "relatedGuides": [
-        "devtools",
         "server-functions"
       ],
       "prerequisites": []
