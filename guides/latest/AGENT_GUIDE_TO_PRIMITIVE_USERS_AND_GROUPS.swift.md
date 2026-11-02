@@ -171,6 +171,12 @@ primitive users list
 # name search (backed by a global search index on User.name).
 primitive users list --search "ali"
 
+# Real users only (`only`: just the +primitivetest test users; default
+# `include`). Every row carries `testUser`. A filtered page also reports
+# `scanned` and can be empty with `hasMore: true`: keep following the cursor.
+# The REST endpoint takes the same `testUsers=include|exclude|only`.
+primitive users list --test-users exclude
+
 # Block a user from signing in to this app, and restore them. Disabling signs
 # them out of this app (sessions deleted, API tokens revoked, open connections
 # dropped) and is reversible: memberships and ownership are untouched, and

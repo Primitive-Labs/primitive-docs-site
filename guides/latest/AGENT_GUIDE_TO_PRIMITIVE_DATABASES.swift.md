@@ -103,6 +103,7 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `record.*`, `da
 
 **Typed databases.** Create with `type` (`client.db3.create({ type })`, `primitive db3 create --type`), or attach later with `primitive db3 type attach <db3-id> <type>` / `client.db3.setType(id, type)`; a type is never detached. On a typed database, a model the type doesn't declare is refused `DB3_MODEL_NOT_DECLARED`, the type's indexes, constraints and rules apply to every writer, and a client's own model declaration is not installed. An attach over records that break the type is refused `DB3_TYPE_REFUSED` with `details.reasons`.
 
+
 **Changing a type.** Edit and `primitive config push`; the push reaches every database of the type in the background (`primitive db3-types push-status <type>`, `db3-types list`, `db3-types get <type>`). Adding models and fields is safe; a field newly `indexed`/`unique` is indexed everywhere. A database whose records break the new revision (e.g. a new `unique` over duplicates) refuses it and keeps its old revision; `push-status` names it, `primitive db3-types push <type> --retry <run-id>` retries after the fix. Removing a field leaves stored values; renaming is a new field plus a copy.
 
 **Reserved field names.** `type`, anything starting with `_`, and the names generated models use are refused with `RESERVED_FIELD_NAME` (use `kind`/`category`/`status`; `id` is allowed). The generated-model names: `CodingKeys`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
@@ -113,7 +114,7 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `record.*`, `da
 
 Every codegen reads the **same type files**, so clients and functions agree on model names and fields (a typed database refuses models it doesn't declare). Point client codegen at the `db3-types/` directory: it reads every `*.toml` in it and generates each model once — one set of models and one registration list for every kind of database the app opens. A model two files declare differently is refused, naming both files and the fields. Generated headers name the input files.
 
-- iOS: the template's `scripts/codegen.sh` regenerates the structs on every scripted build path (`./build.sh`, `./run.sh`, `./test.sh`) and every Xcode build; a bare `swift build` compiles the committed output. Put `bao-codegen.json` (`{ "input": "../../primitive/dev/db3-types/workspace.toml" }`, one type file) at the root of the app target's sources, and call `GeneratedModels.register(on: client)` once at startup (the template's `AppState` does). The template's scripts read only `input`; `{ "inputs": ["../../primitive/dev/db3-types"] }` (files or directories) is read by the SwiftPM codegen plugin when `swift build` runs it without the template's scripts. Elsewhere run `swift run swift-bao-codegen --input primitive/dev/db3-types --output Sources/<App>/Models/Generated` (`--input` repeatable; a file or a directory).
+- iOS: the template's `scripts/codegen.sh` regenerates the structs on every scripted build path (`./build.sh`, `./run.sh`, `./test.sh`) and every Xcode build; a bare `swift build` compiles the committed output. Put `bao-codegen.json` (`{ "inputs": ["../../primitive/dev/db3-types"] }`: type files or directories, generated with one `GeneratedModels` barrel; or `{ "input": "<type file>" }` for one) at the root of the app target's sources, and call `GeneratedModels.register(on: client)` once at startup (the template's `AppState` does). The SwiftPM codegen plugin reads the same file. Elsewhere run `swift run swift-bao-codegen --input primitive/dev/db3-types --output Sources/<App>/Models/Generated` (`--input` repeatable; a file or a directory).
 - Functions: `primitive config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; `ctx.db3(id, "<type>")` then accepts only existing types, `.model("<key>")` only declared models, and rows are typed (a type's `timestamps` fields required numbers on read rows; writes leave them out).
 
 A database that grew without a type: `primitive db3 schema <db3-id> --toml --output primitive/dev/db3-types/<name>.toml` writes its observed fields as a type file to review, push and attach.
@@ -308,7 +309,12 @@ For inspecting or fixing data by hand (admin login), not app code: `primitive db
   let index = try await client.db3.indexes.register(
     db3Id, Db3IndexRegistration(model: "contacts", field: "email")
   )
-  // index.name == "idx_records_contact_email"
+  // index.name == "idx_records_contacts_email"
+
+  let tags = try await client.db3.indexes.register(
+    db3Id, Db3IndexRegistration(model: "contacts", field: "tags", members: true)
+  )
+  // tags.name == "idx_members_contacts_tags", tags.members == true
 
   _ = try await client.db3.indexes.register(
     db3Id,
@@ -316,12 +322,18 @@ For inspecting or fixing data by hand (admin login), not app code: `primitive db
   )
 
   for each in try await client.db3.indexes.list(db3Id) {
-    print(each.name, each.fields, each.unique, each.origins)
+    print(each.name, each.fields, each.unique, each.members, each.origins)
   }
   try await client.db3.indexes.drop(db3Id, name: index.name)
 ```
 
-Every index costs on every write (server and each synced device), so declare `indexed` only on fields you filter on; adding one later is safe — existing records are indexed when the type is pushed or the index registered. Fields declared `indexed`/`unique` are indexed in every database of the type; register more per database (`primitive db3 indexes register <db3-id> --model <m> --field <f>`). Names: `idx_records_<model>_<field>`; composite (needs `unique` + `name`) `idx_named_<model>_<name>`; declared constraint `idx_uc_<model>_<constraint>`. Errors: `DB3_INDEX_NOT_UNIQUE` (existing duplicates, up to ten in `details.duplicates`), `DB3_INDEX_IN_USE` (dropping a declared index), `DB3_INDEX_SET_FIELD` (string sets need none). Registering/dropping needs the owner or an app admin; devices pick up new indexes at their next subscribe.
+Every index costs on every write (server and each synced device), so declare `indexed` only on fields you filter on; adding one later is safe — existing records are indexed when the type is pushed or the index registered. Fields declared `indexed`/`unique` are indexed in every database of the type; register more per database (`primitive db3 indexes register <db3-id> --model <m> --field <f>`). Names: `idx_records_<model>_<field>`; composite (needs `unique` + `name`) `idx_named_<model>_<name>`; declared constraint `idx_uc_<model>_<constraint>`. Errors: `DB3_INDEX_NOT_UNIQUE` (existing duplicates, up to ten in `details.duplicates`), `DB3_INDEX_IN_USE` (dropping a declared index), `DB3_INDEX_SET_FIELD` (a string set field: register it with `members: true`). Registering/dropping needs the owner or an app admin. A device's copy has an index registered later from the time the device next opens the database (its next subscribe, or a live subscription's reconnect).
+
+**Member indexes.** Unindexed, `$contains` on a string set reads every record's set: fine for thousands, seconds for millions. `{ model, field, members: true }` (CLI `--members`) registers `idx_members_<model>_<field>`, listed with `members: true`: the database answers `$contains`, any-of, membership groups and unfiltered facets on the field from it, a selective `$contains` in milliseconds, answers unchanged. Cost: one stored row per member (about an eighth more storage for two or three short members per record) and a little time on each write that changes the set. Errors: `DB3_INDEX_NOT_SET_FIELD` (a single-value field, `details.field`), `DB3_INDEX_EXISTS` (the field has the other kind of index, `details.index`), `DB3_INDEX_INVALID` (`members` with `fields`, `unique` or `name`). A device's copy builds nothing for it; its `$contains` reads the records it holds.
+
+Watch out when registering a member index on a large database: it is built from the existing records in that one request, which holds for about 1,000,000 records. Past that the registration can be refused and leaves no index; register the field first, then load, and each write keeps the index.
+
+On the device that calls them, `client.db3.indexes.register` and `drop` change the copy of a database this client has subscribed before they return, so the next query uses the index. At a subscribe, `ready` returns once the copy holds the database's index list; a query made after `available` and before `ready` may still scan.
 
 ### Limits
 
@@ -374,8 +386,35 @@ Every index costs on every write (server and each synced device), so declare `in
 
 `phase`: `idle`, `opening`, `loading`, `catching-up`, `live`, `reconnecting`, `gone`. Events: `db3:state`, `db3:ready`, `db3:rows` (`changes`, `origin`: `local` this device's own write, applied before the database has seen it \| `sibling` another client on the same local store \| `remote` the database changing the local copy — a change from elsewhere, or the database correcting/reverting this device's own write), `db3:write-refused`, `db3:evicted`, `db3:gone` (`reason`: `permission`\|`sync-off`\|`client-outdated`\|`deleted`), `db3:error`.
 
+A refusal is remembered on the device: the copy refuses writes (`WRITE_ACCESS_DENIED`) in every tab and after a relaunch. The next subscribe there asks the database again; `ready` resolves if access was restored, and rejects with the database's own reason if not. A database already gone for another reason that is then deleted emits `db3:gone` again, once, with `deleted` (at the latest on the next subscribe).
+
 A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) resolves at once, online or offline, with `pendingCreate` true in the state, and the client saves it under the same id in the background (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A refusal only the server decides (`DB3_TYPE_NOT_FOUND`, `DB3_TYPE_REFUSED`) arrives as that event, never as a rejection of `create`. Await `commitOfflineCreate` with the id to get the server's answer (`created`, or `refused` with the reason); `client.db3` calls that ask the server about the database wait for the commit on their own, rejecting `PENDING_CREATE` offline or after 30 s. A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
 
+`setRetentionPolicy` with `maxDocs` keeps at most that many of the copies `stored()` lists, subscribed ones included, evicting the least recently used first (`db3:evicted` with `reason: "retention"`). A copy's last use is the later of its last open and the end of its last subscription (a dispose, a sign-out, or the client shutting down). A subscribed copy, one with unsent writes and one still being created (`pendingCreate`) are never evicted and still count, so the device may keep more. `maxBytes` never removes a database copy.
+`ttl` evicts copies unused for that long. `maxDocs: 0` evicts every copy the policy may evict; `nil` is no cap.
+
+**Local-only databases.** `client.db3.create` with `localOnly: true` keeps a database on this device only: nothing of it is ever sent, now or in a later session. Writes are judged on the device with the database's own codes (unique keys, upserts, conditions, increments) and accepted at once, so `pendingWrites` stays 0 and `confirm: true` resolves at once. A subscription is `live` at once, `stored()` lists it with `localOnly: true`, `client.db3.indexes` works on the device, and it survives restarts for the same user.
+
+```swift
+  let db = try await client.db3.create(title: "Scratchpad", localOnly: true)
+
+  // Saves, queries and live updates work as on any database, at once.
+  _ = try Task(title: "Sketch the layout").save(in: db.id)
+  let open = try Task.query(["completed": false], options: QueryOptions(db3: [db.id]))
+
+  // It is listed with the other databases this device holds.
+  let local = try await client.db3.stored().filter(\.localOnly)
+
+  // Removing it removes its only copy.
+  _ = try await client.db3.delete(db.id)
+```
+
+| Refused | Code |
+|---|---|
+| `create` with `type`, `sync: false` or `custodian` | `LOCAL_ONLY_UNSUPPORTED_OPTION`, before anything is created |
+| A `client.db3` call that asks the server about it (`get`, `permissions`, `setSync`, `setType`, `blobs`, `ingests`, …), `evict`, and a member index | `DB3_LOCAL_ONLY` (`details.db3Id`), before any request |
+
+Only `client.db3.delete(id)` (nothing sent) and `logout(wipeLocal: true)` remove it. `evictAllLocal` and the retention policy keep it, and it counts toward no `maxDocs` cap. Another user signing in on the device does not see it; its own user sees it again.
 
 A `DB3_DISPOSED` rejection carries a `reason` in its details saying why the subscription ended: `disposed` (`dispose()`), `destroyed` (the client was destroyed; `subscribe` on a destroyed client throws the same), `identity-changed` (a sign-out, or another user signed in: subscribe again under the new user) or `evicted` (the local copy was removed).
 
@@ -653,6 +692,7 @@ Store another system's id in a `unique` field and import with `upsertOn` it; let
 - **Index what you filter on.** An unindexed equality filter reads every record of the model; development builds log a warning.
 - **The first subscribe downloads the whole database** — show `state.progress`; keep databases partitioned so a device holds only what its user needs.
 - **Unsent writes live only on the device** — surface `state.pendingWrites`.
+- **A local-only database has no other copy** — cleared app storage, a lost device or a wiping sign-out loses it for good; keep in one only what can be lost or rebuilt.
 - **One declaration per model.** A model two types hold is declared in one file and named by the other with `[type] models`; a second copy drifts, and push and codegen refuse two that differ.
 - **A new database's uploads wait for the server to have it** — an upload right after `create` is queued (`bytesTransferred: 0`) and sent once the create commits; await `commitOfflineCreate` first to upload at once.
 - **`confirm: true` on a device write waits for the next subscribe** when the database isn't subscribed.

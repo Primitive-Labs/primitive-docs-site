@@ -219,8 +219,13 @@ primitive analytics cohort-retention
 # Top users (default --window-days 30, --limit 10)
 primitive analytics top-users --window-days 7 --limit 20
 
-# Search users (give --query, or a signup filter)
+# Search users (give --query, a signup filter, or --test-users)
 primitive analytics user-search --query user@example.com
+
+# +primitivetest test users: exclude | include | only. Summary commands default
+# to exclude; events, events-grouped and user-search --query to include.
+primitive analytics overview --test-users include
+primitive analytics top-users --test-users only
 
 # Who joined the app on a given UTC day, or across a range of up to 90 days
 primitive analytics user-search --signup-day 2026-09-06
@@ -253,7 +258,9 @@ primitive analytics prompts --limit 5
 
 Use `analytics prompts` and `analytics integrations` for their respective services. Query `function.invoke` events to count or inspect function invocations.
 
-`--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
+`--test-users` is accepted by `overview`, `daily-active`, `rolling-active`, `cohort-retention`, `top-users`, `user-search`, `events` and `events-grouped`; omitted, the server default applies.
+
+`--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows, testUsers }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
 
 ---
 
@@ -291,7 +298,21 @@ GET /app/{appId}/api/analytics/errors/groups?windowDays=7&limit=50
 # Integrations / prompts (admin-only top lists)
 GET /app/{appId}/api/analytics/integrations?windowDays=30
 GET /app/{appId}/api/analytics/prompts/top?windowDays=30&limit=10
+
+# Test users: exclude | include | only on every overview, series, cohort,
+# users.top, users.search, events and events.grouped query
+GET /app/{appId}/api/analytics/overview/dau?testUsers=include
+GET /app/{appId}/api/analytics/events?windowDays=7&testUsers=only
 ```
+
+`testUsers` selects `+primitivetest` test users:
+
+| Query | Default |
+| --- | --- |
+| `overview.*`, `daily-active`, `rolling-active`, `cohort-retention`, `users.top`, `users.search` without `q` or with a signup filter | `exclude` |
+| `events`, `events.grouped`, `users.search` with `q` | `include` |
+
+The response echoes the mode in `testUsers`. A blank value is the default; any other value returns `400`.
 
 ### Response shapes
 
@@ -299,17 +320,17 @@ Every endpoint returns a JSON object, and `ctx.api.analytics` in a server functi
 
 | Query type — endpoint | Payload |
 | --- | --- |
-| `overview.dau` / `overview.wau` / `overview.mau` — `/overview/{dau,wau,mau}` | `{ value, previous, deltaPct }` |
-| `overview.growth` — `/overview/growth` | `{ window_days, retained_users, new_users, reactivated_users, churned_users, current_active, previous_active, deltaPct }` |
-| `daily-active` — `/daily-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }] }` |
-| `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }] }` shape |
-| `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages }` |
-| `users.top` — `/users/top` | `{ windowDays, limit, results: [{ userUlid, email, name, firstSeen, firstSeenInWindow, lastSeen, eventCount }] }` |
-| `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
+| `overview.dau` / `overview.wau` / `overview.mau` — `/overview/{dau,wau,mau}` | `{ value, previous, deltaPct, testUsers }` |
+| `overview.growth` — `/overview/growth` | `{ window_days, retained_users, new_users, reactivated_users, churned_users, current_active, previous_active, deltaPct, testUsers }` |
+| `daily-active` — `/daily-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }], testUsers }` |
+| `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }], testUsers }` shape |
+| `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages, testUsers }` |
+| `users.top` — `/users/top` | `{ windowDays, limit, testUsers, results: [{ userUlid, email, name, firstSeen, firstSeenInWindow, lastSeen, eventCount }] }` |
+| `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, testUsers, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
 | `users.detail` — `/users/{userUlid}/detail` | `{ user: { user_ulid, email, name }, stats: { first_seen, last_active, total_events, days_active }, events_by_action: [{ action, event_count, last_occurred }], events_by_feature: [{ feature, event_count, pct }] }` |
 | `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
-| `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
-| `events.grouped` — `/events/grouped` | `{ group_by, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
+| `events` — `/events` | `{ page, page_size, total_rows, testUsers, rows }` — row fields under [Event row shape](#event-row-shape) |
+| `events.grouped` — `/events/grouped` | `{ group_by, testUsers, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
 | `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
 | `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens, executionsWithCost, totalCost, avgCost }] }` — `totalCost` / `avgCost` are `null` when no execution in the window reported a cost |
 | `integrations` — `/integrations` | `{ windowDays, integrations: [{ integrationKey, invocations, errorRate, medianDurationMs, p10DurationMs, p50DurationMs, p95DurationMs }] }` |
@@ -322,6 +343,7 @@ Every endpoint returns a JSON object, and `ctx.api.analytics` in a server functi
 - **Activity is not a signup date.** `firstSeen` is the first retained event; `firstSeenInWindow` is the first event in the selected window. Use `signedUpAt` or `signupDay` for when the user joined the app.
 - **Series have different windows.** `daily-active` returns one row per day, including zeros (7–90 days, default 28). `rolling-active` returns 28 points; its `windowDays` sets each point's trailing window (1–28, default 7).
 - **Costs may be incomplete.** `totalCost` and `avgCost` cover `executionsWithCost`, not all executions. They are `null` when no price was reported. Label partial coverage and do not divide by all executions.
+- **Older events can count test users as real.** An event is classified when it is recorded; one recorded without the classification counts under `exclude` and never under `only`, until it leaves the 90-day retention window.
 - **System activity is excluded from user metrics.** Query `sys:<appId>` explicitly through user search or events when inspecting system work.
 - **Signup searches use activity records.** They omit users without activity in the retained 90 days; `signedUpAt` can be `null`. A signup range spans at most 90 days.
 - **Page signup searches.** While `truncated` is true, increment `offset` by the returned `limit` (1–100). Re-read a completed day if new signups could have shifted pages during the search.

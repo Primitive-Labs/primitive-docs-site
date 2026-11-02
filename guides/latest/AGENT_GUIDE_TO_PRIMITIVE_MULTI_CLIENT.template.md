@@ -69,10 +69,10 @@ Each client points at the type files by path; the `db3-types/` directory covers 
 - **Swift** — `bao-codegen.json` at the root of the target's source directory:
 
   ```json
-  { "input": "../../../primitive/dev/db3-types/workspace.toml" }
+  { "inputs": ["../../../primitive/dev/db3-types"] }
   ```
 
-  The path resolves against the target directory. The Swift template's scripts read one type file as `input`. To generate from the whole `db3-types/` directory, use `{ "inputs": ["../../../primitive/dev/db3-types"] }` where `swift build` runs the SwiftPM codegen plugin without the template's scripts, or run `swift-bao-codegen --input <type file or directory> --output <dir>` yourself.
+  Paths resolve against the target directory. `inputs` takes type files or directories and generates them all with one `GeneratedModels` barrel; `{ "input": "<type file>" }` names one. The Swift template's `scripts/codegen.sh` and the SwiftPM codegen plugin read the same file. Elsewhere run `swift-bao-codegen --input <type file or directory> --output <dir>` (`--input` repeatable).
 
 To add or change a model: edit the type file, `primitive config push`, then run each client's codegen (`pnpm codegen` in the web client, `bash scripts/codegen.sh` in the Swift one). Never edit generated model files. See the databases guide (`primitive guides get databases`) for the type file and codegen setup.
 

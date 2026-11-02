@@ -593,7 +593,9 @@ return { delivered: result.connections, truncated: result.truncated };
 - **One socket, one frame.** A client with several databases open is one connection, delivered once.
 - **Fan-out is bounded** at 64 unique connections per user, and the lookup behind it is bounded too; past either, the send delivers what it found and answers `truncated: true` — "there may be more", not an error.
 - **Payloads are capped at 64 KiB** serialized (`FUNCTION_SEND_PAYLOAD_TOO_LARGE`; nothing delivered).
-- `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`).
+- `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`). A browser tab keeps its connection id across reloads, and each tab has its own.
+
+Read `client.getConnectionId()` after `initializeClient` resolves: until the tab's id is settled it is empty.
 
 On the client, listen for the `directMessage` event:
 

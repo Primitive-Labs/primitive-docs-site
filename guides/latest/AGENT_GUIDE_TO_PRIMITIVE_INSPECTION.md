@@ -161,7 +161,7 @@ Slow invocations are included when their records become available. The command a
 
 Every REST response carries `Server-Timing: total;dur=<milliseconds>`, readable from any HTTP tooling (not just a browser's Network panel), to attribute slow requests to server-side handler work.
 
-`client.db3.create` / `getOrCreateWithAlias` and alias lookups add one entry per step that ran — `db3Lookup`, `db3Install`, `db3Row` — so a slow create shows which step took the time.
+`client.db3.create` / `getOrCreateWithAlias` and alias lookups add one entry per step that ran — `db3Lookup`, `db3Install`, `db3Begin`, `db3Row` — so a slow create shows which step took the time. A create also reports the new database's first request: `db3Room<Stage>` entries for the stages it timed (`db3RoomRead`, `db3RoomTables`, `db3RoomJudge`, ...) and `db3RoomResidual` for the part it could not time (startup and transport).
 
 ## Response Caching
 
