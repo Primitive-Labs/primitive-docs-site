@@ -82,9 +82,9 @@ Its fields: `refreshNetwork` and `refreshIfOlderThan` (both refresh *behind* the
 
 ### Supplementing user data — not replacing it
 
-For app-specific user data (preferences, settings, profile fields beyond name/email/avatar), extend the platform user rather than creating a parallel user model:
+For app-specific user data (preferences, settings, profile fields beyond name/email/avatar), extend the platform user rather than creating a parallel user model. For a handful of typed fields, declare them as [user properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) — `user-properties.toml`, pushed with `primitive config push`, read with `ctx.users.get`/`client.me.get` and written with `ctx.users.setProperties`/`client.me.update`. Reach for a per-user database (below) only for data too large or unstructured to be a property.
 
-**Do this:**
+**Do this (a per-user database, for larger personal data):**
 
 Declare the `profile` type the example creates, and push it with `primitive config push` before the first create:
 
@@ -147,7 +147,8 @@ user.id = generateNewId()         // Use platform userId instead
 
 | Storage | Use case |
 |---------|----------|
-| **A per-user database** (`getOrCreateWithAlias` with `scope: "user"`) | Personal settings and preferences, private to the user |
+| **A [user property](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md)** | A handful of typed fields on the user — a plan, a preference, a unique external id — optionally exposed to clients |
+| **A per-user database** (`getOrCreateWithAlias` with `scope: "user"`) | Larger or unstructured personal data — documents, history — private to the user |
 | **A shared database** (a team's or project's) | Profile data the people sharing that database see |
 | **A sync-off database read through a server function** | User data others see only in part (e.g., a public profile, a reputation score), each caller getting what the function returns |
 
@@ -193,6 +194,18 @@ primitive users set-profile <user-id> [--name <name>] [--avatar-url <url> | --cl
 ```
 
 An app owner or admin sets the same profile over REST with `PATCH /app/{appId}/api/users/{userId}/profile` and a body of `{ name?, avatarUrl? }` (`avatarUrl` is an `http:` or `https:` URL; `null` clears it); a server function calls `ctx.api.users.setProfile({ userId, body: { name } })`. An invalid value answers 400 with code `INVALID_PROFILE`.
+
+`--search` only matches an id, an email or a name substring (both `list` and `lookup`/`getBasic` read the live user records, so they never lag). For a records-style filter, sort, count or aggregate over the app's users — on `role`, `status`, `addedAt`, or a [declared property](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) (`properties.<name>`) — use `primitive users query`, `count` and `aggregate` (beta) instead:
+
+```bash
+primitive users query --filter '{"role":"admin"}' --sort '{"addedAt":-1}' --limit 50
+primitive users count --filter '{"status":"disabled"}'
+primitive users aggregate --op count --group-by role
+```
+
+These three read a per-app user index that follows a write within seconds, not the live user records, so a user just created, changed or deleted may take a moment to appear. `--filter`/`--sort` take the same grammar as a `db3` records query. `query --json`'s `meta.scans` names a field whose filter or sort scanned every row instead of using an index (unindexed base fields are `avatarUrl` and `disabledAt`; a property only if not declared `indexed`). `primitive users index status|rebuild|reconcile|limits` (also beta) inspects and operates that index: generation, shards with bounds and counts, the apply queue, last apply/reconcile slice (with its repair counts: `stamped`, `reprojected`, `deleted`, `applied`, `misplaced`, and the per-user claim check's `swept`/`claimed`/`claimConflicts`), the revalidation state (`oldestVerifiedAt`, `replicaCursor`, `sourceCursor`, `lastSlice`, `recentlyRead`), and shard limits.
+
+**Watch out when a record looks stale:** the index corrects any record within 24 hours even if a write never reached it, but a record `query`/`count`/`aggregate` just returned is re-checked and corrected sooner — within about a minute (the read hint) — rather than waiting its turn in that 24-hour sweep; this holds even for an app with no other traffic. `primitive users index reconcile` forces one revalidation slice on demand, and `reconcile --wait` repeats it until every record and member is checked, which is faster than waiting for the schedule.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -264,7 +277,7 @@ Groups are identified by `groupId` alone, unique across the app — no type, no 
 1. Create a group from a server function (`ctx.api.groups.create({ body: { name } })`) or the admin API (`primitive groups create`), and keep the `groupId` it returns; a client session's create is refused. See [Creating Groups](#creating-groups).
 2. Add members with `client.groups.addMember(groupId, ...)` (by `userId` or `email`), each a `manager` or `member` (the default).
 3. Share a database with the group with `client.db3.permissions(db3Id).grantGroup({ groupId, permission })`.
-4. For a sync-off database read through a server function, check membership in the function: in its `access` gate (`isMemberOf('<groupId>')`, the id the create returned) or, when the group depends on the input, in its code.
+4. For a sync-off database read through a server function, check membership in the function's `authorize` method: `requireMember(() => '<groupId>')` with the id the create returned, or `requireMember((input) => input.groupId)` when the group depends on the input.
 
 The full list/get/update/delete surface is in [Managing Groups](#managing-groups); membership in [Managing Members](#managing-members); roles, custody and transfer in [Group Roles](#group-roles).
 
@@ -355,9 +368,9 @@ Add a member by `userId` (always direct) or by `email` (direct if the email maps
     // Email isn't an app user yet. The server created an AppInvitation +
     // DeferredGroupAdd: email, appInvitationCreated, deferredId, expiresAt,
     // role, invitationId, inviteToken. Use inviteToken to build an accept
-    // URL; cancel via revokeDeferredGrant.
-    _ = try await client.invitations.revokeDeferredGrant(
-      deferredId: deferred.deferredId, type: .group
+    // URL; cancel with groups.revokePendingInvitation.
+    _ = try await client.groups.revokePendingInvitation(
+      groupId: "engineering", invitationId: deferred.invitationId
     )
   }
 ```
@@ -365,9 +378,15 @@ Add a member by `userId` (always direct) or by `email` (direct if the email maps
 Status meanings:
 - `"added"` — new membership created. `{ userId, role, userName?, userEmail?, addedAt, addedBy }`.
 - `"already_member"` — idempotent no-op. `role`/`addedAt`/`addedBy` reflect the pre-existing row.
-- `"pending_signup"` — email not yet an app user. Server created an `AppInvitation` + `DeferredGroupAdd`: `{ email, appInvitationCreated, deferredId, expiresAt, role, invitationId, inviteToken }`. Use `inviteToken` to build your own accept URL; the platform's default email is sent unless the underlying invitation was created with `sendEmail: false`.
+- `"pending_signup"` — email not yet an app user. Server created an `AppInvitation` + `DeferredGroupAdd`: `{ email, appInvitationCreated, deferredId, expiresAt, role, invitationId, inviteToken }`. No email is sent: build the accept URL from `inviteToken` and deliver it yourself (see [Invitations](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md)).
 
 Until a deferred add resolves, `isMemberOf` returns false for that email's user — do not assume membership before sign-up/accept.
+
+From the CLI (the admin API), name the member by user ID or by an existing app user's email:
+
+```bash
+primitive groups members add <group-id> <user-id|email> --role manager
+```
 
 **Don't do this:**
 
@@ -419,14 +438,14 @@ The email form is the right call when you don't know — and don't want to branc
 ```swift
   let pending = try await client.groups.listPendingInvitations(groupId: "engineering")
   // [["email", "role", "invitationId", "deferredId", "createdAt", "expiresAt", "addedBy"?]]
-  // deferredId → invitations.revokeDeferredGrant(deferredId:type: .group) cancels it
+  // invitationId → groups.revokePendingInvitation(groupId:invitationId:) cancels it
 ```
 
-Use this to render the "pending members" section of a group sharing UI without having to filter the lower-level `client.invitations.listDeferredGrants()` surface.
+Use this to render the "pending members" section of a group sharing UI.
 
 Pending invitations are visible to whoever can list members — the owner and managers always, other members when `settings.memberList` is `"members"` (the default) — plus app admins and owners.
 
-Each result includes a `deferredId`. Cancel it with`client.invitations.revokeDeferredGrant(deferredId: entry.deferredId, type: .group)`. Cancellation requires app-admin authority, being the one who created the invitation, or the owner/manager role on the group.
+Cancel one with`client.groups.revokePendingInvitation(groupId: groupId, invitationId: entry.invitationId)`: it removes the invitation's pending add to this group only. Cancellation requires app-admin authority, being the one who created the invitation, or the owner/manager role on the group.
 
 ### List a user's memberships
 
@@ -619,13 +638,14 @@ A function can check any level: a fixed one in its `authorize` (`requireMember((
 - Keep each group's `groupId` where the app looks it up (the record or metadata of what the group stands for): the server assigns it, so it cannot be derived from a name.
 - Do not duplicate platform identity fields in an app model.
 - Check `addMember.status`: an email may create a pending invitation rather than an immediate membership.
+- `primitive groups members add <group-id> <email>` adds an existing app user only and creates no pending add: an email with no app user is refused. Use `addMember` with `email` to add someone who hasn't signed up.
 - App owners and admins bypass CEL rules — rule sets, metadata rules, a legacy function's `access`. A function's `authorize` gives them no such pass. Test denials as a regular member.
 
 ## Error handling
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMemberByEmail(groupId:email:)` or `invitations.revokeDeferredGrant(deferredId:type: .group)`. |
+| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMemberByEmail(groupId:email:)` or `groups.revokePendingInvitation(groupId:invitationId:)`. |
 | `addMember` returns `status: "already_member"` | User already in the group | Idempotent — no error. |
 | 400 `GROUP_ID_NOT_ACCEPTED` on `groups.create` | The body sent `groupId` | Omit it; read `groupId` from the response. |
 | 400 on `groups.create` with `initialMetadata` | A staged category is unknown, reserved (`attrs`), fails its schema, or there are more than 10 | Fix the payload; nothing was created. |

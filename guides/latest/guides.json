@@ -15,12 +15,12 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-10-30",
+    "stampedAt": "2026-11-10",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
       "js-bao": "0.12.0",
-      "primitive-admin": "1.1.0",
+      "primitive-admin": "1.2.0",
       "primitive-app": "3.2.0"
     }
   },
@@ -189,7 +189,8 @@
         "databases",
         "authentication",
         "invitations",
-        "resource-metadata"
+        "resource-metadata",
+        "user-properties"
       ],
       "variants": [
         {
@@ -199,6 +200,65 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "user-properties",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.ts.md",
+      "description": "Typed, app-declared fields on the platform user: schema, client access, writes, unique lookup",
+      "keywords": [
+        "user properties",
+        "user-properties.toml",
+        "properties",
+        "client access",
+        "setProperties",
+        "addToSet",
+        "removeFromSet",
+        "getBy",
+        "unique constraint",
+        "initialProperties",
+        "ctx.users",
+        "auth.userProperties"
+      ],
+      "useCases": [
+        "Declaring typed fields on the platform user",
+        "Reading and writing a user's properties from a server function",
+        "Exposing a property to a client session",
+        "Looking up a user by a unique property value",
+        "Giving an invitee properties at signup",
+        "Querying users by a declared property"
+      ],
+      "concepts": [
+        "ctx.users.get",
+        "ctx.users.getBy",
+        "ctx.users.setProperties",
+        "ctx.users.addToSet",
+        "ctx.users.removeFromSet",
+        "ctx.users.query",
+        "ctx.invitations.getBy",
+        "auth.userProperties",
+        "client.me.update",
+        "UserProperties",
+        "ClientUserProperties"
+      ],
+      "prerequisites": [
+        "users-and-groups"
+      ],
+      "relatedGuides": [
+        "users-and-groups",
+        "access-control",
+        "server-functions",
+        "invitations"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.swift.md"
         }
       ]
     },
@@ -516,7 +576,8 @@
         "prompts",
         "app-secrets",
         "analytics",
-        "access-control"
+        "access-control",
+        "user-properties"
       ],
       "variants": [
         {
@@ -952,7 +1013,8 @@
         "Building a subscription-entitlement (Stripe billing) gate end to end"
       ],
       "relatedGuides": [
-        "resource-metadata"
+        "resource-metadata",
+        "user-properties"
       ],
       "prerequisites": []
     },

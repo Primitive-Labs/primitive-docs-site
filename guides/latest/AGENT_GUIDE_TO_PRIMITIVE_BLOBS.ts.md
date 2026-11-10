@@ -41,7 +41,7 @@ const blobs = client.db3.blobs(db3Id);
   const blobs = client.db3.blobs(db3Id);
 
   const list = await blobs.list();
-  const url = blobs.downloadUrl(blobId);              // synchronous, authenticated
+  const url = blobs.downloadUrl(blobId);              // synchronous
   const bytes = await blobs.read(blobId, { as: "arrayBuffer" });
 ```
 
@@ -138,10 +138,9 @@ const meta = await blobs.get(blobId);
 
 ## Downloading
 
-### Download URL (authenticated)
+### Download URL
 
-The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin— it works in an `<a href download>` or `window.location`.
-
+The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string. The URL carries no credentials: in an app built from the Vue template, its service worker adds the user's auth (see [Displaying images](#displaying-images)).
 ```typescript
   const url = blobs.downloadUrl(blobId, {
     disposition: "attachment",        // or "inline"
@@ -261,26 +260,17 @@ The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level
 
 ---
 
-## Service worker proxy (for `<img>` / `<video>`)
-
-The neutral blob calls here are `blobs.proxyUrl(blobId)` / `downloadUrl` (see [Download URL](#download-url-authenticated)) and `blobs.read(blobId, { as: "blob" })` (see [Read content into memory](#read-content-into-memory)). The rest is **web-DOM glue**: `downloadUrl` requires the request to carry the user's auth token, which `<img>` tags don't do, so on the web you either route through a service worker (`proxyUrl`) or read into memory and hand the element a Blob URL.
+## Displaying images
 
 ```typescript
-// web-DOM glue around proxyUrl / read — wiring an <img> src.
-if (blobs.hasServiceWorkerControl()) {
-  imageElement.src = blobs.proxyUrl(blobId, {
-    disposition: "inline",
-    attachmentFilename: "image.png", // optional
-  });
-} else {
-  // Fallback: read into memory and use a Blob URL.
-  const blob = await blobs.read(blobId, { as: "blob" }) as Blob;
-  imageElement.src = URL.createObjectURL(blob);
-  // Remember to URL.revokeObjectURL(...) when done.
-}
+  const imageUrl = blobs.downloadUrl(blobId, { disposition: "inline" });
 ```
 
-`proxyUrl` returns the same URL as `downloadUrl`; it just signals intent to be intercepted by the service worker. See the js-bao-wss-client README for a service-worker implementation.
+The image shows for a signed-in user who can read the database.
+
+Put the URL in an `<img>` or `<video>` source. In an app built from the Vue template, `public/sw.js` intercepts blob downloads and adds the user's auth, and `main.ts` mounts the app once the worker controls the page (or after 3 s). An app not built from the template needs a service worker like the one in the `js-bao-wss-client` README.
+
+Where no worker controls the page (`blobs.hasServiceWorkerControl()` is `false`, as after a hard reload), read the bytes with `blobs.read(blobId, { as: "blob" })` and use `URL.createObjectURL(blob)` as the source; revoke it with `URL.revokeObjectURL` when done.
 
 ---
 
@@ -314,7 +304,7 @@ Name the type: without `"Content-Type"` the blob is stored as `application/octet
 
 ## Complete example: image upload with progress + display
 
-A **web walkthrough** composing the neutral calls already shown — [Upload](#upload), the `blobs:upload-progress` event ([Events](#events)), and `proxyUrl`/`read` ([Service worker proxy](#service-worker-proxy-for-img--video)) — into one DOM flow. The `<img>`/`URL.createObjectURL` wiring is web-DOM glue:
+A **web walkthrough** composing the neutral calls already shown — [Upload](#upload), the `blobs:upload-progress` event ([Events](#events)), and the download URL ([Displaying images](#displaying-images)) — into one DOM flow, in an app built from the Vue template. The `<img>` wiring is web-DOM glue:
 
 ```typescript
 async function uploadAndDisplay(
@@ -335,13 +325,7 @@ async function uploadAndDisplay(
 
   try {
     const { blobId } = await blobs.upload(file); // filename + contentType inferred
-
-    if (blobs.hasServiceWorkerControl()) {
-      imgEl.src = blobs.proxyUrl(blobId, { disposition: "inline" });
-    } else {
-      const data = (await blobs.read(blobId, { as: "blob" })) as Blob;
-      imgEl.src = URL.createObjectURL(data);
-    }
+    imgEl.src = blobs.downloadUrl(blobId, { disposition: "inline" });
     return blobId;
   } finally {
     client.off("blobs:upload-progress", onProgress);
@@ -351,7 +335,7 @@ async function uploadAndDisplay(
 
 ## Complete example: offline-ready gallery
 
-A **web walkthrough** composing [List](#listing), `prefetch` ([Offline & the upload queue](#offline--the-upload-queue)), and `proxyUrl` into a gallery loader. Only the URL-wiring is web-specific:
+A **web walkthrough** composing [List](#listing), `prefetch` ([Offline & the upload queue](#offline--the-upload-queue)), and the download URL ([Displaying images](#displaying-images)) into a gallery loader. Only the URL-wiring is web-specific:
 
 ```typescript
 async function loadGallery(client: JsBaoClient, db3Id: string) {
@@ -363,10 +347,7 @@ async function loadGallery(client: JsBaoClient, db3Id: string) {
 
   return images.map((b: any) => ({
     id: b.blobId,
-    // Use proxyUrl if a service worker is registered, otherwise blob URLs.
-    url: blobs.hasServiceWorkerControl()
-      ? blobs.proxyUrl(b.blobId, { disposition: "inline" })
-      : null,
+    url: blobs.downloadUrl(b.blobId, { disposition: "inline" }), // an <img> src
     filename: b.filename,
   }));
 }

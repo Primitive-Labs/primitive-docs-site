@@ -9,6 +9,8 @@ stored in `vars.toml`.
 
 ```bash
 primitive secrets set WEATHER_API_KEY --value <value> --summary "Weather API"
+primitive secrets set WEATHER_API_KEY --summary "Weather API (staging)"   # value unchanged
+primitive secrets set WEATHER_API_KEY --clear-summary
 primitive secrets list
 ```
 
@@ -28,7 +30,7 @@ Secret management lists names and summaries, never values.
 | Integration | `{{secrets.KEY}}` in `defaultHeaders` or `staticQuery`; resolved into the outgoing request. |
 | Function | `ctx.secret("KEY")`, with `secret:KEY` in its capabilities. |
 | Webhook | Whole `{{secrets.KEY}}` reference in `signingSecret`. |
-| CEL | `secrets.KEY`, after declaring `secrets = ["KEY"]` on the owning metadata category config. Not in a function's `access` gate. |
+| CEL | `secrets.KEY`, after declaring `secrets = ["KEY"]` on the owning metadata category config. Not in a function's `authorize`. |
 
 Prefer integration references when the secret is an API credential. Read it
 in function code only when the function needs the value itself, such as when
@@ -53,7 +55,7 @@ API_HOST = "https://api.example.com"
 Reference `{{vars.KEY}}` in integration headers or query parameters, or read
 it with `ctx.configVar("KEY")`. For CEL, declare `vars = ["KEY"]` on the
 owning metadata category config before reading
-`vars.KEY`; a function's `access` gate has no `vars`.
+`vars.KEY`; a function's `authorize` reads one with `await auth.configVar("KEY")`.
 
 ## Gotchas
 
@@ -73,8 +75,8 @@ owning metadata category config before reading
   reference while retaining the old one for the grace period.
 - Removing a var from `vars.toml` deletes it on the next push without `--prune`.
   Pull takes server values; `--force` deliberately overwrites server changes.
-- CEL can read only declared keys. For optional vars, check `'KEY' in vars`
-  before reading, or use `vars.?KEY`.
+- CEL can read only declared keys; an undeclared or dynamic reference is refused
+  at save. For optional vars, check `'KEY' in vars` before reading.
 
 ## Related guides
 

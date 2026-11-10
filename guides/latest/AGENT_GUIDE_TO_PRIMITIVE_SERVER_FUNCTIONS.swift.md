@@ -73,8 +73,17 @@ a version. It preserves authored sources for `config pull`.
   All other compiler options come from `functions/tsconfig.json` (no DOM); do
   not set `rootDir` there.
 - Import npm packages by name. The built bundle is limited to 5 MB.
+- Pushing a function or a `schemas/` file needs `primitive-admin` 1.2.0 or newer: an older
+  CLI's push is refused with `CLI_VERSION_TOO_OLD`, or `COMPILED_PAYLOAD_REQUIRED` when it
+  carries no compiled schemas; run `npm install -g primitive-admin@latest` and push again.
 - Treat generated declarations as build output. Use `primitive functions
-  codegen --check` in CI.
+  codegen --check` in CI. Function, prompt, `schemas/`, db3 and user property
+  types are all in `functions/primitive.d.ts`; import them with
+  `import type { Functions, Schemas } from "./primitive"` and write
+  `Functions.<Key>Input`, `Schemas.<Def>`. Push, pull and codegen remove a
+  declaration file push no longer writes, and push refuses a function source
+  that imports one (also under `--dry-run` and `--no-typecheck`), naming
+  `./primitive` and the namespace.
 - Push executes module-level code while collecting the manifest; only push a
   tree you trust to run locally.
 - The server loads each new version once with no network and no credentials.
@@ -150,13 +159,211 @@ minLength = 1
 maxLength = 64
 ```
 
-Enforced: `type`, `enum`, `const`, `properties`, `required`,
-`additionalProperties = false`, `items`, `minLength`, `maxLength`, `pattern`,
-`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
-`minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`,
-`anyOf`, `oneOf`, `nullable`. In either schema, push refuses `allOf`, `not`, `if`/`then`/`else`,
-`patternProperties`, `propertyNames`, `dependentRequired`, `contains`,
-`prefixItems`, a schema-valued `additionalProperties` and a list-valued `items`.
+| Class | Keywords |
+|---|---|
+| Enforced | `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`, `anyOf`, `oneOf`, `nullable` |
+| Annotation | `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, and any other key (accepted, not checked) |
+| Refused at push | `allOf`, `not`, `if`, `then`, `else`, `patternProperties`, `propertyNames`, `dependencies`, `dependentRequired`, `dependentSchemas`, `unevaluatedProperties`, `contains`, `minContains`, `maxContains`, `prefixItems`, `additionalItems`, `unevaluatedItems`, `$dynamicRef`, `$recursiveRef` |
+
+In either schema, push also refuses a schema-valued `additionalProperties` and
+a list-valued `items`.
+
+Generated types carry every keyword a push keeps: shape keywords as the type,
+the rest as doc comments on the member or type they describe.
+
+| Generated as | Keywords |
+|---|---|
+| Type shape | `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf`, `nullable` |
+| Doc comment | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`, `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, `$schema`, `$id`, `example`, `propertyOrdering`, `readOnly`, `writeOnly`, `contentMediaType`, `contentEncoding`, `$ref`, `ref`, `$defs`, `definitions`, `coerce`, and any other key |
+
+#### Writing a schema as a field table
+
+A schema can be written in the db3 field grammar under `[function.input]` or
+`[function.output]` in place of `inputSchema` or `outputSchema`. Push compiles
+it to the JSON Schema it describes and stores exactly what that `inputSchema`
+would store:
+
+```toml
+[function.input.fields.taskId]
+type = "string"
+required = true
+
+[function.input.fields.price]
+ref = "Money"
+required = true
+
+[function.input.fields.lines]
+type = "array"
+max_items = 50
+
+[function.input.fields.lines.item.fields.sku]
+type = "string"
+required = true
+```
+
+| You need | You write |
+|---|---|
+| a nested object (closed) | a `fields` subtable |
+| an open object | `type = "object"` with no `fields`, or `open = true` |
+| an array | `items = "string"` (or a shared shape's name), or an `item` table such as `item.fields` |
+| a root that is not an object | `type` on the table itself |
+| bounds | `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items` |
+| a union, or any other JSON Schema | `schema = { ... }` on that field |
+| a shared shape or db3 model | `ref = "<name>"` (beside it only `description`, `required`, `nullable`) |
+
+A field table takes the keys `type`, `required`, `fields`, `open`, `items`, `item`, `nullable`, `enum`, `default`, `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items`, `coerce`, `ref`, `description`, `schema`.
+
+Push refuses any other key, naming the dotted path and the fix
+(`function.input.fields.price.indexed: ... Remove it`). A field table refuses the db3 storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element`,
+and the types `date`, `id`, `stringset`, `vector`.
+
+Watch out when writing a field table:
+
+- Push refuses `[function.input]` beside `[function.inputSchema]`. A
+  field-table key such as `fields` under `inputSchema` stays an annotation, and
+  push warns.
+- `enum` holds strings; write a number enum, `oneOf` or `const` as
+  `schema = { ... }` on the field.
+
+#### Reusing a shape with `$defs`
+
+Define a shape once under the schema's `$defs` and reference it with `$ref`.
+Push inlines each local ref, so validation uses the definition. Quote the `$`
+keys in TOML:
+
+```toml
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema."$defs".Money]
+type = "number"
+minimum = 0
+
+[function.inputSchema.properties.total]
+"$ref" = "#/$defs/Money"
+```
+
+Watch out when using refs:
+
+- Only `#/$defs/<Name>` refs with a matching definition, `schemas:` refs and
+  `db3:` refs (below) resolve. Any other `$ref` (no matching definition, a
+  self-reference, a URL, the `fn:` or `prompt:` prefix) is kept as written,
+  checks nothing, and push prints a warning.
+- Beside a `$ref`, only annotations and `nullable` are allowed; push refuses an
+  enforced keyword there. Put the bound in the definition.
+- After expansion a schema may hold at most 2,048 objects and arrays and
+  160 KiB per schema, and a function at most 320 KiB for both schemas. Push
+  refuses a larger one, naming the ref chain.
+
+#### Shared shapes in `schemas/`
+
+Put a shape several functions, prompts or agents use in
+`primitive/<env>/schemas/<file>.toml`, one `[defs.<Name>]` table per shape. A
+`#/$defs/<Other>` ref inside a def names another def of the file:
+
+```toml
+[defs.Currency]
+type = "string"
+
+[defs.Money]
+type = "object"
+[defs.Money.properties.currency]
+"$ref" = "#/$defs/Currency"
+```
+
+A function schema, or a def in another file, uses a def in one of three forms;
+push inlines the def's compiled form:
+
+```toml
+[function.inputSchema.properties.price]
+"$ref" = "schemas:common#/$defs/Money"   # explicit
+[function.inputSchema.properties.total]
+ref = "schemas.common.Money"             # long
+[function.inputSchema.properties.currency]
+ref = "Currency"                         # short: <Name> or <file>.<Name>
+```
+
+- A bare name must be declared by exactly one file; the `<file>` of
+  `<file>.<Name>` must not also be a function, prompt or db3-type key.
+  Otherwise push refuses the ref and lists every long form.
+- Beside `ref`, only `description`, `required` (the array) and `nullable` are
+  allowed; each replaces the def's own.
+- A db3 field can `ref` a def that is a plain string enum; push expands it to
+  the def's `enum` (databases guide, **Shared enums**).
+- `config push` stores each changed file as a new version, dependencies
+  first, then the functions; `--only schema/<file>` pushes one file;
+  `config pull` writes files back byte for byte;
+  `primitive schemas list` and `primitive schemas get <file>` read them.
+  `config push --only function/<key>` pushes the `schemas/` files the
+  selection's refs reach first.
+- Each pushed version records the defs it inlined, with an `h1:` hash of each.
+  A function keeps the def it was pushed with until pushed again; `config diff`
+  shows `pinned to schemas/<file>.toml#<Name> (older|removed|deleted)`.
+- Delete a file by removing it and running `config push --prune`, which
+  stores a tombstone version; functions already pushed keep their snapshot,
+  and a new push that refs the file is refused.
+
+A def can be a field table: one whose root carries `fields`, `item`, `open`,
+`min`, `max`, `min_length`, `max_length`, `min_items`, `max_items` or a string
+`items` (`[defs.Money.fields.amount]`).
+
+Watch out when writing `schemas/` files:
+
+- File names are lowercase letters, digits, `_` and `-`.
+- Push refuses a def that mixes field-table and JSON-Schema keys (`fields`
+  beside `properties`, `min` beside `minimum`, or `$ref`, `$defs`, `oneOf`,
+  `anyOf`, `const`), naming both. Annotations (`title`, `description`,
+  `examples`, `deprecated`, `format`, `default`, `$comment`, `readOnly`,
+  `writeOnly`) may sit beside field-table keys; any other key in such a def is
+  checked as a field table and refused with its correction.
+- A def may not declare its own `$defs`; put shared shapes in the file's
+  `[defs]`.
+- Refused-at-push keywords are refused inside a def too.
+- Push takes up to 256 defs per file and 1,024 KiB per file.
+- Push refuses a ref it cannot resolve (a missing file or def, a deleted file,
+  a ref below a def, the reserved `platform` prefix), naming it.
+- Two files that use each other's defs cannot both be pushed; push names the
+  chain. Move the shared def into one file or a third.
+- A schema's record of inlined defs may take at most 160 KiB of provenance;
+  push refuses more, naming the chain.
+
+#### db3 models in schemas
+
+A schema uses a model of a db3 type by name; push inlines one of two
+projections:
+
+```toml
+[function.inputSchema.properties.task]
+ref = "workspace.tasks"            # declared: the model's fields
+[function.outputSchema.properties.task]
+ref = "workspace.tasks"            # row: a stored record, with its id
+```
+
+| Projection | Shape |
+| --- | --- |
+| `declared` | The declared fields only (closed); storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element` are left out of the declared shape; auto-assigned, stamped and defaulted fields are optional |
+| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned, stamped and defaulted fields are required |
+
+- An `outputSchema` gets the `row`; every other schema gets the `declared`
+  shape. `#row` or `#declared` chooses: `ref = "workspace.tasks#declared"`.
+- Long form `db3.<type>.<model>`; explicit form
+  `"$ref" = "db3:<type>#/$defs/<model>"`, with `/row` or `/declared` to choose.
+  A db3 ref in a `schemas/` def must name its projection.
+- Fields map as the generated db3 types render them (`string`/`id`/`date` →
+  string, `stringset` → array of strings, `vector` → base64 string; `enum`,
+  `max_length`, `max_count` and `default` carry over).
+- Validation messages end `(validated against the row projection of db3 <type>.<model>)`,
+  and the generated hover on the field names the projection.
+- `config push` pushes a db3 type before the `schemas/` files, functions and
+  prompts that use it. `config diff` shows
+  `pinned to db3-types/<type>.toml#<model>/<projection> (older|removed|deleted)`.
+
+Watch out when using db3 models:
+
+- Push refuses a ref to a type the app does not have, naming
+  `db3-types/<type>.toml`; push the type first or in the same push.
+- `config push --only` compiles a ref to an unselected type against the
+  server's copy; select the type when the change depends on it.
 
 ## Task runs
 
@@ -268,6 +475,16 @@ order. Over REST, `GET functions/runs` answers `400` for an unknown query
 parameter, `GET functions/runs/{runId}/status` reads one run, and
 `GET|POST functions/{functionKey}/instances/{runKey}/status|terminate` read and
 stop a run by its run key.
+
+### Walking every user
+
+`ctx.users.forEachBatch({ function, key, filter?, sort?, input?, batchSize?, concurrency?, snapshot? })` hands every user a filter matches to a batch function, a batch at a time — no hand-rolled paging loop. `key` scopes the walk to this app and batch function: a repeat call with the same `function`/`key` finds the existing walk (`existing: true`) instead of starting a second. `filter`/`sort` take the same grammar as [`ctx.users.query`](#querying-users); `sort` needs `snapshot: true`. `batchSize` (≤100, default 100) and `concurrency` (≤16, default 4) bound each batch and how many run at once, each over a disjoint partition of the matches. `snapshot` captures every matching id before the first batch, so membership is fixed as of that capture; without it the walk reads live and its match count is provisional until enumeration ends.
+
+Each batch reaches the named function as `{ userIds, input }` under `ctx.trigger.kind === "users-batch"` (`ctx.user` is `null`). Admit it with `authorize: allowCallers({ usersBatch: true })` (or a list of function keys, to admit only that function's own `forEachBatch` starts and refuse admin-started walks) — see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance). A batch can run twice (a retried attempt, a platform restart): make it idempotent. A failed batch retries alone, same number and ids, 3 attempts, 5 s doubling, before the walk gives up on it. `ctx.trigger.walkRunId`/`batch`/`attempt`/`startedByFunctionKey` identify the attempt.
+
+The walk's own run — not a batch's — fails with one of: `USER_WALK_DENIED` (the door refused it), `USER_WALK_INPUT_REFUSED` (the batch function's `inputSchema` refused `{ userIds, input }`), `USER_WALK_FUNCTION_UNAVAILABLE` (disabled, archived, missing, or no pushed version), `USER_WALK_BATCHES_FAILED` (a batch exhausted its retries), `USER_WALK_ORPHANED` (its coordinator held no state), or `USER_INDEX_SHARD_UNAVAILABLE` (a shard it reads was unreachable). The first three fail it before any batch runs.
+
+Read progress (`status.walk`: phase, match count, batches done/failed/in-flight/retrying/remaining) and stop it (`terminate`: no new batch starts, in-flight ones finish) through `primitive users walk status|terminate <run-id>` or the admin API's `apps/{appId}/users/walks/{runId}` routes — there is no way to poll or stop a walk from inside a function. Batch starts never count against the batch function's own `ratePerMinute`.
 
 ### Step discipline
 
@@ -488,8 +705,8 @@ const page = await ctx.api.collections.list({ userId: member.userId });
 
 | Calls | `userId` |
 | --- | --- |
-| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `ctx.agents.*` | Optional; defaults to the caller |
-| `collections.listForUser`, `groups.listUserMemberships` | Required |
+| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `db3.aliases.set` (in `body`), `resolve`, `delete`; `ctx.agents.*` | Optional; defaults to the caller |
+| `collections.listForUser`, `groups.listUserMemberships`, `db3.listHeldByUser`, `db3.listSharedWithUser` | Required |
 | App-wide reads (`groups.list`, `users.list`) | None |
 | Calls that hand something to a user (`notifications.send`, `users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
 
@@ -519,6 +736,34 @@ Gotchas:
   Check the id before passing it.
 - **`ctx.channels.authorize` keeps its own code.** With no caller and no
   `userId` it throws `FUNCTION_CHANNEL_GRANTEE_REQUIRED`.
+
+## Reading and writing user properties
+
+`ctx.users.get(userId)` → member with [declared properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md), defaults applied, `null` if not a member. `ctx.users.getBy(name, value)` → the member holding a unique property's value or a named constraint's values (array in declared order, or object by field name), `null` if none.
+
+`ctx.users.setProperties(userId, patch, options?)` merge-patches (`null` clears to default); `addToSet`/`removeFromSet` touch one `stringset` field. `options.condition` is a records-query filter over `properties.*` plus `userId`/`email`/`name`/`avatarUrl` (not `role`/`status`), checked inside the write:
+
+```ts
+await ctx.users.setProperties(userId, { plan: "pro" }, { condition: { "properties.plan": "free" } });
+```
+
+Throws `PrimitivePlatformError`; branch on its `errorCode`: `USER_PROPERTY_UNKNOWN`, `USER_PROPERTY_INVALID`, `USER_PROPERTY_UNIQUE_CONFLICT`, `USER_PROPERTY_CONDITION_FAILED`, `USER_PROPERTY_NOT_CLIENT_WRITABLE` (client sessions only — a function may always write a declared field). Two calls patching different fields of the same user both land concurrently.
+
+`ctx.users.list(options?)`/`iterate(options?)` page the roster directly (`limit` ≤100, `cursor`; `iterate` is `list` as an `AsyncIterable`, for a request function or a single-slice loop only — a durable loop still takes its own pages inside `step.do` with an explicit cursor). Both keep working, take no filter, and are soft-deprecated: prefer `ctx.users.query` to filter/sort/page up to 1,000, and [`ctx.users.forEachBatch`](#walking-every-user) to run a function over every match instead of paging by hand.
+
+`ctx.invitations.getBy(name, value)` finds a pending invitation by a unique value its `initialProperties` will give the invitee — see [Invitations](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#invitations).
+
+### Querying users
+
+Same filter grammar as [a records query](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#querying), over base fields (`userId`, `email`, `name`, `avatarUrl`, `role`, `status`, `addedAt`, `testUser`) and `properties.<name>`, read from an index that trails a write by seconds — not the live record (see [The Consistency Contract](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#consistency-contract)):
+
+```ts
+const page = await ctx.users.query({ filter: { role: "member", "properties.plan": "pro" }, sort: { addedAt: -1 }, limit: 50 });
+const { count } = await ctx.users.count({ filter: { "properties.plan": "pro" } });
+const { result } = await ctx.users.aggregate({ operations: [{ type: "count" }], groupBy: ["properties.plan"] });
+```
+
+`include` is refused. Up to 1,000 per page. `meta.scans` names any filter/sort field the index served by scanning rather than indexing (undeclared, or not `indexed`).
 
 ## `ctx.api` — the platform from inside a function
 
@@ -704,6 +949,7 @@ await ctx.api.email.send({
 ```
 
 - Template mode and inline mode are exclusive, as are `to` and `toUserId`; a `toUserId` must be a member of this app.
+- `variables` fill each `{{name}}`: `htmlBody` HTML-escapes the value, `textBody` inserts it as written (a link arrives intact).
 - The route, `POST /app/{appId}/api/emails/send`, is reachable **only from a function** (`403 FUNCTION_ROUTE_FUNCTION_ONLY` otherwise) — sending as the app is the function's declared authority, not a member role.
 - The app has **one hourly email budget**; passing it answers `429 EMAIL_RATE_LIMITED`.
 
@@ -749,25 +995,58 @@ await orders.patch(open.items[0].id, { data: { status: "picked" }, condition: { 
 The handle's contract:
 
 - **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
-- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) writes `functions/primitive-db3-types.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers (writes leave them out). The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
-- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `bulk`. `ctx.db3(id, type).bulk([...])` spans models, each op naming its `model`.
-- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `increment` on a missing record), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
+- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`. `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database.
+- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `patch` or `increment` on a missing record; nothing is created), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
 - **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
+- **Typed filters and sorts.** The `ctx.db3(id, "<type>").model("<Model>")` handle types the filter and sort of `query`, `count` and `aggregate` (`options.filter`, `options.sort.direction`) from the model's declared fields. In this release a mismatch through the handle (`$startsWith` on a number) is a `config push` warning and the function still ships; a later release refuses it. Each model also gets `Db3.<Model>Filter` and `Db3.<Model>Sort` in `functions/primitive.d.ts`; a value annotated with them (`const filter: Db3.OrdersFilter = { total: { $gte: 10 } }`) is refused by the typecheck now. To make the handle's mismatches errors now, add `functions/db3-strict.d.ts` holding `export {};` and then `declare module "primitive-functions" { interface Db3FilterTyping { enforced: true } }`. A declared field's value follows its kind (a string for `string`, `id` and an enum, a `Date` or date string for `date`, any scalar for `stringset` and `vector`, `null` for all); at most one of `$startsWith`, `$endsWith`, `$containsText` per field; `$and`/`$or` nest, `$search`/`$near` are top-level; a sort takes `1` or `-1`. Null and unset matching: [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Gotchas: a field the model doesn't declare is open, so a misspelled field name is not refused; a filter variable typed `Record<string, unknown>` is not checked, so type it `Db3.<Model>Filter`; the opt-in file must start with `export {};`, or it replaces the `primitive-functions` module and every function importing it fails to push. `--no-typecheck` skips the warning check too.
+
+| Kind | Operators |
+|---|---|
+| `string` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$startsWith`, `$endsWith`, `$containsText`, `$all`, `$size` |
+| `number` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `boolean` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$all`, `$size` |
+| `date` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `id` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `stringset` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$startsWith`, `$endsWith`, `$containsText`, `$contains`, `$all`, `$size` |
+| `vector` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$all`, `$size` |
 
 Every operation's options and server-function examples are in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Creating a database, transferring it, and switching its sync or app access go through `ctx.api.db3` with the `db3:*` capabilities — see [Access](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access).
 
-### A member's collections and profile
+### A member's collections, databases and profile
 
 Triggered functions have no caller, so name the member (see
 [Which user a call is about](#which-user-a-call-is-about)).
 `ctx.api.collections.listForUser({ userId })` pages the collections a member
-belongs to, with `permission`; loop on `hasMore`, since a page can be short or
-empty while `hasMore` is `true`. A non-member throws 404. No capability gates
-it: a run with no caller, or one an app owner or admin invoked, can list any
-member's, so keep such a function admin-only or trigger-only.
+belongs to, with `permission`. `ctx.api.db3.listHeldByUser({ userId })` and
+`ctx.api.db3.listSharedWithUser({ userId })` page the databases a member holds
+and those shared with them, as `client.db3.listMine` entries (`via: "held"` or
+`"shared"`); the held listing includes sync-off databases. Both take `tag` and
+`type` filters. Loop on `hasMore`, since a page can be short or empty while
+`hasMore` is `true`. A non-member throws 404. No capability gates them: a run
+with no caller, or one an app owner or admin invoked, can list any member's, so
+keep such a function admin-only or trigger-only.
+
+```ts
+// A nightly sweep over what one member holds, typed databases only.
+let cursor: string | undefined;
+do {
+  const page = await ctx.api.db3.listHeldByUser({ userId: member.userId, type: "journal", cursor });
+  for (const db of page.items) await archive(db.id);
+  cursor = page.hasMore ? page.nextCursor : undefined;
+} while (cursor);
+```
+
+`ctx.api.db3.aliases.resolve({ scope: "user", aliasKey, userId })` returns the
+database a member's alias names, with `alias`;
+`ctx.api.db3.aliases.set({ scope: "user", aliasKey, body: { documentId, userId, mustNotExist } })`
+binds one (`mustNotExist: true` throws 409 `alias_exists` instead of re-pointing
+it) and `ctx.api.db3.aliases.delete({ scope: "user", aliasKey, userId })`
+removes it. An alias on something that is not a database throws 409
+`NOT_A_DB3`.
 
 `ctx.api.users.setProfile({ userId, body: { name, avatarUrl } })` sets a
 member's display name and avatar (`avatarUrl` is an `http:` or `https:` URL;
@@ -866,7 +1145,7 @@ cron entry's name):
 type = "orders"                        # the db3 type to watch; at most ten per function, each named once
 ```
 
-Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. The input is `{ db3Id, type, from, to, principal, changes: [{ model, id, kind }] }` (`kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`.
+Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. The input is `{ db3Id, type, from, to, principal, changes: [{ l, model, id, kind }] }` (`l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`. A handler whose input schema closes `changes`' object shape must allow `l`, or the whole batch is refused.
 
 - **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Inspect `input.changes` and skip what your own writes produced.
 

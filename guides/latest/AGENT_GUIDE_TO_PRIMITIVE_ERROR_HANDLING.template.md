@@ -69,6 +69,8 @@ Every body carries `code`, whichever of these other spellings it also has.
 | 503 | `UNAVAILABLE` |
 | 504 | `UPSTREAM_TIMEOUT` |
 
+A request to a path that exists with a method it does not accept answers 405 `METHOD_NOT_ALLOWED`, with an `Allow` header listing the methods that path accepts.
+
 Any other 4xx is `INVALID_REQUEST`; any other 5xx is `INTERNAL_ERROR`.
 
 **The 409 distinction matters.** A generic conflict — a duplicate name, a resource that already exists — is `STATE_CONFLICT`. `CONFLICT` is reserved for the optimistic-concurrency refusal, which also carries `serverModifiedAt` and `expectedModifiedAt`. Do not route a `STATE_CONFLICT` through a merge/retry-on-conflict path.

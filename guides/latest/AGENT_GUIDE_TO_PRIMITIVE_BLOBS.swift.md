@@ -46,7 +46,7 @@ let blobs = client.db3.blobs(db3Id)
   let blobs = client.db3.blobs(db3Id)
 
   let list = try await blobs.list()
-  let url = blobs.downloadUrl(blobId: blobId)          // synchronous, authenticated
+  let url = blobs.downloadUrl(blobId: blobId)          // synchronous
   let bytes = try await blobs.read(blobId: blobId)
 ```
 
@@ -110,10 +110,9 @@ let meta = try await blobs.get(blobId: blobId)
 
 ## Downloading
 
-### Download URL (authenticated)
+### Download URL
 
-The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string, authenticated via the user's session against the API origin.
-
+The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string. The URL carries no credentials: `BlobImage` and `downloadRequest` add the user's auth (see [Displaying images](#displaying-images)).
 ```swift
   let url = blobs.downloadUrl(
     blobId: blobId,
@@ -215,7 +214,7 @@ Inspect and control a database's upload queue, and set the client-wide upload co
   let concurrency = await client.blobUploadConcurrency
 ```
 
-Every queue verb is `async`: the upload queue lives behind an actor, so reading or changing it is an `await`. The queue members carry the `Async` suffix (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`, `setBlobUploadConcurrencyAsync(_:)`, …), and the concurrency reader is an `async` property: `await client.blobUploadConcurrency`. `downloadUrl(blobId:disposition:attachmentFilename:)` stays synchronous, so it is safe to call straight from a SwiftUI `body`.
+Every queue verb is `async`: the upload queue lives behind an actor, so reading or changing it is an `await`. The queue members carry the `Async` suffix (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`, `setBlobUploadConcurrencyAsync(_:)`, …), and the concurrency reader is an `async` property: `await client.blobUploadConcurrency`. `downloadUrl(blobId:disposition:attachmentFilename:)` and `downloadRequest(blobId:disposition:attachmentFilename:)` stay synchronous, so they are safe to call straight from a SwiftUI `body`.
 
 ---
 
@@ -237,6 +236,23 @@ The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level
   }
 ```
 
+---
+
+## Displaying images
+
+```swift
+    BlobImage(client.db3.blobs(db3Id), blobId: blobId) { image in
+      image.resizable().scaledToFit()
+    } placeholder: {
+      ProgressView()
+    }
+```
+
+The image shows for a signed-in user who can read the database.
+
+`BlobImage` is in the `JsBaoClientUI` product (`import JsBaoClientUI`), which the Swift template links. It has the `AsyncImage` shapes: `BlobImage(blobs, blobId:)`, the `content:placeholder:` form above, and `BlobImage(blobs, blobId:) { phase in … }` over `BlobImagePhase` (`.empty`, `.success(Image)`, `.failure(Error)`). It loads through `read`: the user's auth, the copy already on the device, and `JsBaoError` `.offline` when the client is offline with no local copy. The load restarts when the client, the database or the blob changes.
+
+With an image library (Kingfisher, Nuke), send `blobs.downloadRequest(blobId:disposition:attachmentFilename:)`: a `URLRequest` for the download URL with the user's `Authorization` header, built from the token in force when it is called. A bare `downloadUrl` in `AsyncImage` is refused with `401`.
 
 ---
 

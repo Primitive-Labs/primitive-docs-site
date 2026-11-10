@@ -88,14 +88,26 @@ expectedOutputContains = '["•"]'
 primitive config push --only prompt/summarizer
 primitive prompts tests list summarizer
 primitive prompts tests run-all summarizer
+primitive prompts tests runs summarizer [--cursor <cursor>]
+primitive prompts tests runs get summarizer <run-id>
 ```
 
 Test commands accept the prompt key or ID. Push new or edited test files
 before running them: tests execute the registered server-side cases.
 
+`tests runs` lists one page of recent runs, newest first; pass the printed
+`--cursor <cursor>` to read the next page. `tests runs get` prints one run with
+its output and verification checks. The runs of one `run-all` share a
+comparison group; read them together with `primitive comparisons get <group>`.
+
 Use `primitive config fields prompt` for test-case fields. Remove a case file
 and push with `--prune` to delete it. See
 [Test Case Identity](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md).
+
+Set `defaultEvaluatorPromptKey = "<prompt-key>"` in `[prompt]` to name the
+prompt that judges new test cases by default. It must name a prompt the app has
+or one created in the same push, or the push is refused before anything is
+written. `""` clears the link, and omitting the key leaves the stored link alone.
 
 Verification types include substring `contains`, regex pattern, JSON subset, and LLM-as-judge.
 A run cut off at `maxTokens` fails its `Output complete` check. A case on an agent prompt
@@ -103,7 +115,12 @@ seeds a conversation instead; see [Test an agent](AGENT_GUIDE_TO_PRIMITIVE_AGENT
 
 Use `primitive prompts preview` to inspect rendered text without a model call.
 Use `primitive prompts execute` for an admin test. `execute` can run a disabled
-prompt; a server function cannot.
+prompt; a server function cannot. `--attach <path>` (repeatable) sends a file
+with the run as `variables.attachments`, typed from its name:
+
+```bash
+primitive prompts execute <prompt-id> --vars '{"text":"Summarize this"}' --attach ./report.pdf
+```
 
 ## Configurations
 
@@ -139,7 +156,8 @@ and is fixed at creation. Use `primitive config fields prompt` for field types.
 When a prompt answers JSON, declare its shape once on the prompt and stop
 parsing it by hand. `[prompt.outputSchema]` is sent to the provider, the answer
 is validated against it, and `config push` renders it into
-`functions/primitive-prompt-types.d.ts` so the function's call is typed from it:
+`functions/primitive.d.ts` as `Prompts.<Key>PromptOutput` so the function's
+call is typed from it:
 
 ```toml
 # primitive/dev/prompts/categorize.toml
@@ -169,8 +187,76 @@ output schema.
 
 
 
-Push writes `functions/primitive-prompt-types.d.ts` from prompt schemas.
+Push writes the `Prompts` namespace of `functions/primitive.d.ts` from prompt schemas.
 `parsed` is typed from `[prompt.outputSchema]`; without a schema it is unknown.
+
+`config push` refuses, before sending anything, a keyword Gemini cannot carry
+(`exclusiveMinimum`, `multipleOf`, `uniqueItems`, …), or a shape it cannot spell (an
+object without `properties`, an array without `items`, a node without `type`), in an `outputSchema` a
+non-archived Gemini configuration sends (`PROMPT_SCHEMA_NOT_TRANSLATABLE`), and
+a keyword the platform does not enforce (`allOf`, `not`, `patternProperties`,
+…) in any prompt or agent schema (`PROMPT_SCHEMA_UNSUPPORTED_KEYWORD`). Each
+line names the path and the fix; `config diff` reports the file as invalid.
+Switching a configuration to Gemini, restoring an archived one or duplicating
+one is refused the same way.
+
+### Field tables
+
+`[prompt.input]`, `[prompt.output]` and `[configs.chat.output]` take a field
+table (the server-functions guide's field-table section) in place of
+`inputSchema`, `outputSchema` and a configuration's `outputSchema`; push
+compiles each to the JSON Schema it stores.
+
+```toml
+[prompt.output.fields.category]
+type = "string"
+required = true
+enum = ["food", "travel", "other"]
+```
+
+- `config pull` writes a prompt's schemas back as JSON Schema under
+  `inputSchema` and `outputSchema`; keep the pushed file when you want the
+  field table.
+
+## Shared shapes
+
+A prompt's `inputSchema` and `outputSchema`, a configuration's `outputSchema`, and an agent's
+tool, event and turn-context schemas may use refs, as function schemas do: a local `$defs`
+entry, a `schemas/` def, another prompt's schema, or a function's.
+
+```toml
+# primitive/dev/prompts/summary.toml
+[prompt.inputSchema]
+ref = "prompt.advisor.tools.lookup.output"
+
+[prompt.outputSchema]
+type = "object"
+
+[prompt.outputSchema.properties.total]
+ref = "schemas.common.Money"
+```
+
+| Ref | Uses |
+| --- | --- |
+| `prompt.<key>.input`, `prompt.<key>.output` | The prompt's `inputSchema` or `outputSchema` |
+| `prompt.<key>.tools.<name>.input`, `prompt.<key>.tools.<name>.output` | An agent tool's schema; a function-backed tool's are the function's |
+| `prompt.<key>.events.<kind>` | An agent event's `schema` |
+| `fn.<key>.input`, `fn.<key>.output` | A function's `inputSchema` or `outputSchema` |
+| `db3.<type>.<model>`, with `#row` or `#declared` | A db3 model's stored row or declared fields (Server Functions guide, db3 models in schemas) |
+
+A db3 ref gets the `row` in a prompt's, a configuration's and an agent tool's
+`outputSchema`, and the `declared` shape in every other schema, unless it names one.
+
+The explicit spellings are `"$ref" = "prompt:<key>#/$defs/output"` and
+`"$ref" = "fn:<key>#/$defs/input"`; `<key>.input` or `<key>.output` alone works when the key
+is a prompt or a function, not both. A configuration may use `prompt.<own key>.output`.
+
+Push stores each schema with its refs replaced, as does a prompt write from the console or the admin API, and push stores a prompt after the `schemas/`
+files, prompts and functions it refs. `config push --only prompt/<key>` also pushes the
+prompts and `schemas/` files the selection refs; a function it refs must be selected too or
+already on the server. Pull writes the refs back. `config diff` names a shape that changed
+since the prompt was pushed: `pinned to prompts/<key>.toml#<target> (older)`,
+`pinned to functions/<key>.toml#output (older)`, `(deleted)` once it is gone.
 
 ## Decisions prompts
 
@@ -484,7 +570,13 @@ failure is not retried for no benefit.
 - Use the prompt key, not its database ID, in `ctx.prompts.run`.
 - Check `success` before reading `parsed`. Shape failures return
   `PROMPT_OUTPUT_NOT_JSON` or `PROMPT_OUTPUT_SCHEMA_VIOLATION`; the model call
-  still occurred and may be billed.
+  still occurred and may be billed. The schema is enforced in full: a value
+  outside `minLength`, `pattern`, `maximum` or another constraint is a
+  violation too.
+- On a Gemini configuration, a stored `outputSchema` with a keyword Gemini
+  cannot carry fails before any model request with
+  `PROMPT_SCHEMA_NOT_TRANSLATABLE`; `error` names each path and keyword. Fix
+  the schema and push again, or run the prompt on a non-Gemini configuration.
 - An answer that stopped at `maxTokens` carries `truncated: true` on either
   arm. A cut-off text answer is still `success: true` with partial `output`; a
   cut-off JSON answer, or an empty completion at the limit, fails with
@@ -498,6 +590,10 @@ failure is not retried for no benefit.
   [Retrying a failed call](#retrying-a-failed-call).
 - Declare `[prompt.outputSchema]` for typed function output. A configuration’s
   schema does not replace that validation contract.
+- Prompts cannot use each other's schemas in a loop; push refuses one and names the chain.
+  Move the shared shape into a `schemas/` file.
+- A prompt that uses refs may hold at most 320 KiB of compiled schemas and agent
+  declaration, with the schemas as written kept beside them; push refuses a larger one.
 - Removing optional configuration fields clears their values. Omitting a
   `[[configs]]` block does not delete it; archive the configuration explicitly.
 - Push test files before running them. Test `inputVariables` and expected-output

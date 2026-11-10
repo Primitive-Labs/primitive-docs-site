@@ -41,10 +41,10 @@ Invitations grant app membership. Sharing with a new user by email also creates 
 
 | Primitive | Purpose |
 |-----------|---------|
-| Deferred share (`type: "document"` in `listDeferredGrants`) | Tracks an email-based database share until the recipient signs up |
+| Deferred share | Tracks an email-based database share until the recipient signs up |
 | Deferred group add (`type: "group"`) | Tracks an email-based group or collection add until the recipient signs up |
 
-The deferred grants make email-based sharing work — the platform remembers the intent until a matching user account exists. **Do not interact with them directly in product code.** The sharing APIs (databases, groups, collections) accept emails transparently. `client.invitations.listDeferredGrants(...)` exists only for admin debugging tools.
+The deferred grants make email-based sharing work — the platform remembers the intent until a matching user account exists. **Do not interact with them directly in product code.** The sharing APIs (databases, groups, collections) accept emails transparently, and each lists its pending invitations with `listPendingInvitations` and cancels one with `revokePendingInvitation`.
 
 **Decision rules:**
 
@@ -80,11 +80,12 @@ For `invite-only` apps, `waitlistEnabled` defaults to `true`: visitors who try t
 ```bash
 primitive waitlist list                                  # who's waiting
 primitive waitlist invite <waitlist-id> --send-email [--signup-url <url>]  # invite one entry
+primitive waitlist bulk-invite --ids <id>,<id> [--send-email]  # invite the entries you name
 primitive waitlist bulk-invite --count 10 [--send-email] # invite the next N in line
 primitive waitlist remove <waitlist-id>                  # drop an entry
 ```
 
-`--send-email` delivers the invitation email; `--signup-url` overrides the link the email points at. Inviting off the waitlist mints an `AppInvitation` for that email — the same primitive `invitations.create` produces.
+`--ids` and `--count` are exclusive; an ID that is no longer on the waitlist is named in a warning and skipped. `--send-email` delivers the invitation email; `--signup-url` overrides the link the email points at. Inviting off the waitlist mints an `AppInvitation` for that email — the same primitive `invitations.create` produces.
 
 ---
 
@@ -96,11 +97,21 @@ Use `create`, `list`, `get`, `delete`, `quota`, and `accept` to manage invitatio
 
 The invitation email is stored trimmed and lowercased; a case variant of a member or pending email is refused as a duplicate (`USER_ALREADY_MEMBER`, `INVITATION_PENDING`).
 
+From the CLI, as an app admin:
+
+```bash
+primitive users invite alice@example.com [--role admin] [--json]   # --json prints the inviteToken
+primitive users invitations list [--limit <n>] [--cursor <c>]     # status + accept link per invitation
+primitive users invitations revoke <invitation-id> --yes          # admin role: also deletes its console admin invitation
+```
+
+`invitations list` prints each pending invitation's accept link, `<baseUrl>/invite/accept?inviteToken=<token>`; with no `[app].baseUrl` in `app.toml` it reads `unavailable` (`acceptLink: null` in `--json`). The admin console's Invitations tab copies the same link for a pending invitation.
+
 A server function invites through `ctx.api.invitations` (everything but `accept`, member role only) — see [Server Functions — Inviting someone with no account](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#inviting-someone-with-no-account).
 
 ### Admin / member create
 
-Admins/owners can invite at any role; members can invite only at `role: "member"` and only when `memberInvitationsEnabled` is true (check `quota()` first). `sendEmail` defaults to `false` — when `true` the server delivers a default invitation email, otherwise you deliver the `inviteToken` yourself. `source` (≤64 chars) and `note` are optional audit/admin-UI metadata; `expiresAt` overrides the default expiry.
+Admins/owners can invite at any role; members can invite only at `role: "member"` and only when `memberInvitationsEnabled` is true (check `quota()` first). `sendEmail` defaults to `false` — when `true` the server delivers a default invitation email, otherwise you deliver the `inviteToken` yourself. `source` (≤64 chars) and `note` are optional audit/admin-UI metadata; `expiresAt` overrides the default expiry. `initialProperties` (function, admin API and CLI only) seeds the invitee's user properties — see the [User Properties guide](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#invitations).
 
 ```typescript
   // Admins/owners: any role
@@ -207,17 +218,24 @@ Deferred grants are re-validated at resolution time. In a `domain`-restricted ap
 
 ### Cascade on revoke
 
-`client.invitations.delete(invitationId)` removes every pending grant attached to the invitation in the same operation — there's no risk of an orphan share activating after you change your mind. Conversely, deleting an invitation to cancel a *single* share is too broad: use the per-resource `removePermission`/`removeMember` by email for that.
-
-### Inspecting pending state (debug only)
+`client.invitations.delete(invitationId)` removes every pending grant attached to the invitation in the same operation — there's no risk of an orphan share activating after you change your mind. Conversely, deleting an invitation to cancel a *single* share is too broad: revoke it on its resource with `revokePendingInvitation`, keyed by the `invitationId` that resource's `listPendingInvitations` returns.
 
 ```typescript
-  const { items, nextCursor } = await client.invitations.listDeferredGrants({
-    email: "alice@example.com",
-  });
+  const permissions = client.db3.permissions(db3Id);
+
+  const pending = await permissions.listPendingInvitations();
+  const invite = pending.find((p) => p.email === "colleague@example.com");
+
+  if (invite) {
+    await permissions.revokePendingInvitation(invite.invitationId);
+  }
 ```
 
-Reserve this for admin/debug UIs. For end-user "people with access + pending invitations" UI, use the per-resource `listPendingInvitations` on databases, groups and collections (`client.db3.permissions(db3Id).listPendingInvitations()` for a database — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#sharing-a-synced-database)).
+Databases (`client.db3.permissions(db3Id)`), groups and collections each have the pair. The grantor, an app owner or admin, and on a group or collection anyone who manages its members, may revoke; anyone else gets 403. A share already resolved at signup answers 409 `ALREADY_RESOLVED`.
+
+### Listing pending invitations
+
+For a "people with access + pending invitations" UI, use the per-resource `listPendingInvitations` on databases, groups and collections (`client.db3.permissions(db3Id).listPendingInvitations()` for a database — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#sharing-a-synced-database)).
 
 ---
 
@@ -256,7 +274,7 @@ Check quota, mint the app invitation, share the project's database by email, and
 
 3. **Check member-invitation quota before showing invite UI.** Hide the button when `remaining` is zero and `unlimited` is false.
 
-4. **Choose the cancellation scope.** Use the resource’s `removePermission` or `removeMember` operation to cancel one pending share. `invitations.delete` cancels the invitation and every pending grant attached to it.
+4. **Choose the cancellation scope.** Use the resource’s `revokePendingInvitation` (by `invitationId`) or its by-email `removePermission`/`removeMember` to cancel one pending share. `invitations.delete` cancels the invitation and every pending grant attached to it.
 
 ---
 

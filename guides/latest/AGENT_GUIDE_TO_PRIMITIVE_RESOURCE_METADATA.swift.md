@@ -235,7 +235,7 @@ identical intent.
 
 ## From a server function
 
-A server function reads, writes, deletes, and reverse-resolves metadata through `ctx.api.resourceMetadata` — the same operations as `client.resourceMetadata`, on the app's own authority. Function code acts as the system, which is owner-equivalent, so category `readRule`/`writeRule` are bypassed exactly as they are for an app owner or admin; the function's own `access` gate is the authorization, and nothing is declared in `capabilities`.
+A server function reads, writes, deletes, and reverse-resolves metadata through `ctx.api.resourceMetadata` — the same operations as `client.resourceMetadata`, on the app's own authority. Function code acts as the system, which is owner-equivalent, so category `readRule`/`writeRule` are bypassed exactly as they are for an app owner or admin; the function's own `authorize` method is the authorization, and nothing is declared in `capabilities`.
 
 That is how to make a server-owned category: give it a `writeRule` no client satisfies (`writeRule = "false"`), keep `readRule` as open as clients need, and write it only from the function that owns it (e.g. the webhook-triggered function that records a payment provider's customer id). There is no rule-side way to name the one function allowed to write; keep writes to such a category in one function by convention.
 
@@ -267,6 +267,21 @@ primitive groups create --name "Reading group" --initial-metadata '{"classLink":
 
 A group's stamp only writes fresh rows: a category already stored under the new group's id fails the create with `409 METADATA_EXISTS` (delete the stored category, or leave it out of `initialMetadata`), and a staged unique value another resource already holds fails it with `409 UNIQUE_VALUE_CONFLICT` (change the value). Either way neither the group nor any metadata is created, and a stored row is untouched.
 
+## Reporting which user categories hold rows
+
+`primitive metadata report user` starts a report over the app's current members and polls it to a table of each user category still holding rows, its exact row count, and whether its config still exists. The report is admin-only (the admin API's `apps/{appId}/users/metadata-report`, `write` to start and `read` to read).
+
+```bash
+primitive metadata report user --json             # { status, report: { members, membersWithRows, rows, categories: [{ category, rows, configured }] }, note }
+primitive metadata report user --no-wait          # prints the run id
+primitive metadata report user --run <run-id>     # read that run
+```
+
+- Rows held by users who are no longer members of the app are not counted.
+- `configured: false` marks a category whose config was deleted: its rows exist but are unreachable until the config is pushed again.
+- To move a category's values into typed user properties, run the copy function as a walk — see [Copy a metadata category into properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#copy-a-metadata-category-into-properties).
+- Exit codes: `0` with a report, `1` for a failed run or a report whose totals could not be read back whole (`reportUnavailable` names why), `124` when `--timeout` (default 600 s) passes first.
+
 ## Metadata lifecycle
 
 A write never checks that the target resource exists — a write for a not-yet-created or already-deleted resource succeeds silently, and deleting a resource does not delete its metadata (no cascade). This is deliberate: it keeps a write to a single cheap put, and doesn't race provisioning flows that write metadata immediately after — or interleaved with — creating the resource itself.
@@ -293,3 +308,4 @@ A write never checks that the target resource exists — a write for a not-yet-c
 - **users-and-groups** — group/collection `metadataManifest` and the projected `attrs` category
 - **server-functions** — `ctx.api.resourceMetadata` and the system authority it runs with
 - **app-secrets** — the declared-only `secrets.*` binding a category manifest can also reach
+- **user-properties** — typed fields on the platform user, and copying a user category into them

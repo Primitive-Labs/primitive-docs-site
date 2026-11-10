@@ -45,10 +45,12 @@ primitive sessions list --user-id <id>                 # auth sessions
 
 # Databases and their records
 primitive db3 list --custodian user:<user-id>          # databases one user holds
+primitive db3 list --user-id <user-id> [--via held,shared,app]  # every database a user can open, sync-off included
 primitive db3 get <db3-id>                             # title, type, sync and who holds it
 primitive db3 records query <db3-id> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
 primitive db3 records count <db3-id> <model-name> [--filter '{...}']
 primitive db3 records aggregate <db3-id> <model-name> --op <count|sum|avg|min|max> [--field <f>] [--group-by <f>]
+primitive db3 records query <db3-id> <model-name> --filter '{...}' --explain  # the indexes a read used and the rows it read; --index <name|none> forces one
 primitive db3 schema <db3-id>                          # models and fields, declared and observed
 primitive db3 type get <db3-id>                        # the type the database has
 primitive db3 indexes list <db3-id>                    # its indexes
@@ -123,7 +125,7 @@ The `function-log` source is a server function's invocation records. Its `detail
 
 The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`, plus `stepAttempt` for a call made inside a function's `step.do` (which run of the body, from 1; it restarts after the task pauses, exactly as the function log's attempt does). Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a function step, `functionId` for a server function, and `runId` for its run. A function step also carries `correlation.stepOccurrence`, which use of the step name it was (from 0), so `runId`, `stepId` and `stepOccurrence` together identify one step of the run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
 
-Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run`/`--step` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
+Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run`/`--step` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`/`--where`.
 
 Not in the shared shape: `functions runs --json` prints the run rows as `{ items, nextCursor }` (each row adds `runtime`), and `functions runs steps --json` prints one run's full trace under `items`, never paged.
 
@@ -135,6 +137,7 @@ Invalid filter values are rejected, not ignored: an unparseable `--from`/`--to`,
 
 ```bash
 primitive analytics events --user-id <user-id>   # that user's activity events, function.invoke included
+primitive analytics events --user-id <user-id> --where action=function.invoke   # only their invocations
 ```
 
 An invocation's record carries the attributed user as `correlation.userId`, so a `function.invoke` row in the user's events pivots to `functions logs` by function and time. Work with no human behind it is recorded against the app's own principal `sys:<appId>`, which the analytics surfaces display as `System`; `analytics events --user-id sys:<appId>` reads exactly that activity.

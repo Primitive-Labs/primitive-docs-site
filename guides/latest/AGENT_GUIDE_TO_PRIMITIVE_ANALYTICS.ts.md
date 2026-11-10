@@ -234,12 +234,13 @@ Accepted shapes:
 
 ## Querying Analytics (CLI)
 
-The `primitive` CLI provides commands for querying analytics. All accept `--json` for machine-readable output.
+The `primitive` CLI provides commands for querying analytics. All accept `--json` for machine-readable output, and `--fresh` to bypass the server's short-lived answer cache (it sends `_bust=1`).
 
 ```bash
 # DAU / WAU / MAU + growth (default --window-days 28)
 primitive analytics overview
 primitive analytics overview --window-days 28 --json
+primitive analytics overview --fresh   # recompute instead of reading the cache
 
 # Active users time series
 primitive analytics daily-active --window-days 28
@@ -268,20 +269,27 @@ primitive analytics user-search --signup-start-day 2026-09-01 --signup-end-day 2
 primitive analytics user-search --signup-day 2026-09-06 --limit 100 --json
 primitive analytics user-search --signup-day 2026-09-06 --limit 100 --offset 100 --json
 
-# Per-user breakdown
+# Per-user breakdown; --anonymous reads events with no signed-in user
+# (its one optional argument is then the app ID)
 primitive analytics user-detail <user-ulid>
+primitive analytics user-detail --anonymous
 primitive analytics user-snapshot <user-ulid>
 
 # Raw event feed (default --window-days 7, --page 0)
 primitive analytics events --window-days 7 --page 0
 
+# Filter: --where <field><op><value>, repeatable, ANDed (see below)
+primitive analytics events --where action=login --where country!=US --where route^=/api
+
 # Group by: action | feature | route | country | deviceType | plan | day
 primitive analytics events-grouped --group-by feature --window-days 14
+primitive analytics events-grouped --group-by country --where feature~chat
 
 # Error groups: failures grouped by fingerprint with per-day counts
 # (default --window-days 7, --limit 50). Filter: --status-class 4xx|5xx|transport,
-# --source integration|function_invocation|function_run
+# --source integration|function_invocation|function_run|analytics_relay
 primitive analytics errors-groups --window-days 7 --status-class 5xx
+primitive analytics errors-groups --where source!=integration --where statusClass!=4xx
 
 # Integration / prompt analytics (default --window-days 30)
 primitive analytics integrations
@@ -291,6 +299,22 @@ primitive analytics prompts --limit 5
 Use `analytics prompts` and `analytics integrations` for their respective services. Query `function.invoke` events to count or inspect function invocations.
 
 `--test-users` is accepted by `overview`, `daily-active`, `rolling-active`, `cohort-retention`, `top-users`, `user-search`, `events` and `events-grouped`; omitted, the server default applies.
+
+`--where <field><op><value>` filters `events`, `events-grouped` and `errors-groups`; each one becomes a `filter[<field>][<operator>]` query entry and all must match. Operators: `=` (is), `!=` (is not), `~` (contains), `^=` (starts with). Fields and the operators each takes:
+
+| Command | Field | Operators |
+| --- | --- | --- |
+| `events`, `events-grouped` | `user`, `route` | `=`, `~`, `^=` |
+| | `action`, `feature`, `os`, `browser`, `appVersion` | `=`, `!=`, `~` |
+| | `country`, `plan`, `deviceType` | `=`, `!=` |
+| | `region`, `city` | `=`, `~` |
+| `errors-groups` | `fingerprint` | `=`, `~`, `^=` |
+| | `source`, `statusClass` | `=`, `!=` |
+
+### Gotchas when filtering with `--where`
+
+- The CLI refuses an operator a field does not take, an unknown field, an empty `~`/`^=` value and two `=` filters on one field before sending anything. Use one `=` per field.
+- More than 10 filters (`--user-id`, `--source` and `--status-class` count) is a `400` from the server.
 
 `--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows, testUsers }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
 
@@ -424,6 +448,8 @@ Event, grouped-event, and error-group queries accept at most **10 filters**. Mor
 
 For a function failure, the exemplar's `scope_key` names the function and `run_id` identifies its task run.
 
+An `analytics_relay` group records tracked events the platform could not store; its exemplar message gives the number dropped.
+
 #### Gotchas when handling error groups
 
 - `exemplar` may be `null`. Fall back to `normalized_title`.
@@ -435,7 +461,7 @@ Only a bounded set of dimensions is filterable (the exact error code is inside t
 | Field | Operators | Values |
 | --- | --- | --- |
 | `fingerprint` | `is`, `contains`, `starts with` | any |
-| `source` | `is`, `is not` | `integration`, `function_invocation`, `function_run` |
+| `source` | `is`, `is not` | `integration`, `function_invocation`, `function_run`, `analytics_relay` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
 Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).
@@ -446,10 +472,49 @@ Each row from `/analytics/events` includes geographic and per-event metric field
 
 - `region_code`, `region`, `city`, `colo` — derived from the request edge
 - `entity_key` — caller-provided correlation handle (e.g. a prompt id)
-- `duration_ms` — for `*_succeeded` / `*_failed` events that record latency
-- `input_tokens`, `output_tokens`, `total_tokens` — populated for `prompt_succeeded` events
+- `duration_ms` — for server events that record latency (`function.invoke`, `prompt.executed`)
+- `input_tokens`, `output_tokens`, `total_tokens` — populated for `prompt.executed` events
 
 These fields are absent (or zero) when the event type doesn't produce them.
+
+---
+
+## Finding Expensive Database Queries
+
+Every database read the server answers (record `query`, `count` and `aggregate`, and `ctx.db3(...)` reads in server functions) is recorded with its rows read. Two readers rank them per app; both need app `admin`.
+
+```bash
+# Query shapes by rows read (default --window-days 7, --limit 50, --order-by rows-read)
+primitive analytics db3-queries
+primitive analytics db3-queries --window-days 30 --order-by rows-per-returned --json
+# Request wall time and platform storage calls per endpoint and function
+primitive analytics requests --window-days 7
+```
+
+```text
+GET /app/{appId}/api/analytics/db3/queries?windowDays=7&limit=50&orderBy=rowsRead
+GET /app/{appId}/api/analytics/requests?windowDays=7&limit=50
+```
+
+`windowDays` 1–90, `limit` 1–200, `orderBy` `rowsRead` | `rowsPerReturned`; anything else returns `400`. `fresh=1` (the CLI's `--fresh`) skips the five-minute cache. The console shows both tables on the Analytics section's **Database Queries** tab.
+
+A row is one query shape from one caller (`endpoint` and `function_id`). The shape names the type, model, `op` and the fields and operators of `filter`, `sort` and `include`, never values: `{ status: "open", total: { $gte: 10 } }` → `status:$eq,total:$gte`; sort `{ createdAt: -1 }` → `createdAt:desc`; an include leg → `Line:hasMany:orderId{status:$eq;}`. Reads differing only in values share a `shape_id`.
+
+| `db3/queries` field | Meaning |
+|---|---|
+| `calls`, `rows_read`, `rows_returned` | Totals over the window |
+| `rows_read_per_call` | `rows_read / calls` |
+| `rows_read_per_returned` | `rows_read / rows_returned`; `null` when nothing was returned |
+| `scanned_calls` | Calls that read rows an index on a filtered field (or sort, or include leg) would have skipped |
+| `function_key` | The function's key, `null` for a direct read or a deleted function |
+
+`requests` rows: `method`, `path` (the route template, such as `/db3/:db3Id/records/:model`), `function_id`, `function_key`, `requests`, `wall_ms_avg`, `wall_ms_p50`, `wall_ms_p95`, `dynamo_calls_per_request`, `dynamo_ms_per_request`, `cold_starts`. A function's calls into the platform appear under the function, authorization included.
+
+### Gotchas when reading query costs
+
+- Index the shape with the most `scanned_calls` and the highest `rows_read_per_returned` first; compare `cost.rowsRead` on one read before and after registering the index.
+- Rows appear a few minutes after the reads. Poll with `fresh=1`; don't expect a read made a second ago.
+- Device reads of a synced database cost the server nothing and are not recorded. A local development server records nothing, so read the figures on a deployed environment.
 
 ---
 

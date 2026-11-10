@@ -75,6 +75,7 @@ A function with `authorize` takes no `access` TOML field — omit it entirely; a
 | `webhook` | `null` | The run settles `denied`; the provider still gets its normal answer |
 | `cron` | `null` | The run settles `denied`; the fire still counts |
 | `db3` (a `[[function.triggers.db3]]` change) | `null` | The run settles `denied` |
+| `users-batch` (a [users walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user)'s batch) | `null` | The run settles `denied`, which fails the whole walk at once with `USER_WALK_DENIED` |
 
 ### auth context (read-only)
 
@@ -85,6 +86,8 @@ A function with `authorize` takes no `access` TOML field — omit it entirely; a
 | `auth.memberships()`, `auth.isMemberOf(groupId)`, `auth.memberGroups()`, `auth.hasGroupRole(groupId, role)` | The caller's membership list, with the same one-argument forms as CEL |
 | `auth.collections.resolveRole(collectionId)` | Caller's collection role, or `null` |
 | `auth.db3(db3Id, type).permissions()` / `.model(m).get(id)` / `.query(...)` | The caller's level on the database (`reader` \| `read-write` \| `owner` \| `null`), and its records on the app's authority, typed like `ctx.db3` |
+| `auth.userProperties()` | The caller's own [properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md), defaults applied, or `null` with no caller. One read, made only when called |
+| `auth.users.get(userId)` / `.getBy(name, value)` | Another member with their properties, or the holder of a unique value; `null` if none. One read each, made only when called |
 | `auth.configVar(name)` | A declared app config variable |
 | `auth.trigger` | The door that started the call |
 
@@ -214,7 +217,7 @@ A function’s gate also authorizes its use of prompts, integrations and named l
 
 ## Rule sets (management operations)
 
-A function's `access` gate decides who may run its code; **rule sets** govern who may manage platform resources directly — blob buckets. Groups and collections don't use one: every group and collection has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file. Put a rule those roles don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above).
+A function's `authorize` method decides who may run its code; **rule sets** govern who may manage platform resources directly — blob buckets. Groups and collections don't use one: every group and collection has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file. Put a rule those roles don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above).
 
 ```toml
 # primitive/dev/rule-sets/bucket-access.toml
@@ -255,7 +258,7 @@ primitive rule-sets schema                                   # available context
 primitive functions invoke <key> --user <user-id>           # exercise a function's authorize (or legacy access gate) as that app user
 ```
 
-Client equivalent: `client.ruleSets.test()`, `client.ruleSets.schema()`. For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass a legacy `access` gate, rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
+For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass a legacy `access` gate, rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
 
 ## Gotchas
 
@@ -263,7 +266,7 @@ Client equivalent: `client.ruleSets.test()`, `client.ruleSets.schema()`. For end
 - **Scope function data in code.** A legacy `access` rule cannot inspect function input; validate requested resource IDs and check the caller's membership or ownership inside the function. An `authorize` method can inspect input directly.
 - **Resolve provider IDs from the caller.** Read a trusted user-to-provider mapping using `ctx.user`; accepting a client’s provider ID could expose another account.
 - **Keep a legacy trigger-only function closed to members.** Use `access = "false"` when only a verified webhook should invoke it — a trigger fire never evaluated `access`. Porting the same function to `authorize` needs the doors named explicitly instead; see Porting from `access`, above.
-- **Declare optional variables.** Missing secrets or variables can deny access; guard optional variables with `'KEY' in vars` or `vars.?KEY`.
+- **Declare optional variables.** An undeclared or dynamic reference (`vars.?KEY`) is refused at save; guard an optional variable with `'KEY' in vars`.
 - **`authorize` gives owners and admins no bypass.** Admit them with an explicit check (`requireRole("admin")` or `if (auth.hasRole("admin")) return allow();`).
 - **A module-scope `assertRuntime` hides behind a uniform deny.** `authorize` shares the handler's module scope: a task-only function's module-scope `assertRuntime("task")` throwing while `authorize` loads settles as an `authorize-error` (uniform `403`), not the clear `FUNCTION_RUNTIME_REFUSED` a direct call to a legacy function gets. Call it the runtime it expects.
 - **Agent calls answer their own way.** An agent-call deny is `AGENT_TOOL_ACCESS_DENIED`; on context/history it fails the turn.

@@ -57,7 +57,7 @@ platform = "ios"
 | App secrets and config vars | Deploy configuration |
 | The app-wide `AGENTS.md` | The client's own `AGENTS.md` |
 
-Server function and database type **definitions** are per app — they live in the sync tree, and so do the type declarations functions compile against (`config push` writes `functions/primitive-db3-types.d.ts` into the tree). The **client code** generated from the definitions is per client: run `primitive functions codegen --lang ts -o …` in the web client and `primitive functions codegen --lang swift -o …` in the native one, from each client's own directory, to write each client's typed invokers into its own source tree.
+Server function and database type **definitions** are per app — they live in the sync tree, and so do the type declarations functions compile against (`config push` writes `functions/primitive.d.ts` into the tree). The **client code** generated from the definitions is per client: run `primitive functions codegen --lang ts -o …` in the web client and `primitive functions codegen --lang swift -o …` in the native one, from each client's own directory, to write each client's typed invokers into its own source tree.
 
 ## The database schemas
 

@@ -57,7 +57,7 @@ In the starter template this wiring is owned for you by the template's `userStor
   };
 ```
 
-`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded.
+`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded. It reads the public, unauthenticated `GET /app/{appId}/api/settings/sign-in`; code that doesn't use the client (a login page, a server) can read that route directly and gets the same fields.
 
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 `checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.

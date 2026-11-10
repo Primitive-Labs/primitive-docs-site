@@ -283,6 +283,7 @@ primitive/<env>/
   functions/generated/*.generated.ts # Generated: typed client invokers, one per function
   functions/tsconfig.json         # Scaffolded once: wires sources + declarations together
   db3-types/*.toml                # Database types: [type], [models.*], [triggers.*]; pushing one updates every database of it
+  schemas/*.toml                  # Shared shapes: [defs.<Name>] tables, JSON Schema or a field table, referenced as schemas:<file>#/$defs/<Name> or ref = "schemas.<file>.<Name>"
   blob-buckets/*.toml             # Blob bucket configs
   email-templates/*.toml          # Email template overrides
   rule-sets/*.toml                # Access rule sets
@@ -293,17 +294,48 @@ primitive/<env>/
 
 `functions/<key>.toml` and the TypeScript its `entry` names are yours. Everything else under `functions/` is written by `config push` (and by `primitive functions codegen`, which writes the same files without pushing; `--check` exits non-zero when they are stale — the CI form):
 
-- `primitive-db3-types.d.ts` — the app's database types from `db3-types/*.toml`; types `ctx.db3(db3Id, "<type>").model("<model>")`.
+- `primitive.d.ts` — every generated type, one namespace per family: `Schemas.<Def>` for each `schemas/*.toml` def, `Functions.<Key>Input` / `Functions.<Key>Output`, `Prompts.<Key>PromptOutput` and the agent types, `Db3.<Model>` (and `Db3.<Model>Row` / `Db3.<Model>Declared` for a projection a schema refs), and `UserProperties`. A ref is a reference to its target's one declaration. Import with `import type { Functions, Schemas } from "./primitive"`. It types `defineFunction`, `ctx.prompts.run`, `ctx.db3` and `ctx.users`.
 - `primitive-functions.d.ts` — the `primitive-functions` module's own types.
-- `primitive-function-types.d.ts` — `<Key>Input` / `<Key>Output` from each function's `inputSchema` / `outputSchema`.
-- `primitive-prompt-types.d.ts` — `<Key>PromptOutput` for each prompt with a `[prompt.outputSchema]`; types `ctx.prompts.run("<key>")`.
-- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`); `primitive functions codegen -o <dir>` writes them elsewhere, `--lang swift` emits Swift.
+- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`), each exporting a `<Type><Field>Values` list per enum it types; `primitive functions codegen -o <dir>` writes them elsewhere. `--lang swift` emits Swift, plus `Primitive.generated.swift`: each `schemas/` def, prompt output type and referenced db3 row, declared once and referenced by name from the per-key files.
 - `tsconfig.json` — scaffolded once, then yours; wires the sources and declarations into one program.
 
-Generated on every push, and none of it is sent to the server; see [Server Functions — Codegen](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle) for the rewrite rule, the tsconfig repair, and `codegen --check`.
+Generated on every push, and none of it is sent to the server; see [Server Functions — Pushing](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#pushing) for the rewrite rule, the tsconfig repair, and `codegen --check`.
 
 See [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md) for
 function declarations and trigger configuration.
+
+A pushed function or prompt keeps the shapes it inlined until it is pushed
+again: `schemas/` defs, db3 models, and for a prompt, other prompts' and
+functions' schemas. `config diff` names each one that has since changed on the
+server, as `pinned to schemas/<file>.toml#<Name> (older)`,
+`pinned to db3-types/<type>.toml#<model>/<projection> (older)`,
+`pinned to prompts/<key>.toml#<target> (older)` or
+`pinned to functions/<key>.toml#<input|output> (older)`, `(removed)` when the
+file no longer declares the def or model, or `(deleted)` when it was deleted;
+`--json` lists them as the row's `pins`, each with its `family` (`schemas`,
+`db3`, `prompt` or `fn`). Push the function or prompt again to pick up the
+current shape.
+
+`config diff` also previews each schema a push changes, under its function,
+prompt or `schemas/` row: `<slot>: <class> — <changes>`, `<slot> refs: …` (a
+db3 ref with its projection) and `types: <Namespace>.<Name> +n/−n lines` for each
+declaration of `primitive.d.ts` that changes. Each schema's changes are classified as `additive`, `tightening` or `breaking`:
+`breaking` is a narrower `type`, `enum`, `required`, `properties`, `items`,
+`format` or ref, any edit inside `oneOf`, `anyOf` or `allOf`, or a schema the
+push clears; `tightening` is a narrower bound or flag (`minimum`, `pattern`,
+`nullable` removed). A target row (a `schemas/` file, db3 type, function or
+prompt) prints `dependants:`, the objects pinned to it, server-only ones
+marked. `--json` carries these as `schemas` (`slot`, `class`, `changes`,
+`refs`, `declaration`) and `dependants` (`type`, `key`, `slot`, `state`,
+`inTree`). A reffed member is a reference (`price: Schemas.Money`), so a def
+change shows on the `schemas/` row's `Schemas.<Def>` declaration, not as a
+changed line of the declarations using it. The preview never blocks a push.
+
+`config push` pushes db3 types first, then `schemas/` files, and each prompt after the
+`schemas/` files, prompts and functions its schemas ref, even when that puts a
+chat prompt after the functions leg. `--only prompt/<key>` also pushes the
+prompts and `schemas/` files the selection refs; a function it refs must be
+selected or already on the server.
 
 ## App settings
 
@@ -334,6 +366,11 @@ values when a feature must stay disabled, especially
 Preflight validates files before changes are applied. A `function` check
 includes entry, capabilities, and trigger settings. Any local validation
 failure aborts the push.
+
+Pushing a function or a `schemas/` file needs `primitive-admin` 1.2.0 or
+newer. The server refuses an older CLI's push with `CLI_VERSION_TOO_OLD`, or
+`COMPILED_PAYLOAD_REQUIRED` when it carries no compiled schemas; run
+`npm install -g primitive-admin@latest` and push again.
 
 Apply is incremental: missing secrets, app limits, or conflicts can fail after
 other changes succeed. There is no rollback. Resolve the reported problem and
@@ -389,7 +426,9 @@ A `<key>.tests/<case>.toml` filename identifies the case. Reference the
 configuration and judge prompt by name — `configName`, `evaluatorPromptKey`,
 `evaluatorConfigName` — so the file works unchanged in every app. Push changes
 before running tests: runners use registered server cases, not local files.
-Delete a case file and push with `--prune` to remove it.
+Delete a case file and push with `--prune` to remove it. A prompt's default
+judge is `[prompt] defaultEvaluatorPromptKey`, a prompt key the app has or the
+same push creates; `""` clears it and an absent key leaves it unchanged.
 
 ## Secrets and email
 
@@ -398,8 +437,12 @@ Store credentials with `primitive secrets set` and reference
 
 Email overrides live in `email-templates/<emailType>.toml`. A `[template]`
 requires `emailType` and `subject`; `htmlBody` and `textBody` are optional.
+`htmlBody` HTML-escapes each `{{variable}}`; `textBody` inserts it as written.
 Use `email-sign-in` for sign-in email, retaining its code and expiry variables.
 Delete an override and prune it to restore the built-in template.
+`primitive email-templates preview <type> [--vars '<json>']` renders the
+server's saved template with the type's sample values, `--vars` overriding
+them, without sending. It does not render a local file: push first.
 
 ## Admin access: scopes, step-ups and CI sessions
 
@@ -491,6 +534,14 @@ primitive token --refresh | primitive -e <env> login --token-stdin
 primitive auth sessions list
 primitive auth sessions revoke <session-id>
 ```
+
+**Display name.** `PATCH /admin/api/me` with body `{ "name": "<name>" }`
+changes the caller's own console display name and answers as
+`GET /admin/api/me`. The name is trimmed, 1 to 200 characters; any other body
+field (`email`, `role`, …) is refused 400 `INVALID_PROFILE` and nothing is
+written. It needs `write` and an unpinned login (`primitive login --app all`):
+a pinned token gets `APP_NOT_PINNED`, one without `write` gets
+`INSUFFICIENT_SCOPE`.
 
 **Refusals.** A refused command answers 403 with a `code` and, for a missing
 scope or pin, prints the `primitive login …` command that grants it. A login

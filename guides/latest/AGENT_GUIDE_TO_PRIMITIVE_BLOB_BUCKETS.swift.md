@@ -206,7 +206,7 @@ The signed-URL request endpoint requires `member` permission on the app, so gene
 
 ## From a server function
 
-A server function reaches buckets through `ctx.api.blobBuckets` — `upload`, `download`, `getMetadata`, `getSignedUrl`, `list`, `delete`, `deleteBatch` (up to 500 ids), and bucket-level `getBucket` / `listBuckets` / `updateBucket`, plus `createBucket` / `deleteBucket`, which need the `blobBuckets:createBucket` / `blobBuckets:deleteBucket` capabilities. Function code acts as the system, so the bucket's preset or rule set — which governs client calls — is not evaluated; the function's own `access` gate is the authorization.
+A server function reaches buckets through `ctx.api.blobBuckets` — `upload`, `download`, `getMetadata`, `getSignedUrl`, `list`, `delete`, `deleteBatch` (up to 500 ids), and bucket-level `getBucket` / `listBuckets` / `updateBucket`, plus `createBucket` / `deleteBucket`, which need the `blobBuckets:createBucket` / `blobBuckets:deleteBucket` capabilities. Function code acts as the system, so the bucket's preset or rule set — which governs client calls — is not evaluated; the function's own `authorize` method is the authorization.
 
 A blob a task run reads as input must outlive the run: a retried or replayed step re-reads the same `blobId`, and deleting the blob between attempts fails the step — and the run — with a not-found error. Don't delete such blobs from outside the run (a cancel path, another function) — put them in a bucket whose TTL tier matches their lifespan and let expiry clean them up.
 

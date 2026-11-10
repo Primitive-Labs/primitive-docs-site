@@ -104,6 +104,28 @@ no `outputSchema` on an agent: the final answer is text; anything structured is 
 `"initiator"`, admits only the member whose message started the turn (plus the owner, for
 cancel); `"participants"` admits the owner or any participant.
 
+Every agent schema can be a field table (see the server-functions guide): a tool takes
+`input`/`output` in place of `inputSchema`/`outputSchema`, and an event or the turn context
+carries the field-table keys directly in place of `schema`, keeping `name` or `function`:
+
+```toml
+[prompt.agent.tools.input.fields.delta]
+type = "number"
+required = true
+
+[[prompt.agent.events]]
+name = "applied"
+[prompt.agent.events.fields.callId]
+type = "string"
+required = true
+
+[prompt.agent.turnContext]
+function = "advisor-snapshot"
+ref = "Snapshot"            # the whole turn context is a shared shape
+```
+
+Push refuses `schema` beside field-table keys on one event or turn-context table.
+
 ## Tools
 
 | Declared as | Schemas from | Runs |
@@ -121,6 +143,14 @@ later turns see a stub. `statusText` is shown to members while the call is pendi
 `endsTurn = true` is for server tools: the tool runs as usual, then the turn settles with no
 further model round. A failing call does not end the turn.
 
+Client tool, presentation, event and turn-context schemas may use refs, as prompt schemas do
+(see the Prompts guide, Shared shapes): `ref = "schemas.<file>.<Name>"`, another prompt's
+schema, a function's, or a db3 model (`ref = "<type>.<model>"`: the stored row in a client
+tool's `outputSchema`, the declared fields in every other schema). Another prompt uses this agent's schemas as
+`prompt.<agent key>.tools.<name>.input|output` (a server tool's are its function's) and
+`prompt.<agent key>.events.<kind>`. Push replaces each ref before the provider check below,
+and pushes an agent after every prompt and function it refs.
+
 Push refuses: a server tool whose function is missing or lacks either schema; `endsTurn` on a
 client tool, or with `approval = true`; on a presentation, `function`, `outputSchema`,
 `approval`, `invoke` or `endsTurn`; `references` anywhere else, or naming a property that is
@@ -128,11 +158,14 @@ not an integer or a list of integers; a tool or event schema not translatable wi
 every provider a non-archived config uses. While an agent uses a function (tool, `turnContext.function` or `history.function`),
 archiving it, deleting it, or a schema change the agent cannot take is refused with
 `FUNCTION_USED_BY_AGENT`; change the agent in the same push, or retire it.
-Gemini's JSON Schema subset refuses `$ref`, `allOf`, `not`, conditionals,
+Gemini's JSON Schema subset refuses an unresolved `$ref`, `allOf`, `not`, conditionals,
 `patternProperties`, `prefixItems`, `contains`, `format`, and a free-form
 `{ type: "object", properties: {} }`; it silently drops `additionalProperties: false` and
 `$schema`/`$id`/`$comment` (not a refusal); a string `const` becomes an `enum`; a
 discriminated `oneOf` becomes `anyOf`. Name a property, don't leave a tool's schema empty.
+Push refuses a tool, event or turn-context schema keyword the platform does not enforce
+(`allOf` on an OpenRouter-only agent, …) with `PROMPT_SCHEMA_UNSUPPORTED_KEYWORD`, naming the
+path and the fix.
 
 ### Presentations
 
@@ -806,8 +839,8 @@ Every refusal and failure here carries a stable `code` under the standard error 
 - `handleClientTools` runs only in the turn initiator's views, even under
   `answeredBy = "participants"`; another member answers through your own code and
   `view.answer`.
-- Gemini's schema subset is stricter than the chat prompt's `outputSchema` clean-up: name a
-  property, don't declare a free-form object (`{ type: "object", properties: {} }`).
+- Gemini refuses a free-form object (`{ type: "object", properties: {} }`) in a tool, event or
+  turn-context schema, as it does in a chat prompt's `outputSchema`: name a property.
 - `createSession`, `getSession`, `listSessions` and `recordEvent` act for `userId`, else the
   invoking user; a tool can create a session only for its initiator. Sending, answering,
   cancelling, marking read and member management are client-only.

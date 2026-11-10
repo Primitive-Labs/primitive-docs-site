@@ -77,6 +77,24 @@ primitive integrations logs <integration-id> --run <run-id>
 primitive integrations logs <integration-id> --run <run-id> --step <name>
 ```
 
+`integrations test` builds the request from flags:
+
+| Flag | Sends |
+|------|-------|
+| `--header 'Name: value'` | a header (repeatable) |
+| `--body <json>` | a JSON body |
+| `--form name=value` | a form-urlencoded field (repeatable; a repeated name sends the key twice) |
+| `--field name=value` | a multipart text part (repeatable) |
+| `--file field=@path` | a multipart file part (repeatable) |
+| `--raw-body <path\|->` | the file, or stdin, as the whole body; `--content-type` sets its type |
+
+```bash
+primitive integrations test <integration-id> --method POST --path /upload --field title=Report --file document=@./report.pdf
+```
+
+`--form`, multipart flags, `--raw-body` and `--body` are exclusive body shapes;
+mixing them is refused before the request. Each attachment is limited to 10 MB.
+
 A call made inside a function's `step.do` names its step: the STEP column, and
 under `--json` `correlation.stepId`, `correlation.stepOccurrence` (which use
 of the name, from 0) and `detail.stepAttempt` (which run of the body, from 1).
@@ -98,7 +116,14 @@ expectedOutputPattern = "temperature"
 ```bash
 primitive config push --only integration/weather-api
 primitive integrations tests run-all <integration-id>
+primitive integrations tests runs <integration-id> [--cursor <cursor>]
+primitive integrations tests runs get <integration-id> <run-id>
 ```
+
+`tests runs` prints one page of recent runs; pass the printed `--cursor
+<cursor>` for the next. `tests runs get` prints one run with its output and
+verification checks. One `run-all`'s runs share a comparison group, read with
+`primitive comparisons get <group>`.
 
 Remove a case file and push with `--prune` to delete it. Omitted request fields
 use integration defaults; no body is sent unless the case supplies one.

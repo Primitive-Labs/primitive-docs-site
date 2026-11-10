@@ -57,7 +57,7 @@ In the starter template this wiring is owned for you by `AppState.initialize()` 
   )
 ```
 
-`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded.
+`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded. It reads the public, unauthenticated `GET /app/{appId}/api/settings/sign-in`; code that doesn't use the client (a login page, a server) can read that route directly and gets the same fields.
 
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 `AuthConfigInfo.googleSignInAvailable` computes exactly that against the `ios` entry, and `AppConfigInfo.googleAvailable` is projected from it — the launch UI and the flow cannot disagree.

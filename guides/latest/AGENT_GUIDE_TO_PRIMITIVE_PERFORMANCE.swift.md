@@ -435,7 +435,7 @@ You're calling the same third-party API for the same set of values on behalf of 
 ### Pattern
 
 1. Declare the cached fields on the relevant model in its type.
-2. Add a function with a cron trigger that queries records whose value is stale, calls the integration in bulk (Pattern 4), and writes back with one `bulk`:
+2. Add a function with a cron trigger that queries records whose value is stale, calls the integration in bulk (Pattern 4), and writes back with one `batch`:
 
 ```toml
 # primitive/dev/functions/refresh-security-prices.toml
