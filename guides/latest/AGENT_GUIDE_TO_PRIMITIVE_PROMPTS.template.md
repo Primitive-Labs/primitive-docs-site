@@ -42,6 +42,7 @@ primitive config push
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["text"],
   authorize: requireSignedIn(),
   handler: async (input: { text: string }, ctx) => {
     const result = await ctx.prompts.run("summarizer", {

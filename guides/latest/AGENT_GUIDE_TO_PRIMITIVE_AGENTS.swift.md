@@ -329,6 +329,13 @@ with a client `context` is refused for.
 [function]
 key = "advisor-snapshot"
 entry = "functions/advisor-snapshot/index.ts"
+
+[function.inputSchema]
+type = "object"
+additionalProperties = true   # the turn also sends turnId, timezone, locale and more
+
+[function.inputSchema.properties.variables]
+type = "object"
 ```
 
 ```ts
@@ -336,6 +343,7 @@ entry = "functions/advisor-snapshot/index.ts"
 import { allowCallers, defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["variables"],
   authorize: allowCallers({ agents: true, users: requireSignedIn() }),
   handler: async (input: { variables: { householdId: string } }, ctx) => {
     if (ctx.trigger.kind !== "context") throw new Error("advisor-snapshot only runs as turn context");
@@ -389,6 +397,7 @@ the model's context fails the turn `AGENT_HISTORY_TOO_LARGE`.
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["householdId"],
   authorize: requireSignedIn(),
   handler: async (input: { householdId: string }, ctx) => {
     await assertHouseholdMember(ctx.user!.userId, input.householdId); // your own authorization

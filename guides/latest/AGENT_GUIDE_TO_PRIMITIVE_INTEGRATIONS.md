@@ -35,12 +35,20 @@ primitive config push
 key = "refund"
 entry = "functions/refund/index.ts"
 capabilities = ["integration:stripe"]   # the egress allowlist: one line per integration key
+
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema.properties.paymentIntent]
+type = "string"
+maxLength = 64
 ```
 
 ```ts
 import { defineFunction, requireRole } from "primitive-functions";
 
 export default defineFunction({
+  input: ["paymentIntent"],
   authorize: requireRole("admin"),
   handler: async (input: { paymentIntent: string }, ctx) => {
     const response = await ctx.integrations.call("stripe", {

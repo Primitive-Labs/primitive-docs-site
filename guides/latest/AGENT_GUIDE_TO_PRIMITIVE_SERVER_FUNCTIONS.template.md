@@ -16,10 +16,17 @@ can exceed 30 000 ms has to be a task.
 [function]
 key = "greet"
 entry = "functions/greet/index.ts"
+
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema.properties.name]
+type = "string"
 ```
 
 `key` identifies the function; `entry` is relative to the configuration root.
-Add `inputSchema` and `outputSchema` when inputs and results need validation.
+`inputSchema` validates the input and declares the keys `input` may list; add
+`outputSchema` to validate results.
 
 ## The handler
 
@@ -28,6 +35,7 @@ Add `inputSchema` and `outputSchema` when inputs and results need validation.
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction("greet", {
+  input: ["name"],
   authorize: requireSignedIn(),
   handler: async (input: { name?: string }) => {
     return { message: `Hello ${input.name ?? "world"}` };
@@ -36,8 +44,10 @@ export default defineFunction("greet", {
 ```
 
 Every version pushed today must define `authorize` beside the handler — a
-version with none is refused `FUNCTION_AUTHORIZE_REQUIRED` at push. See
-[Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method).
+version with none is refused `FUNCTION_AUTHORIZE_REQUIRED` at push. `input`
+lists the keys the handler reads; with no list, a member's call hands the
+handler `{}`. See
+[Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#declaring-input-keys).
 
 ```bash
 primitive config push
@@ -73,9 +83,10 @@ a version. It preserves authored sources for `config pull`.
   All other compiler options come from `functions/tsconfig.json` (no DOM); do
   not set `rootDir` there.
 - Import npm packages by name. The built bundle is limited to 5 MB.
-- Pushing a function or a `schemas/` file needs `primitive-admin` 1.2.0 or newer: an older
-  CLI's push is refused with `CLI_VERSION_TOO_OLD`, or `COMPILED_PAYLOAD_REQUIRED` when it
-  carries no compiled schemas; run `npm install -g primitive-admin@latest` and push again.
+- Pushing a function or a `schemas/` file needs `primitive-admin` 1.3.0 or newer, the first
+  CLI whose generated handler types carry the `input` list. An older CLI's push is refused
+  with `CLI_VERSION_TOO_OLD`, or `COMPILED_PAYLOAD_REQUIRED` when it carries no compiled
+  schemas; run `npm install -g primitive-admin@latest` and push again.
 - Treat generated declarations as build output. Use `primitive functions
   codegen --check` in CI. Function, prompt, `schemas/`, db3 and user property
   types are all in `functions/primitive.d.ts`; import them with
@@ -110,14 +121,41 @@ uses an HTTP error. Use `invocationId` to locate its log.
 | `timeoutMs` | Request deadline: 5 000 ms default, 30 000 ms maximum. |
 | `runKey` | Deduplicates task starts; ignored by request invocations. A *failed* run keeps its key — retry with a new one. |
 
-### The access gate
+### Callers who are not signed in
 
-New code defines `authorize` instead — see [Access Control: The authorize method](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method) and its [porting table](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#porting-from-access). What follows is `access`, the CEL rule an already-deployed legacy version still runs; it is frozen and a new or changed version can no longer set it.
+A call with no `Authorization` header is admitted only when the app sets
+`[app] signedOutAccess = true` and the function declares `public = true` and
+has an `authorize` method; any other such call is `401` before the code runs.
+`start` always needs a signed-in caller.
 
-`access` controls member HTTP calls and an agent's tool, context and history
-calls, which it evaluates as the turn's initiator. Owners and admins bypass it.
-Webhooks, cron, and nested starts do not evaluate it; a legacy function
-intended only for these paths uses `access = "false"`, never one an agent calls.
+```toml
+# functions/landing-stats.toml
+[function]
+key = "landing-stats"
+public = true
+```
+
+`authorize` then sees `auth.user = { userId: "", email: null, role: "anonymous" }`
+and the handler `ctx.user = null`. `requireSignedIn()`, `requireRole()` and
+the membership helpers deny that caller; `allowAnyone()` admits it.
+
+The run reads the app's data and writes to app-held databases. These throw
+`FUNCTION_SIGNED_OUT_REFUSED` (403): `ctx.functions.start`,
+`ctx.users.forEachBatch`, any `ctx.agents` call, `notifications.send`,
+creating a database, and changing one the app does not hold. A call about one user must pass `userId`, and naming a member
+works only for reads in a function that declares `users:readAny`.
+
+Gotchas:
+
+- **Test the role, not `auth.user`.** `auth.user` is set for a signed-out
+  caller, so `if (auth.user)` admits them; use `requireSignedIn()`.
+- **A credential that does not validate is `401`**, never anonymous.
+- **`public = true` without `authorize`** is refused at push with
+  `FUNCTION_PUBLIC_REQUIRES_AUTHORIZE`.
+
+### Authorization
+
+A function's `authorize` method is the authorization point — see [Access Control: The authorize method](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method) for the full contract: how it runs on every door (an HTTP call, an agent tool call, a trigger fire, a nested start), what it reads, and the helpers that cover most cases. It fails closed: a version with no `authorize` is refused at push, and a caller `authorize` denies gets `403` with the deny's code.
 
 Function operations use app authority, not the caller’s data permissions.
 Check the caller's access explicitly when acting on a caller-supplied database ID.
@@ -327,7 +365,7 @@ ref = "workspace.tasks"            # row: a stored record, with its id
 | Projection | Shape |
 | --- | --- |
 | `declared` | The declared fields only (closed); storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element` are left out of the declared shape; auto-assigned, stamped and defaulted fields are optional |
-| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned, stamped and defaulted fields are required |
+| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned and stamped fields are required, defaulted fields optional (a stored record can lack one), so a record read with `ctx.db3` can be returned as is |
 
 - An `outputSchema` gets the `row`; every other schema gets the `declared`
   shape. `#row` or `#declared` chooses: `ref = "workspace.tasks#declared"`.
@@ -363,11 +401,12 @@ Use `ctx.functions.start(key, input, { runKey })` to start a child task from
 function code. A repeated key returns the existing run, including a failed
 one. Retry failed work with a new key.
 
-Child tasks inherit the original caller and usually the parent’s context id. A legacy child’s `access` rule is not evaluated; the entry function’s
-`access` rule controls who may start the work. A child with an `authorize`
-method is different: it runs its own `authorize` all the same, at every level
-of the chain — naming the door with `allowCallers({ functions: [parentKey] })`
-— see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance).
+Child tasks inherit the original caller and usually the parent’s context id.
+Starting a child is not itself an authorization decision — the parent's own
+`authorize` was the gate, and its code chose the callee. A child's own
+`authorize` runs all the same, at every level of the chain — naming the door
+with `allowCallers({ functions: [parentKey] })` — see
+[Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance).
 
 Use `assertRuntime("task")` for handlers that require background execution.
 In request mode, `step.do` executes inline, sleeps must fit the request budget,
@@ -511,6 +550,7 @@ Wait for a named lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs, owner? }
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["itemId"],
   authorize: requireSignedIn(),
   handler: async (input: { itemId: string }, ctx, step) => {
     return ctx.locks.withLock(`ingest:${input.itemId}`, {
@@ -635,7 +675,7 @@ const page = await ctx.api.collections.list({ userId: member.userId });
 | Calls | `userId` |
 | --- | --- |
 | `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `db3.aliases.set` (in `body`), `resolve`, `delete`; `ctx.agents.*` | Optional; defaults to the caller |
-| `collections.listForUser`, `groups.listUserMemberships`, `db3.listHeldByUser`, `db3.listSharedWithUser` | Required |
+| `collections.listForUser`, `groups.listUserMemberships`, `db3.listHeldByUser`, `db3.listSharedWithUser`, `ctx.usage.forUser` | Required |
 | App-wide reads (`groups.list`, `users.list`) | None |
 | Calls that hand something to a user (`notifications.send`, `users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
 
@@ -648,6 +688,7 @@ Naming a user other than the caller, with an optional or a required `userId`:
 | Invoked by any other member | The caller | `SUBJECT_USER_FORBIDDEN` (403) |
 | Invoked by any other member, function declares `users:readAny` / `users:actAsAny` | The caller | Allowed on reads / on calls acting as them |
 | A tool, context or history run, and anything it starts | The initiator | `SUBJECT_USER_FORBIDDEN` (403) |
+| A signed-out caller's run | `FUNCTION_SUBJECT_REQUIRED` | Allowed on reads with `users:readAny`; otherwise `SUBJECT_USER_FORBIDDEN` (403) |
 
 The role is read at each call, so a task sees a role change made while it
 slept. A named user who is not a member throws `SUBJECT_USER_NOT_FOUND` (404)
@@ -722,7 +763,7 @@ operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#lim
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
 | High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
-| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), inbox, devices, agent sessions, user aliases, holdings); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
+| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), inbox, devices, agent sessions, user aliases, holdings, usage); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
 
 **Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
 
@@ -864,6 +905,18 @@ await ctx.api.email.send({
 
 `ctx.api.analytics.writeForUser({ body: { userId, action, feature, … } })` records an event attributed to a **subject** user rather than to whoever is running. Function-only route (`POST /app/{appId}/api/analytics/write-for-user`; `403 FUNCTION_ROUTE_FUNCTION_ONLY` otherwise). The subject must be a member of this app; `appId` and `userId` are reserved — a `context` object of your own cannot rewrite whose activity the event is. Fields and refusal codes: [Analytics — Writing Events from a Server Function](AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.md#writing-events-from-a-server-function).
 
+## Reading a member's usage
+
+`ctx.usage.forUser(userId, { since?, until? })` (beta) answers one member's usage in this app: `meters` (`meter`, `unit`, `quantity`, `bytes`, `points`, costliest first) over the window, and `storage` (bytes they own now per storage meter). No cost field. The window is UTC and half-open, ISO 8601 strings or `Date`s, default the 30 days before now; the raw operation is `ctx.api.usage.forUser({ userId, since, until })`.
+
+```ts
+const usage = await ctx.usage.forUser(member.userId, { since: new Date(Date.now() - 86_400_000) });
+const tokens = usage.meters.find((line) => line.meter === "llm.tokens.in")?.quantity ?? 0;
+```
+
+- Naming follows [Which user a call is about](#which-user-a-call-is-about): another member needs an owner- or admin-invoked run, a run with no caller, or `users:readAny`; an agent-driven run reads only its initiator.
+- `SUBJECT_USER_NOT_FOUND` (404) for anyone who is not a member of this app; `USAGE_WINDOW_INVALID` (400) for a bound that is not ISO 8601 or `since` not before `until`; `USAGE_WINDOW_TOO_OLD` (400) for `since` more than 90 days ago.
+
 ## Helpers: `pMap`, `ulid`, `stepPolicy`
 
 ```ts
@@ -902,14 +955,15 @@ await orders.patch(open.items[0].id, { data: { status: "picked" }, condition: { 
 The handle's contract:
 
 - **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
-- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). A write's `data` takes `null` on any field the model leaves optional (`patch(id, { data: { note: null } })`), with no cast: it stores `null` and does not remove the field; on a string set it empties the set. A required field refuses `null`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name (`<M extends "tasks" | "users">(name: M) => db.model(name).query(...)`) passes its filter as a string, `filter: JSON.stringify(filter)`: inside it the model isn't known, so an object filter can't be typed against one model's fields.
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
 - **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`. `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database.
 - **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `patch` or `increment` on a missing record; nothing is created), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
 - **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
-- **Typed filters and sorts.** The `ctx.db3(id, "<type>").model("<Model>")` handle types the filter and sort of `query`, `count` and `aggregate` (`options.filter`, `options.sort.direction`) from the model's declared fields. In this release a mismatch through the handle (`$startsWith` on a number) is a `config push` warning and the function still ships; a later release refuses it. Each model also gets `Db3.<Model>Filter` and `Db3.<Model>Sort` in `functions/primitive.d.ts`; a value annotated with them (`const filter: Db3.OrdersFilter = { total: { $gte: 10 } }`) is refused by the typecheck now. To make the handle's mismatches errors now, add `functions/db3-strict.d.ts` holding `export {};` and then `declare module "primitive-functions" { interface Db3FilterTyping { enforced: true } }`. A declared field's value follows its kind (a string for `string`, `id` and an enum, a `Date` or date string for `date`, any scalar for `stringset` and `vector`, `null` for all); at most one of `$startsWith`, `$endsWith`, `$containsText` per field; `$and`/`$or` nest, `$search`/`$near` are top-level; a sort takes `1` or `-1`. Null and unset matching: [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Gotchas: a field the model doesn't declare is open, so a misspelled field name is not refused; a filter variable typed `Record<string, unknown>` is not checked, so type it `Db3.<Model>Filter`; the opt-in file must start with `export {};`, or it replaces the `primitive-functions` module and every function importing it fails to push. `--no-typecheck` skips the warning check too.
+- **Typed filters and sorts.** The `ctx.db3(id, "<type>").model("<Model>")` handle types the filter and sort of `query`, `count` and `aggregate` (`options.filter`, `options.sort.direction`) from the model's declared fields. In this release a mismatch through the handle (`$startsWith` on a number) is a `config push` warning and the function still ships; a later release refuses it. `save`'s `upsertOn` and a batch `upsert`'s `constraint` are checked the same way: a literal must be one of the model's unique fields or named unique constraints; a `string` variable is not checked. Each model also gets `Db3.<Model>Filter`, `Db3.<Model>Sort` and `Db3.<Model>Unique` (those names) in `functions/primitive.d.ts`; a value annotated with them (`const filter: Db3.OrdersFilter = { total: { $gte: 10 } }`) is refused by the typecheck now. To make the handle's mismatches errors now, add `functions/db3-strict.d.ts` holding `export {};` and then `declare module "primitive-functions" { interface Db3FilterTyping { enforced: true } }`. A declared field's value follows its kind (a string for `string`, `id` and an enum, a `Date` or date string for `date`, any scalar for `stringset` and `vector`, `null` for all); at most one of `$startsWith`, `$endsWith`, `$containsText` per field; `$and`/`$or` nest, `$search`/`$near` are top-level; a sort takes `1` or `-1`. Null and unset matching: [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Gotchas: a field the model doesn't declare is open, so a misspelled field name is not refused; a filter variable typed `Record<string, unknown>` is not checked, so type it `Db3.<Model>Filter`; the opt-in file must start with `export {};`, or it replaces the `primitive-functions` module and every function importing it fails to push. `--no-typecheck` skips the warning check too.
 
 | Kind | Operators |
 |---|---|
@@ -983,6 +1037,21 @@ And the ones that are the same under both:
 | Response size | 1 MiB, kept on the run row | — |
 | Values per `$in` / `$nin` list | 1 000 | — |
 
+`ratePerMinute` is one count per app and function, shared by invoke, start,
+nested starts, agent tool calls, webhook deliveries and trigger fires; past it
+the call answers `429` `FUNCTION_RATE_LIMITED` with `Retry-After`. Read a
+function's count with `primitive rate-counters get fn:<function-id>` (the id
+`primitive functions list` shows).
+
+**Gotchas**
+
+- A `ratePerMinute` of 20 or more can refuse slightly before the limit when
+  calls are spread across locations, never after it. Under 20 the count is
+  exact; lower the limit below 20 if an exact count matters.
+- When the count cannot be reached, an invoke or start answers `503`
+  `FUNCTION_RATE_UNAVAILABLE` with `Retry-After` once slots already taken run
+  out; cron and webhook fires still run. Retry after the header's delay.
+
 The platform adds no cap of its own on how many task runs run at once; the
 start rate above is its only control. The task runtime has its own
 ceilings: at most 50 000 task runs running at once per
@@ -1052,7 +1121,7 @@ cron entry's name):
 type = "orders"                        # the db3 type to watch; at most ten per function, each named once
 ```
 
-Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. The input is `{ db3Id, type, from, to, principal, changes: [{ l, model, id, kind }] }` (`l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`. A handler whose input schema closes `changes`' object shape must allow `l`, or the whole batch is refused.
+Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. A bulk load starts none. The input is `{ db3Id, type, from, to, principal, changes: [{ l, model, id, kind }] }` (`l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`. A handler whose input schema closes `changes`' object shape must allow `l`, or the whole batch is refused.
 
 - **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Inspect `input.changes` and skip what your own writes produced.
 
@@ -1147,6 +1216,15 @@ Disable stops new calls; pushing code does not re-enable the function.
 Archive preserves versions for existing runs. Prune permanently deletes the
 function and is refused until its runs finish or are terminated.
 
+On a version with `authorize`, `functions get` prints a `Handler input` row
+(the declared `input` keys, `none`, or `none (empty list)` for `[]`) and a
+`Trigger doors` row (`all`: trigger and agent hook doors hand the handler the
+whole input). One run's admissions are read with
+`primitive functions logs <function-id> --run <run-id> --json`: on an allowed
+call, `detail.authorize.input` is the key list, `"all"` or `"none"`; a refused
+call's block has no `input`. `functions runs --json` carries no `authorize`
+block.
+
 ### Running one
 
 ```bash
@@ -1168,15 +1246,14 @@ which `primitive functions list` prints beside each key.
 | `130` | Ctrl-C, same resume line; a second one exits at once |
 | Flag | Identity | Notes |
 |---|---|---|
-| *(none)* | Your app user | `Ran as <user-id> (<role>)`; a legacy `access` gate is bypassed for an owner or admin — an `authorize` method is not |
+| *(none)* | Your app user | `Ran as <user-id> (<role>)`; an `authorize` method gives an owner or admin no implicit bypass |
 | `--user <user-id>` | That app user | Mints a ten-minute token, invokes with it, revokes it on every path including Ctrl-C; the value is never printed. Owner and admin only |
 | `--as system` | No caller at all | `ctx.user` null, `ctx.trigger` `{ kind: "manual", userId: <you> }`, the app's system authority — the shape a cron or webhook fire has. Owner and admin only |
 
 
-`--user` and `--as system` are mutually exclusive. Use a member identity when
-testing a legacy `access` rule, because owners and admins bypass it; an
-`authorize` method gives them no such bypass, so invoking it as yourself
-already exercises it.
+`--user` and `--as system` are mutually exclusive. Invoking as yourself
+already exercises `authorize`, because it gives an owner or admin no implicit
+bypass.
 
 ### Versions and rollback
 
@@ -1202,4 +1279,4 @@ code and configuration. Existing tasks keep their starting version.
 - [Configuration](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md) — the sync loop that pushes `functions/<key>.toml` and its code.
 - [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — types, records, synced databases and access.
 - [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md), [Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md), [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) — what a function calls out to.
-- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the `authorize` method every version defines, and the CEL a legacy version's `access` gate is written in.
+- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the `authorize` method every version defines.

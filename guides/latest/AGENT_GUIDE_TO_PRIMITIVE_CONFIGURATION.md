@@ -292,11 +292,11 @@ primitive/<env>/
 
 ### Functions directory
 
-`functions/<key>.toml` and the TypeScript its `entry` names are yours. Everything else under `functions/` is written by `config push` (and by `primitive functions codegen`, which writes the same files without pushing; `--check` exits non-zero when they are stale — the CI form):
+`functions/<key>.toml` and the TypeScript its `entry` names are yours. Everything else under `functions/` is written by `config push` (and by `primitive functions codegen`, which writes the same files without pushing; `--check` exits non-zero when they are stale — the CI form; both refuse a schema push would refuse, with push's message):
 
 - `primitive.d.ts` — every generated type, one namespace per family: `Schemas.<Def>` for each `schemas/*.toml` def, `Functions.<Key>Input` / `Functions.<Key>Output`, `Prompts.<Key>PromptOutput` and the agent types, `Db3.<Model>` (and `Db3.<Model>Row` / `Db3.<Model>Declared` for a projection a schema refs), and `UserProperties`. A ref is a reference to its target's one declaration. Import with `import type { Functions, Schemas } from "./primitive"`. It types `defineFunction`, `ctx.prompts.run`, `ctx.db3` and `ctx.users`.
 - `primitive-functions.d.ts` — the `primitive-functions` module's own types.
-- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`), each exporting a `<Type><Field>Values` list per enum it types; `primitive functions codegen -o <dir>` writes them elsewhere. `--lang swift` emits Swift, plus `Primitive.generated.swift`: each `schemas/` def, prompt output type and referenced db3 row, declared once and referenced by name from the per-key files.
+- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`), each exporting a `<Type><Field>Values` list per enum it types; `primitive functions codegen -o <dir>` writes them elsewhere. A field that is exactly a shared `schemas/` enum is typed `<Name>`, imported from `generated/shared-enums.generated.ts` (written only when an invoker uses one; it exports `<Name>` and `<Name>Values`, and the per-use list is a deprecated alias of `<Name>Values`). A function keyed `shared-enums` is refused while that file is written. `--lang swift` emits Swift, plus `Primitive.generated.swift`: each `schemas/` def, prompt output type and referenced db3 row, declared once and referenced by name from the per-key files.
 - `tsconfig.json` — scaffolded once, then yours; wires the sources and declarations into one program.
 
 Generated on every push, and none of it is sent to the server; see [Server Functions — Pushing](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#pushing) for the rewrite rule, the tsconfig repair, and `codegen --check`.
@@ -355,6 +355,17 @@ cannot change (`PROTECTION_FIXED_ON_CHILD`). A file without the line pushes
 writes need a step-up; see
 [Admin access](#admin-access-scopes-step-ups-and-ci-sessions).
 
+`[app].signedOutAccess = true` lets callers who are not signed in invoke the
+app's functions that declare `public = true` (see the server functions
+guide's "Callers who are not signed in"). Off by default; a file without the
+line pushes `false`.
+
+`[app].allowFieldRemoval = true` lets `config push --allow-field-removal`
+push database type changes that would make stored records unreadable (see the
+databases guide's "Changing a type"). The flag reads the setting as stored
+before the push, so enable it in one push and use it in the next. Pulled only
+when set; a file without the line clears it.
+
 Removing a managed setting clears it or restores its default. Keep explicit
 values when a feature must stay disabled, especially
 `emailSignInEnabled = false`.
@@ -367,14 +378,19 @@ Preflight validates files before changes are applied. A `function` check
 includes entry, capabilities, and trigger settings. Any local validation
 failure aborts the push.
 
-Pushing a function or a `schemas/` file needs `primitive-admin` 1.2.0 or
-newer. The server refuses an older CLI's push with `CLI_VERSION_TOO_OLD`, or
+Pushing a function or a `schemas/` file needs `primitive-admin` 1.3.0 or
+newer, the first CLI whose generated handler types carry a function's `input`
+list. The server refuses an older CLI's push with `CLI_VERSION_TOO_OLD`, or
 `COMPILED_PAYLOAD_REQUIRED` when it carries no compiled schemas; run
 `npm install -g primitive-admin@latest` and push again.
 
 Apply is incremental: missing secrets, app limits, or conflicts can fail after
 other changes succeed. There is no rollback. Resolve the reported problem and
 push again; applying successful changes again is safe.
+
+A warning starting `platform transition <name>:` means a pushed `schemas/` file
+or function uses a form the platform is replacing. The push succeeded; the line
+names the call site and its replacement. Make that change and push again.
 
 ### Drift and conflicts
 

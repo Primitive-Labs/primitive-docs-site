@@ -23,6 +23,7 @@ Reach for a lock only when none of these fit: a critical section spanning multip
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction("import-portfolio", {
+  input: ["portfolioId"],
   authorize: requireSignedIn(),
   handler: async (input: { portfolioId: string }, ctx) =>
     ctx.locks.withLock(`portfolio-import:${input.portfolioId}`, {

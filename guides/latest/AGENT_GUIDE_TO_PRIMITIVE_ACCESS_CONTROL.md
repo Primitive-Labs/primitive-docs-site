@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Access Control
 
-Authorize resource operations with CEL rules. A server function's own call gate works differently: every version pushed today defines an `authorize` method that decides in code (below); `access`, its frozen CEL predecessor, still runs for an already-deployed legacy version but a new or changed one can no longer set it — see Porting from `access`. Test a CEL rule as a regular member because app owners and admins bypass rules — an `authorize` method gives them no such bypass.
+A server function's own call gate is a method you write: every version pushed today defines an `authorize` method that decides who may call it in code (below). Rule sets and metadata rules instead use CEL — test a CEL rule as a regular member, because app owners and admins bypass rules; an `authorize` method gives them no such bypass.
 
 ## First rule
 
@@ -17,10 +17,10 @@ This function admits a member of the group the input names. Inside the function,
 
 ## Identity context
 
-Available to every access rule — `access`, rule sets, metadata rules — but
-not to a webhook handshake `when`, which is CEL over the request shape
-(`body`, `query`, `headers`, `rawBody`), not an access rule; see the server-functions
-guide's webhook verification section.
+Available to a rule set or metadata rule, but not to a webhook handshake
+`when`, which is CEL over the request shape (`body`, `query`, `headers`,
+`rawBody`), not an access rule; see the server-functions guide's webhook
+verification section.
 
 | Variable / function | Meaning |
 |---|---|
@@ -36,7 +36,7 @@ guide's webhook verification section.
 
 Prefer membership checks over user-ID comparisons: `isMemberOf('01JD7E8V3K9Q2N6R4T5W0X1Y2Z')` (the `groupId` the group's create returned), `size(memberGroups()) > 0`.
 
-A legacy function's `access` rule can check roles and group membership, but cannot read database records. Store entitlements as group memberships when they must be checked by `access`, or move the check into an `authorize` method (below), which can read records directly.
+A rule set or metadata rule can check roles and group membership, but cannot read database records. Store entitlements as group memberships when they must be checked by a rule, or move the check into a function's `authorize` method (below), which can read records directly.
 
 ## The `authorize` method
 
@@ -59,23 +59,91 @@ export default defineFunction("get-order", {
 });
 ```
 
-A function with `authorize` takes no `access` TOML field — omit it entirely; a new version pushed with both is refused `FUNCTION_ACCESS_AMBIGUOUS`. `allow(resolved)` becomes `ctx.auth` in the handler (`allow()` resolves `null`). `deny(code, message?, { expose? })` takes `FORBIDDEN` | `NOT_FOUND` | `INVALID`. A denied caller gets `403 FUNCTION_ACCESS_DENIED` whatever the code, unless the deny used `{ expose: true }` on `NOT_FOUND` (then `404` with that code and message; `expose` does nothing on the other codes). No implicit allow: a throw, a timeout, a return value other than `allow()`/`deny()`, or a non-serializable `resolved` all deny the caller the same uniform way.
+`allow(resolved)` becomes `ctx.auth` in the handler (`allow()` resolves `null`). `deny(code, message?, { expose? })` takes `FORBIDDEN` | `NOT_FOUND` | `INVALID`. A denied caller gets `403 FUNCTION_ACCESS_DENIED` whatever the code, unless the deny used `{ expose: true }` on `NOT_FOUND` (then `404` with that code and message; `expose` does nothing on the other codes). No implicit allow: a throw, a timeout, a return value other than `allow()`/`deny()`, or a non-serializable `resolved` all deny the caller the same uniform way.
 
 `authorize` runs on every door: invoke and task start, `--as system`, `ctx.functions.start`, agent tool/context/history calls, webhook deliveries, cron fires and database change triggers. A webhook, cron or db3 deny records the fire's run as `denied` before the handler runs, with the code leading its error message (`FORBIDDEN: …`); the provider still gets its normal answer and a cron fire still counts.
 
+### Declaring input keys
+
+`input` lists the top-level input keys the handler reads. After an allow on a caller door, the handler gets only those keys; `authorize` still reads the whole input. An `authorize` function with no `input` hands its handler `{}` there — the migration is "add `authorize`, declare `input`":
+
+```ts
+import { defineFunction, requireMember } from "primitive-functions";
+
+export default defineFunction({
+  // The one input key the handler reads. `teamId` is for authorize alone.
+  input: ["note"],
+  authorize: requireMember((input: { teamId: string; note: string }) => input.teamId, "manager"),
+  handler: async (input, ctx) => {
+    // input is { note }; the team is the one authorize checked.
+    return { teamId: ctx.auth.groupId, note: input.note.trim() };
+  },
+});
+```
+
+Every listed key must be a property of the TOML `inputSchema`:
+
+```toml
+[function.inputSchema]
+type = "object"
+required = ["teamId", "note"]
+
+[function.inputSchema.properties.teamId]
+type = "string"
+maxLength = 64
+
+[function.inputSchema.properties.note]
+type = "string"
+maxLength = 500
+```
+
+The handler's input is typed to the listed keys, so reading another key fails the push typecheck. A listed key the caller didn't send is absent, not `undefined`. Push refuses a list it can't record:
+
+| Code | When |
+|---|---|
+| `FUNCTION_INPUT_LIST_INVALID` | Not an array of strings, a repeated key, over 64 keys, or a key that is empty, over 64 characters, or outside `[A-Za-z0-9_$.-]` |
+| `FUNCTION_INPUT_KEY_UNDECLARED` | A listed key isn't an `inputSchema` property; names the key and the declared properties |
+| `FUNCTION_INPUT_SCHEMA_REQUIRED` | `input` declared, but `inputSchema` declares no object properties |
+
+Trigger and agent hook doors (`webhook`, `cron`, `db3`, `users-batch`, `context`, `history`) hand the handler the whole input whatever `input` lists.
+
+**Big inputs:** the list names top-level keys, so fold a wide form into one nested object and list it once. Keep ids at the top level, where `authorize` checks them:
+
+```ts
+import { defineFunction, requireMember } from "primitive-functions";
+
+interface SaveProfileInput {
+  // Top level: the id authorize checks.
+  householdId: string;
+  // Nested: the form, named once in the list.
+  profile: { name: string; birthYear: number; riskTolerance: "low" | "medium" | "high" };
+}
+
+export default defineFunction({
+  input: ["profile"],
+  authorize: requireMember((input: SaveProfileInput) => input.householdId, "member"),
+  handler: async (input, ctx) => {
+    // input is { profile }; the household is the one authorize checked.
+    return { householdId: ctx.auth.groupId, name: input.profile.name.trim() };
+  },
+});
+```
+
+Declare `profile` as an object property of `inputSchema` with its own `properties`. A new form field is a schema edit inside `profile`; a field naming another resource goes top level, where `authorize` can check it. There is no wildcard: an explicit list makes a handler that reads a new key fail the push typecheck until the list names it. Inside the nested object, `inputSchema` is the only guard, so bound its fields there.
+
 ### Doors at a glance
 
-| Door | `auth.user` | A deny |
-|---|---|---|
-| `http` (invoke or start) | The caller | `403`/`404` before a run id exists; the call's invocation log records it `denied` |
-| `function` (a nested start) | The chain's root caller, the same at every level however deep it nests; `null` when a trigger rooted it. `auth.trigger.functionKey` names only the parent directly above | Same as `http`. Every level's own `authorize` runs — a parent's `ctx.functions.start` is the capability to try, not a bypass |
-| `manual` (`--as system`) | The admin who ran it, with role `"admin"` | Same as `http` |
-| `tool` | The turn's initiator | `AGENT_TOOL_ACCESS_DENIED`, the tool error the model reads; logged the same way |
-| `context`, `history` | The turn's initiator | Fails the turn; logged the same way |
-| `webhook` | `null` | The run settles `denied`; the provider still gets its normal answer |
-| `cron` | `null` | The run settles `denied`; the fire still counts |
-| `db3` (a `[[function.triggers.db3]]` change) | `null` | The run settles `denied` |
-| `users-batch` (a [users walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user)'s batch) | `null` | The run settles `denied`, which fails the whole walk at once with `USER_WALK_DENIED` |
+| Door | `auth.user` | Handler's input | A deny |
+|---|---|---|---|
+| `http` (invoke or start) | The caller | The listed keys (`{}` with no list) | `403`/`404` before a run id exists; the call's invocation log records it `denied` |
+| `function` (a nested start) | The chain's root caller, the same at every level however deep it nests; `null` when a trigger rooted it. `auth.trigger.functionKey` names only the parent directly above | The listed keys | Same as `http`. Every level's own `authorize` runs — a parent's `ctx.functions.start` is the capability to try, not a bypass |
+| `manual` (`--as system`) | The admin who ran it, with role `"admin"` | The listed keys | Same as `http` |
+| `tool` | The turn's initiator | The listed keys | `AGENT_TOOL_ACCESS_DENIED`, the tool error the model reads; logged the same way |
+| `context`, `history` | The turn's initiator | The whole input | Fails the turn; logged the same way |
+| `webhook` | `null` | The whole input | The run settles `denied`; the provider still gets its normal answer |
+| `cron` | `null` | The whole input | The run settles `denied`; the fire still counts |
+| `db3` (a `[[function.triggers.db3]]` change) | `null` | The whole input | The run settles `denied` |
+| `users-batch` (a [users walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user)'s batch) | `null` | The whole input | The run settles `denied`, which fails the whole walk at once with `USER_WALK_DENIED` |
 
 ### auth context (read-only)
 
@@ -123,6 +191,7 @@ export default defineFunction("daily-sweep", {
 import { allowCallers, defineFunction, requireRole } from "primitive-functions";
 
 export default defineFunction("send-reminder", {
+  input: ["householdId"],
   authorize: allowCallers({ agents: true, users: requireRole("admin") }),
   handler: async (input: { householdId: string }) => {
     await sendReminder(input.householdId);
@@ -154,21 +223,6 @@ export default defineFunction("team-digest", {
 
 Call `fail(code, message?)` from a handler to end it with your own code; the caller gets `{ errorCode: code, error: message ?? code }`. Any non-empty string is a valid code. Called from inside `authorize` instead, it throws and denies the caller the same uniform way.
 
-### Porting from `access`
-
-A legacy version keeps running its stored `access` rule unchanged for as long as it stays active — `access` is frozen, and create/update refuse one in the request body with `FUNCTION_ACCESS_FROZEN`. The moment you push a changed version it must define `authorize`: no `authorize` is refused `FUNCTION_AUTHORIZE_REQUIRED` (names the function, shows the object form); `authorize` with `access` still in the TOML is refused `FUNCTION_ACCESS_AMBIGUOUS`. No migration tool — port by hand, then delete the `access` line:
-
-| CEL `access` | Port to `authorize` |
-|---|---|
-| `hasRole(role)` | `requireRole(role)` |
-| `isMemberOf(groupId)` | `requireMember(() => groupId)` |
-| `"true"` | `requireSignedIn()` |
-| `"false"` | `allowCallers({})` |
-
-Two traps:
-- `"true"` is not `allowAnyone()` — a function whose code assumes a real caller (reads `ctx.user.userId`, writes under it) needs `requireSignedIn()`; `allowAnyone()` admits an anonymous-session caller the same way.
-- The admin bypass is gone. A rule that admitted an owner or admin only through the bypass, not through the expression itself, needs that case back explicitly (`if (auth.hasRole("admin")) return allow();`, or a `requireRole` threshold that covers it — it ranks `owner` > `admin` > `member`, unlike `hasRole`'s exact match). The same loss reaches triggers: `access = "false"` on a cron/webhook-only function worked because a trigger fire never consulted it, but `authorize` runs on every door — port to `allowCallers({ webhook: true, cron: true })`, naming the doors it uses, plus `manual: true` to keep starting it by hand with `--as system`.
-
 ### Testing `authorize` without running the handler
 
 `primitive functions authorize <key>` runs only `authorize` — the handler never runs — through an admin-only endpoint, and prints the decision:
@@ -196,13 +250,12 @@ primitive functions authorize --cases --all          # run every case file in th
 
 **Testing a new `authorize` in a child app**: create one (`primitive apps children create <slug>`), push the branch into it, run `--cases`/`--cases --all` against it, iterate, then select the parent and push the merged tree — the same loop as any other config change.
 
-**Push lints** (`config push`, on a build with `authorize`): warns when `authorize` reads neither `auth.user` nor `auth.trigger` (use `allowAnyone()` if that's deliberate); warns on an `inputSchema` string with no `maxLength` or array with no `maxItems`, by path; refuses outright when `authorize` admits anyone (`allowAnyone()`, or an admitting `allowCallers` arm) and the version is write-capable — a write/send family the manifest records, or a declared `integration:`/high-blast capability — unless `[function] public = true` is set. Without it the push is refused `FUNCTION_PUBLIC_WRITE_UNDECLARED`.
+**Push lints** (`config push`, on a build with `authorize`): warns when `authorize` reads neither `auth.user` nor `auth.trigger` (use `allowAnyone()` if that's deliberate); warns on an `inputSchema` string with no `maxLength` or array with no `maxItems`, by path; warns when a key in `input` is also a key of an object literal passed to `allow(…)` (`'<key>' is both declared in input and resolved by authorize`): read `ctx.auth.<key>` and drop the key from `input`, unless the handler needs the caller's own value — declare what the caller sent and the handler merely needs, resolve what `authorize` checked or loaded; refuses outright when `authorize` admits anyone (`allowAnyone()`, or an admitting `allowCallers` arm) and the version is write-capable — a write/send family the manifest records, or a declared `integration:`/high-blast capability — unless `[function] public = true` is set. Without it the push is refused `FUNCTION_PUBLIC_WRITE_UNDECLARED`. `public = true` also opens the function to callers who are not signed in when the app sets `[app] signedOutAccess = true`; `auth.user` is then `{ userId: "", email: null, role: "anonymous" }`. A version that declares it without `authorize` is refused `FUNCTION_PUBLIC_REQUIRES_AUTHORIZE`.
 
 ## Surfaces and their extra context
 
 | Surface | Rule controls | Default for regular members |
 |---|---|---|
-| Function `access` (legacy only) | Who can invoke or start an already-deployed version with no `authorize` | Denied without a rule; frozen — a new or changed version can no longer set it |
 | Function `authorize` | Who can invoke it, decided in code | Required — push refuses a new or changed version with none |
 | Blob bucket preset or rule set | Reads, uploads, listing, deletion, sharing | A preset or rule set is required |
 | Metadata `readRule` / `writeRule` | Reading or writing category values | Denied without the rule |
@@ -255,25 +308,24 @@ readRule = "memberGroupsOf(md.self.classLink.classId, 'class-students').exists(c
 ```bash
 primitive rule-sets test <rule-set-id> --scenario '{...}'   # dry-run against a simulated scenario
 primitive rule-sets schema                                   # available context variables/functions
-primitive functions invoke <key> --user <user-id>           # exercise a function's authorize (or legacy access gate) as that app user
+primitive functions invoke <key> --user <user-id>           # exercise a function's authorize as that app user
 ```
 
-For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass a legacy `access` gate, rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
+For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
 
 ## Gotchas
 
-- **Test a legacy `access` rule as a member.** Owners and admins bypass it; an `authorize` method gives them no such bypass, so testing it as yourself already exercises it.
-- **Scope function data in code.** A legacy `access` rule cannot inspect function input; validate requested resource IDs and check the caller's membership or ownership inside the function. An `authorize` method can inspect input directly.
 - **Resolve provider IDs from the caller.** Read a trusted user-to-provider mapping using `ctx.user`; accepting a client’s provider ID could expose another account.
-- **Keep a legacy trigger-only function closed to members.** Use `access = "false"` when only a verified webhook should invoke it — a trigger fire never evaluated `access`. Porting the same function to `authorize` needs the doors named explicitly instead; see Porting from `access`, above.
 - **Declare optional variables.** An undeclared or dynamic reference (`vars.?KEY`) is refused at save; guard an optional variable with `'KEY' in vars`.
 - **`authorize` gives owners and admins no bypass.** Admit them with an explicit check (`requireRole("admin")` or `if (auth.hasRole("admin")) return allow();`).
-- **A module-scope `assertRuntime` hides behind a uniform deny.** `authorize` shares the handler's module scope: a task-only function's module-scope `assertRuntime("task")` throwing while `authorize` loads settles as an `authorize-error` (uniform `403`), not the clear `FUNCTION_RUNTIME_REFUSED` a direct call to a legacy function gets. Call it the runtime it expects.
+- **A module-scope `assertRuntime` hides behind a uniform deny.** `authorize` shares the handler's module scope: a task-only function's module-scope `assertRuntime("task")` throwing while `authorize` loads settles as an `authorize-error` (uniform `403`). Call it the runtime it expects.
 - **Agent calls answer their own way.** An agent-call deny is `AGENT_TOOL_ACCESS_DENIED`; on context/history it fails the turn.
 - **Deep in a chain, `ctx.user` is still the root.** Inside a nested start, `ctx.user` names the member who started the chain's first function, never whoever called the function directly above you. Scope by what this function's own `authorize` resolved into `ctx.auth`, not by re-trusting `ctx.user` at each level.
 - **Write `authorize` above `handler`.** `ctx.auth` is typed from `authorize`'s `allow` with no annotations, but only when `authorize` comes first: after the handler, an unannotated `authorize` arrow leaves `ctx.auth` typed `WriteAuthorizeBeforeHandler | null`, and every field read fails to compile.
 - **A task run's `ctx.auth` is capped.** Over 64 KB, the task start fails `500 FUNCTION_AUTH_TOO_LARGE` (a cron fire records a failed run); over 16 KB, each step of the run logs a warning. Resolve ids and the rows the handler needs.
 - **A flagged `inputSchema` defaults closed.** A build with `authorize` defaults `additionalProperties: false` on an `inputSchema` that doesn't set it; a schema whose `anyOf`/`oneOf` members declare their own `properties` is left open instead, and push warns.
+- **A trigger-door handler is still typed to the list.** The compiler can't tell the door, so list the keys a webhook, cron, db3, walk or hook handler reads (it gets them anyway), or cast `input`.
+- **A platform-built body must pass the closed schema.** On a webhook, db3, walk or agent hook door, set `additionalProperties = true` under `[function.inputSchema]` or declare every key the platform sends; otherwise the call is refused as invalid before `authorize` runs.
 
 ## Recipe: subscription entitlement
 

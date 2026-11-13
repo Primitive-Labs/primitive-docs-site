@@ -57,6 +57,7 @@ Call `ctx.api.notifications.send({ body })` with the same send fields. The funct
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["userId", "jobId"],
   authorize: requireSignedIn(),
   handler: async (input: { userId: string; jobId: string }, ctx) => {
     const sent = await ctx.api.notifications.send({

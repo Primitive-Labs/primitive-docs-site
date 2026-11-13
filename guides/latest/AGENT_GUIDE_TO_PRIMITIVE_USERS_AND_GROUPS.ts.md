@@ -459,7 +459,7 @@ Share a synced database with a group, and every member gets the permission; acce
 
 A sync-off database can't be shared, with a group or anyone: members reach its records through **server functions**, so group membership gates the data in two places — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#sync-off):
 
-- **The function's `authorize`** — checks the caller's identity with helpers (`requireRole`, `requireMember`) or the `auth` context directly (`auth.hasRole`, `auth.isMemberOf`, `auth.memberGroups`, `auth.hasGroupRole` — the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context)). Unlike the legacy `access` rule, `authorize` also sees the function's input, so a group that depends on it can be checked here directly — and gives owners and admins no implicit bypass.
+- **The function's `authorize`** — checks the caller's identity with helpers (`requireRole`, `requireMember`) or the `auth` context directly (`auth.hasRole`, `auth.isMemberOf`, `auth.memberGroups`, `auth.hasGroupRole` — the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context)). `authorize` also sees the function's input, so a group that depends on it can be checked here directly — and gives owners and admins no implicit bypass.
 - **The function's code** — for a check `authorize`'s helpers don't express, read the caller's memberships in the handler and refuse before touching the records.
 
 **Authorize patterns:**
@@ -481,6 +481,7 @@ authorize: async (input, auth) =>
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["db3Id", "teamId"],
   authorize: requireSignedIn(),
   handler: async (input: { db3Id: string; teamId: string }, ctx) => {
     // A bare array of { groupId, name, role, … }.
@@ -531,6 +532,7 @@ A function creates a team and gives the creator its owner row; the team's databa
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["name"],
   authorize: requireSignedIn(),
   handler: async (input: { name: string }, ctx) => {
     return ctx.api.groups.create({ body: { name: input.name } });   // custodian defaults to ctx.user, who gets the owner row
@@ -577,6 +579,7 @@ Use one group per relationship, its `groupId` stored on the relationship's subje
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: ["db3Id", "studentId"],
   authorize: requireSignedIn(),
   handler: async (input: { db3Id: string; studentId: string }, ctx) => {
     const classroom = ctx.db3(input.db3Id, "classroom");
@@ -622,7 +625,7 @@ A function can check any level: a fixed one in its `authorize` (`requireMember((
 - Do not duplicate platform identity fields in an app model.
 - Check `addMember.status`: an email may create a pending invitation rather than an immediate membership.
 - `primitive groups members add <group-id> <email>` adds an existing app user only and creates no pending add: an email with no app user is refused. Use `addMember` with `email` to add someone who hasn't signed up.
-- App owners and admins bypass CEL rules — rule sets, metadata rules, a legacy function's `access`. A function's `authorize` gives them no such pass. Test denials as a regular member.
+- App owners and admins bypass CEL rules — rule sets, metadata rules. A function's `authorize` gives them no such pass. Test denials as a regular member.
 
 ## Error handling
 

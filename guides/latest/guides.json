@@ -15,12 +15,12 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-11-10",
+    "stampedAt": "2026-11-13",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
       "js-bao": "0.12.0",
-      "primitive-admin": "1.2.0",
+      "primitive-admin": "1.3.0",
       "primitive-app": "3.2.0"
     }
   },
@@ -833,59 +833,107 @@
       ]
     },
     {
+      "topic": "usage",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.ts.md",
+      "description": "Usage and estimated cost by meter, day and user — read with primitive usage or the admin API",
+      "keywords": [
+        "usage",
+        "cost",
+        "estimated cost",
+        "meters",
+        "billing",
+        "top users",
+        "system usage",
+        "byte-days",
+        "usage.dropped"
+      ],
+      "useCases": [
+        "Reading an app's usage and estimated cost for a month",
+        "Finding the users who drive the most usage or cost",
+        "Reading one user's usage and the bytes they own",
+        "Tracing system usage to the trigger or function that ran it",
+        "Reading a parent app's usage with each child app"
+      ],
+      "concepts": [
+        "primitive usage get",
+        "primitive usage top-users",
+        "primitive usage user",
+        "primitive usage system",
+        "estCostMicros",
+        "billedTo",
+        "sys"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "analytics",
+        "server-functions",
+        "configuration"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.swift.md"
+        }
+      ]
+    },
+    {
       "topic": "performance",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.ts.md",
-      "description": "Patterns and anti-patterns for cutting cold-load time and round-trip count in Primitive apps",
+      "description": "Where time goes in a Primitive app: work locally, few requests, tasks vs requests, lean functions",
       "keywords": [
         "performance",
         "perf",
         "slow",
         "latency",
+        "local-first",
+        "synced database",
+        "local query",
         "round trips",
         "N+1",
-        "bulk query",
-        "Promise.all",
+        "request vs task",
+        "task startup",
+        "platform calls",
+        "batch",
+        "batchRead",
+        "$in",
         "pMap",
-        "cold path",
+        "step.do",
+        "database triggers",
+        "locks",
+        "indexes",
+        "cost.rowsRead",
+        "cold start",
         "first paint",
-        "functions.invoke",
-        "integrations",
         "scheduled function",
-        "cron",
-        "cache",
-        "stale-while-revalidate",
         "channels",
-        "cache invalidation",
-        "defineQuery",
         "measure"
       ],
       "useCases": [
-        "Diagnosing why a page is slow on cold load",
-        "Returning several models from one function call",
-        "Replacing N+1 invoke loops with one bulk call and one bulk query",
-        "Parallelizing independent awaits in app code and inside functions",
-        "Bulk-calling third-party APIs through integrations",
-        "Deferring non-critical init off the cold path",
-        "Rendering with stored values and refreshing reactively",
-        "Pure compute over cached source data, invalidated by a channel message",
-        "Moving stale-tolerant third-party data to a scheduled function",
-        "Auditing an existing Primitive app for common slow patterns",
-        "Instrumenting first-paint time to verify a perf win"
+        "Deciding where a piece of work should run: on the device, in a request or in a task",
+        "Rendering a screen from a synced database instead of the network",
+        "Cutting and parallelizing the requests a screen makes",
+        "Reducing platform calls inside a server function",
+        "Filling batches and replacing per-item queries",
+        "Trimming steps, trigger runs and locks in a task",
+        "Deciding whether a database index is worth its write cost",
+        "Measuring a function or screen before and after a change",
+        "Diagnosing why a screen or a server function is slow"
       ],
       "concepts": [
-        "cold path vs background",
-        "one function call, several models",
-        "bulk query",
-        "Promise.all",
-        "pMap",
-        "integration bulk call",
-        "re-block trap",
-        "stale-while-revalidate",
-        "pure compute",
-        "channel invalidation",
-        "scheduled function",
-        "registered query cache",
-        "measuring first paint"
+        "where the time goes",
+        "do it locally",
+        "few requests, run together",
+        "requests for what a user waits on, tasks for the rest",
+        "count the platform calls",
+        "let the write do the checking",
+        "full batches",
+        "bounded concurrency",
+        "index write cost",
+        "cold start and the median of five runs"
       ],
       "prerequisites": [],
       "relatedGuides": [
