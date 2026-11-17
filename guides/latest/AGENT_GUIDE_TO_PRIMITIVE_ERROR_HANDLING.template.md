@@ -39,7 +39,7 @@ Every 4xx and 5xx response with a body, on both `/app/{appId}/api/*` and `/admin
 | `error` | Human-readable text, written for a developer reading a log. **It may change without notice** — never parse it, never show it to a user. |
 | `status` | The numeric HTTP status, repeated in the body. |
 | `timestamp` | ISO 8601, when the server produced the failure. |
-| `details` | Present only when a handler attaches structured context: offending field names on a validation failure, or `retryAfter` (seconds) on a `RATE_LIMITED` refusal such as a sign-in verification. Exception: a server function's `FUNCTION_RATE_LIMITED` carries `retryAfter` at the top level of the body, plus a `Retry-After` header. |
+| `details` | Present only when a handler attaches structured context: offending field names on a validation failure, or `retryAfter` (seconds) on a `RATE_LIMITED` refusal such as a sign-in verification. Exception: a server function's `FUNCTION_RATE_LIMITED` and the signed-out `SIGNED_OUT_RATE_LIMITED`, `SIGNED_OUT_CEILING_REACHED` and `SIGNED_OUT_CEILING_UNAVAILABLE` carry `retryAfter` at the top level of the body, plus a `Retry-After` header. |
 
 Two field rules an agent must encode:
 

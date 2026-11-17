@@ -1,5 +1,7 @@
 # Agent Guide to Primitive Resource Metadata
 
+**Deprecated.** Do not build new features on resource metadata. Store per-user data as user properties (`user-properties.toml`, `ctx.users`), and group or collection data in a db3 database keyed by the group or collection id. Existing calls keep working and are marked deprecated in the typings.
+
 Resource metadata stores typed values about users, groups, and collections. Define categories with schemas and read/write rules, then read or replace each category’s values.
 
 ## Category configs

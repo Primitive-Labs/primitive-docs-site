@@ -171,6 +171,8 @@ Every REST response carries `Server-Timing: total;dur=<milliseconds>`, readable 
 
 A server function call adds `fnRateSlot` (milliseconds waited for its `ratePerMinute` slot) and `fnRateLeaseCalls` (requests to the function's count for slots; 0 when the server already held some).
 
+A signed-out call adds `signedOutIp` (milliseconds its per-address limit took) and `signedOutIpLeaseCalls` (requests to the address's count for slots; 0 when the server already held some). An instance asks for five slots at a time, and an address's calls spread over many instances, so expect a 1 on each instance's first call for the address, not one call in five. A signed-out call to a function with a `rate` adds `signedOutTier` and `signedOutTierLeaseCalls` for that limit. `primitive rate-counters get ip:<address>` reads an address's count this minute (IPv6 by /64: `ip:2001:db8:0:1::-64`).
+
 ## Response Caching
 
 Authenticated app API responses carry `Cache-Control: no-store`, and every client request bypasses the HTTP cache, so concurrent reads of the same URL reach the server in parallel rather than queuing. A caller using its own `fetch` should pass `cache: "no-store"` for the same behavior. Avatar responses are publicly cacheable. Blob downloads support conditional requests with `ETag` / `If-None-Match`; keep the original body yourself to reuse it after a `304`.

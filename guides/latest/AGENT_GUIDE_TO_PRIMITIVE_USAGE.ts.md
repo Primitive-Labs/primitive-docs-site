@@ -7,12 +7,15 @@ Primitive meters what an app uses — requests, function runs and steps, AI toke
 ```bash
 primitive usage get                     # this month to date
 primitive usage get --month 2026-09     # a month that has ended
+primitive usage get --meter fn.invoke   # one meter, by day
 primitive usage get <app-id> --json
 ```
 
 The answer has the month's `meters` (quantity, unit, `estCostMicros`, costliest first), its `days` (each day's cost and meters), `storage.current` (bytes held now per storage meter) and `total`. A parent app's read adds `children`: one line per child app, deleted ones included (`deleted: true`, `name: null`), summed into `total.children`.
 
 Meters are named for what they count: `api.request`, `fn.invoke`, `fn.step`, `fn.cpu_ms`, `llm.tokens.in`, `llm.tokens.out`, `ws.msg.in`, `email.sent`, and others. Meters ending in `.bytes` are storage (`kind: "storage"`), counted in byte-days.
+
+`--meter <name>` prints that meter's quantity for each day of the month instead. A name that is not a meter, or a `deprecated.*` diagnostic meter (which the month read leaves out), is refused before anything is read. `signedout.invoke` and `signedout.ceiling_refused` count the signed-out function calls the app's hourly ceiling accepted and refused (see the server functions guide's "Callers who are not signed in"). They cost nothing of their own, so read them with `--meter`.
 
 ## Read by user
 

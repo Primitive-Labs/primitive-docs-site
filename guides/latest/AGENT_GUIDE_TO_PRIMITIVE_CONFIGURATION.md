@@ -297,6 +297,7 @@ primitive/<env>/
 - `primitive.d.ts` — every generated type, one namespace per family: `Schemas.<Def>` for each `schemas/*.toml` def, `Functions.<Key>Input` / `Functions.<Key>Output`, `Prompts.<Key>PromptOutput` and the agent types, `Db3.<Model>` (and `Db3.<Model>Row` / `Db3.<Model>Declared` for a projection a schema refs), and `UserProperties`. A ref is a reference to its target's one declaration. Import with `import type { Functions, Schemas } from "./primitive"`. It types `defineFunction`, `ctx.prompts.run`, `ctx.db3` and `ctx.users`.
 - `primitive-functions.d.ts` — the `primitive-functions` module's own types.
 - `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`), each exporting a `<Type><Field>Values` list per enum it types; `primitive functions codegen -o <dir>` writes them elsewhere. A field that is exactly a shared `schemas/` enum is typed `<Name>`, imported from `generated/shared-enums.generated.ts` (written only when an invoker uses one; it exports `<Name>` and `<Name>Values`, and the per-use list is a deprecated alias of `<Name>Values`). A function keyed `shared-enums` is refused while that file is written. `--lang swift` emits Swift, plus `Primitive.generated.swift`: each `schemas/` def, prompt output type and referenced db3 row, declared once and referenced by name from the per-key files.
+- `generated/schema-defs.generated.ts` — the type and compiled schema of each `schemas/` object def a db3 JSON field refs, written only when one does; the web models generated with `js-bao-codegen-v2 --schema-defs-import <specifier>` import it (see [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md)).
 - `tsconfig.json` — scaffolded once, then yours; wires the sources and declarations into one program.
 
 Generated on every push, and none of it is sent to the server; see [Server Functions — Pushing](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#pushing) for the rewrite rule, the tsconfig repair, and `codegen --check`.
@@ -340,8 +341,9 @@ selected or already on the server.
 ## App settings
 
 Edit `app.toml` and use `primitive config push --only app`. Its sections are
-`[app]`, `[auth]`, `[cors]`, and `[invitations]`. `[app].name` and `[app].mode`
-are required. See the authentication guide for sign-in settings.
+`[app]`, `[auth]`, `[cors]`, `[invitations]` and `[clients.<platform>]`.
+`[app].name` and `[app].mode` are required. See the authentication guide for
+sign-in settings.
 
 `[app].protection` is the app's protection level, one of
 `default`, `protected` and `internal`: `protected` for an app with real users,
@@ -356,9 +358,22 @@ writes need a step-up; see
 [Admin access](#admin-access-scopes-step-ups-and-ci-sessions).
 
 `[app].signedOutAccess = true` lets callers who are not signed in invoke the
-app's functions that declare `public = true` (see the server functions
+app's functions that declare `public = true`, or `public` as a table of
+options such as `{ cacheSeconds = 60, cors = "*" }` (see the server functions
 guide's "Callers who are not signed in"). Off by default; a file without the
 line pushes `false`.
+`[app].signedOutCeiling` caps those calls per hour across the app, 0 to
+10,000,000 (0 refuses all); a file without the line clears it, back to the
+provisional default of 10,000.
+`[app].turnstileSiteKey` is the public Turnstile site key a page renders the
+widget with, for functions whose `public` table sets `turnstile = true`; 1–100
+characters of `A-Z a-z 0-9 _ -`. Pulled only when set; a file without the line
+clears it.
+`[app].iconUrl` (an absolute `https:` URL, at most 2,048 characters, no
+username or password) and `[app].brandColor` (`#` and six hex digits, stored
+lowercase) brand the app: `GET settings/sign-in`, `getAuthConfig()` and the
+invitation preview return them. A bad value is refused (`INVALID_ICON_URL`,
+`INVALID_BRAND_COLOR`); pulled only when set; a file without the line clears it.
 
 `[app].allowFieldRemoval = true` lets `config push --allow-field-removal`
 push database type changes that would make stored records unreadable (see the
@@ -366,11 +381,46 @@ databases guide's "Changing a type"). The flag reads the setting as stored
 before the push, so enable it in one push and use it in the next. Pulled only
 when set; a file without the line clears it.
 
+`[app].untypedDb3Create = "admins"` keeps creating databases with no type to
+app admins and owners; a member is refused `DB3_CREATE_ROLE_REQUIRED` (see the
+databases guide's "Who creates a type"). `"members"` or no line is every member; pulled only when
+set, and a file without the line clears it.
+
+`[clients.<platform>]` declares which versions of the app are current on a
+platform; anyone reads it from `GET settings/client-versions`
+(`client.getClientVersions()` in JavaScript):
+
+```toml
+[clients.ios]
+latest = "2.4.0"
+minRecommended = "2.2"
+minRequired = "2.0"
+updateUrl = "itms-apps://apps.apple.com/app/id1234567890"
+```
+
+Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`, at least one. A
+platform name matches `[a-z][a-z0-9-]{0,31}`; a version is one to three
+dot-separated numbers of up to six digits, compared numerically; `minRequired`
+≤ `minRecommended` ≤ `latest` where set; `updateUrl` is `https:`,
+`itms-apps:`, `itms-beta:`, `macappstore:` or `market:`. Push and
+`PUT settings` refuse anything else with `INVALID_CLIENT_VERSIONS`, naming
+`[clients.<platform>].<key>`.
+
 Removing a managed setting clears it or restores its default. Keep explicit
 values when a feature must stay disabled, especially
 `emailSignInEnabled = false`.
 
 ## Gotchas
+
+### Client versions
+
+- Quote versions: an unquoted `latest = 1.10` is the TOML number `1.1`, and
+  push refuses it.
+- Lowering or removing a stored `minRequired` or `minRecommended` (removing
+  its table included) needs confirmation: pass `--yes` in a non-interactive
+  run, or the push fails and `app.toml` is not applied.
+- `CLIENT_VERSIONS_CHANGED` means the stored policy changed after the push
+  compared it; nothing was written. Run the push again.
 
 ### Push failures
 
@@ -544,6 +594,10 @@ tokens. To log in as yourself without a browser, pipe a refresh token on stdin:
 primitive token --refresh | primitive -e <env> login --token-stdin
 ```
 
+`primitive token --refresh` hands off a separate login and prints its refresh
+token, which works once. A login's refresh token is replaced on every refresh;
+presenting a replaced one ends the login.
+
 **Sessions.** Every login, step-up and CI session is listed and revocable:
 
 ```bash
@@ -571,6 +625,7 @@ that can no longer be refreshed answers 401 instead:
 | `PROTECTION_OWNER_ONLY` | Only the app's console owner changes the protection level | `primitive config pull --only app` if `app.toml` is stale; otherwise the owner |
 | `PROTECTION_FIXED_ON_CHILD` | A child app's level is always `internal` | Change the level on the parent |
 | `SESSION_UNSCOPED` | A 401 on refresh: the login predates scoped sessions | Ask the user to run `primitive login` |
+| `SESSION_REVOKED` | A 401 on refresh: the login was revoked; `details.reason` is `refresh_token_reuse`, `parent_revoked` or `handoff_contested` when the server ended it | Ask the user to run `primitive login` (for `handoff_contested`, rerun `primitive token --refresh`) and check `primitive auth sessions list` |
 
 ### Gotchas
 
@@ -583,6 +638,13 @@ that can no longer be refreshed answers 401 instead:
   and `INSUFFICIENT_SCOPE` print it too; act on the `code`.
 - **A pushing CI session needs `read` too.** `config push` reads the app's
   settings before it writes them; give a pushing session `read,write`.
+- **Never copy a credentials file, or store a printed refresh token.** A
+  replaced refresh token ends the login when presented, and a token from
+  `primitive token --refresh` works once. Move a login with the
+  `token --refresh | login --token-stdin` pipe; give a pipeline a CI session.
+- **Keep every CLI sharing a login current.** An older CLI running a
+  long-lived command, or its `token --refresh`, on a login a newer CLI made can
+  end that login.
 - While `PRIMITIVE_TOKEN` is set it takes precedence over the stored login,
   and `primitive auth sessions create` is refused. Unset it to create sessions.
 - **A server older than the CLI cannot pin a login.** The CLI stores nothing

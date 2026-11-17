@@ -102,6 +102,7 @@ From the CLI, as an app admin:
 ```bash
 primitive users invite alice@example.com [--role admin] [--json]   # --json prints the inviteToken
 primitive users invitations list [--limit <n>] [--cursor <c>]     # status + accept link per invitation
+primitive users invitations preview <invite-token> [--json]       # what the token shows before sign-in
 primitive users invitations revoke <invitation-id> --yes          # admin role: also deletes its console admin invitation
 ```
 
@@ -189,7 +190,23 @@ Email-matched signup resolves deferred grants automatically — your app does NO
 
 The accept call (shown in [Accept an invite token](#accept-an-invite-token) above) returns `{ status: "accepted", invitationId, grantsResolved: { groups, documents } }` (`documents` counts database shares), and throws `401 INVITE_TOKEN_INVALID` for any bad token (invalid, expired, or already redeemed — the server returns one code to avoid leaking invitation existence).
 
-The template provides `/invite/accept?inviteToken=...`. It confirms the account when signed in, or retains the token through sign-in. See [Authentication](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#invite-token-persistence-across-auth-round-trips-template-pattern) when implementing your own flow.
+The template provides `/invite/accept?inviteToken=...`. It shows the preview; a signed-in visitor confirms the account, and a signed-out visitor signs in or up with the page as `continueURL` and returns to it with the invitation accepted (the page accepts it then if sign-in didn't). See [Authentication](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#invite-token-persistence-across-auth-round-trips-template-pattern) when implementing your own flow.
+
+### Preview before sign-in (beta)
+
+`GET /app/{appId}/api/invitations/preview?inviteToken=…` answers, with no session and in every app, `{ appName, appIconUrl, inviterName, role, shared, sharedTruncated, maskedEmail, status, expiresAt }`. `shared` lists at most 20 items the invitation shares, oldest first, each `{ kind: "db3" | "group" | "collection", title, level }`; `status` is `pending`, `expired` or `accepted`; `maskedEmail` reads `a***@example.com`. No id, token or full email is answered. Show it on the invite page before sending the visitor through sign-in.
+
+```typescript
+  const preview = await client.invitations.preview(inviteToken);
+  // { appName, appIconUrl, inviterName, role, shared: [{ kind, title, level }],
+  //   sharedTruncated, maskedEmail, status, expiresAt }
+  if (preview.status === "pending") {
+    console.log(`${preview.inviterName ?? "Someone"} invited you to ${preview.appName}`);
+    for (const item of preview.shared) console.log(`${item.kind}: ${item.title} (${item.level})`);
+  }
+```
+
+An unknown, revoked or other-app token answers `404 INVITATION_NOT_FOUND`. Each 404 counts toward the per-address failure limit `invitations.accept` uses (20 an hour); past it both answer `429 RATE_LIMITED` with `retryAfter`. A 200 counts nothing. A server function admits the holder with `requireInvitation` — see [Server Functions — Admitting the holder of an invitation](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#admitting-the-holder-of-an-invitation).
 
 ---
 
@@ -287,6 +304,7 @@ Server-emitted body codes, surfaced on the thrown HTTP error.
 | `INVITATION_LIMIT_REACHED` | `invitations.create` | Member at quota; body has `used`, `limit` |
 | `MEMBER_INVITATIONS_DISABLED` | `invitations.create` | App has member invitations off and caller is a member |
 | `INVITE_TOKEN_INVALID` | `invitations.accept` | 401 for any bad token: doesn't decode, past `expiresAt`, or already redeemed |
+| `INVITATION_NOT_FOUND` | `invitations.preview` | 404 for an unknown, revoked or other-app token; counts toward the failed-accept limit |
 
 ---
 

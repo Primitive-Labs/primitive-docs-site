@@ -276,7 +276,7 @@ Where no worker controls the page (`blobs.hasServiceWorkerControl()` is `false`,
 
 ## From a server function
 
-A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list`, `get` and `downloadUrl` read it back, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
+A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list` and `get` read its metadata, `ctx.api.db3.blobs.download` returns its bytes as a `Uint8Array`, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
 
 ```ts
 await ctx.api.db3.blobs.upload({
@@ -290,6 +290,96 @@ await ctx.api.db3.blobs.upload({
 ```
 
 Name the type: without `"Content-Type"` the blob is stored as `application/octet-stream`, and an agent session message's `files` accepts only images and PDFs.
+
+### Signed URLs for readers without access
+
+To show a database's images to readers who hold no grant on it (a feed from a database the app holds), the function mints signed URLs with `ctx.api.db3.blobs.getSignedUrls`, up to 100 per call, and the page puts each `url` in an `<img>`. The URL is the only credential.
+
+```ts
+const { items, expiresAt } = await ctx.api.db3.blobs.getSignedUrls({
+  db3Id,
+  body: { blobIds: images.map((blob) => blob.blobId), expiresInSeconds: 600 },
+});
+return { images: items.map(({ blobId, url }) => ({ blobId, url })), expiresAt };
+```
+
+| Argument | Values |
+|---|---|
+| `body.blobIds` | 0 to 100 blob ids (ULIDs); one item each, in order, duplicates included |
+| `body.expiresInSeconds` | integer, 30 to 86,400; default 300; at most 3,600 in a run a signed-out caller started |
+| `userId` | optional: judge the call by this member's read access alone |
+
+It answers `{ items: [{ blobId, url, token }], expiresAt, expiresInSeconds }`. Whoever can download the database's blobs can mint: an app owner or admin, a member who can read the database, a server function. Minting reads no blob: a URL for an id that is not an uploaded blob of the database answers `404` when loaded. A loaded URL answers the stored `Content-Type`, `Content-Disposition: inline` for `image/*` other than SVG, `audio/*` and `video/*` (`attachment` otherwise), and `Cache-Control: private, max-age=<seconds until expiry>`.
+
+For bucket blobs, `ctx.api.blobBuckets.getSignedUrls({ bucketId, body: { blobIds, expiresInSeconds } })` mints up to 100 of `getSignedUrl`'s URLs in one call; it answers `items` for the ids that have a blob and `missing` for those that do not. Each mint is one request, whatever the count.
+
+**Gotchas**
+
+- A URL works for anyone holding it until it expires. Deleting the blob or the database makes the server refuse it at once (`404`), but a browser that loaded it may show its cached copy until expiry. Mint a short `expiresInSeconds` when a deleted image must disappear quickly.
+- Removing a member's grant does not void URLs already minted.
+- A value outside its range is `SIGNED_URL_OPTIONS_INVALID` (`details.field` names it), never clamped. A loaded URL past its expiry is `403 SIGNED_URL_EXPIRED`; an altered one, or one used for another blob, `403 SIGNED_URL_INVALID`.
+- The byte read is `ctx.api.db3.blobs.download` (likewise `ctx.api.agentSessions.attachments.download`). It returns bytes, not a URL; the clients' `downloadUrl` is what returns a URL.
+
+---
+
+## From a signed-out page: signed upload URLs
+
+A public form takes an attachment without a signed-in user: a server function mints a URL with `ctx.api.db3.blobs.signedUploadUrl` for a database the app holds, and the page uploads the file to it with `client.db3.uploadSigned(url, file)`, which sends no `Authorization` header. The URL accepts one file of its `contentType`, of at most `maxBytes` (up to 10 MB), until it expires. The blob is recorded as uploaded by `sys:<appId>`.
+
+```ts
+// In the function: the database id comes from a config var, never from the caller.
+const { url } = await ctx.api.db3.blobs.signedUploadUrl({
+  db3Id: await ctx.configVar("UPLOADS_DB3_ID"),
+  body: { maxBytes: 5 * 1024 * 1024, contentType: input.contentType, filename: input.filename },
+});
+```
+
+```typescript
+  const { output } = await client.functions.invoke<{ url: string }>("attachment-upload-url", {
+    input: { contentType: file.type, filename: file.name },
+  });
+  const { blobId } = await client.db3.uploadSigned(output!.url, file);
+```
+
+| Body field | Values |
+|---|---|
+| `maxBytes` | integer, 1 to 10,485,760 |
+| `contentType` | one lowercase media type, no parameters or wildcard |
+| `expiresInSeconds` | integer, 30 to 3,600; default 300 |
+| `filename` | 1 to 255 characters, no control characters, `/` or `\`; default `upload` |
+
+The mint answers `{ url, token, tokenId, maxBytes, contentType, filename, expiresAt, expiresInSeconds }`; the upload resolves `{ blobId, tokenId, filename, contentType, numBytes, createdAt }`.
+
+**Gotchas**
+
+- A signed-out page reaches the minting function only when the app sets `[app] signedOutAccess = true` in `app.toml` and the function's TOML declares `public = true` (with an `authorize`, such as `allowAnyone()`); otherwise its call answers `401` before the function runs.
+- Only a server function can mint, and only for a database whose `custodian` is `"app"`: anything else is refused (`FUNCTION_ROUTE_FUNCTION_ONLY`, `DB3_NOT_APP_HELD`). A value outside its range is `SIGNED_UPLOAD_OPTIONS_INVALID`, never clamped.
+- A URL is single use. A second upload (`SIGNED_UPLOAD_ALREADY_USED`, 409), another type (`SIGNED_UPLOAD_TYPE_MISMATCH`), a larger file (`SIGNED_UPLOAD_TOO_LARGE`), an expired URL (`SIGNED_UPLOAD_EXPIRED`) or a database deleted or moved since the mint (`SIGNED_UPLOAD_TARGET_GONE`) is refused; an upload cut off part way also uses up the URL. Mint a new URL to retry.
+- The function cannot know the `blobId` in advance: the page passes it back, and the function confirms it with `ctx.api.db3.blobs.get`.
+- `primitive spent-tokens get <tokenId>` shows whether and when a URL was used.
+
+---
+
+## Public blob URLs
+
+A blob in a public database (`level: "reader"`, set with `client.db3.permissions(db3Id).setPublicAccess`) has a stable URL anyone can load, signed in or not, while the app sets `[app] signedOutAccess = true`. `client.db3.publicBlobUrl(db3Id, blobId)` builds it with no request and no token; use it as an `<img>` source on a public page:
+
+```typescript
+  const { output } = await client.functions.invoke<{ db3Id: string; blobIds: string[] }>("gallery");
+  for (const blobId of output!.blobIds) {
+    const img = document.createElement("img");
+    img.src = client.db3.publicBlobUrl(output!.db3Id, blobId);
+    gallery.append(img);
+  }
+```
+
+The URL is `<apiUrl>/app/<appId>/api/public/db3/<db3Id>/blobs/<blobId>`; `primitive db3 public-access blob-url <db3-id> <blob-id>` prints it. A `200` carries `Cache-Control: public, max-age=300` and the blob's `ETag`, and `If-None-Match` with it answers `304`. `Content-Disposition` is `inline` for `image/*` other than SVG, `audio/*` and `video/*`, and `attachment` for anything else.
+
+**Gotchas**
+
+- Every other request answers one `404` (`NOT_FOUND`): a private database, the setting off, another app's database, a blob of another database, an unknown or malformed id. Clearing public access or turning the setting off refuses the next request; a browser may show its copy for up to five minutes.
+- Requests count against the signed-out limits shared with signed-out function calls: per address (`429 SIGNED_OUT_RATE_LIMITED`, `Retry-After: 60`) and the app's hourly `signedOutCeiling` (`429 SIGNED_OUT_CEILING_REACHED`; `503 SIGNED_OUT_CEILING_UNAVAILABLE` when it cannot be checked). A `200` or `304` is metered as `signedout.blob`.
+- The URL ignores any credential and answers the app's allowed origins in CORS; an `<img>` needs neither.
 
 ---
 

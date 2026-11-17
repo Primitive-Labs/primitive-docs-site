@@ -360,7 +360,7 @@ WebAuthn passkeys for returning users, built on the browser's `@simplewebauthn/b
 
 `passkeyAuthStart` works without an existing session (used to sign in). `passkeyRegisterStart` and management methods require an authenticated client.
 
-Both start calls take an optional `{ rpId }`. Omit it in a browser — the server derives the relying party from the request's `Origin`. A named `rpId` must be a key of the app's `passkeyRpConfig`, or the call fails with `PASSKEY_RP_NOT_CONFIGURED`.
+Both start calls take an optional `{ rpId }`. Omit it in a browser — the server derives the relying party from the request's `Origin`: its host when that is a key of `passkeyRpConfig`, else the longest key the host is a subdomain of (on a label boundary, so `evilexample.com` never matches `example.com`), else the only key when there is just one. A named `rpId` must be a key of the app's `passkeyRpConfig`, or the call fails with `PASSKEY_RP_NOT_CONFIGURED`.
 
 ### Sign in
 
@@ -792,7 +792,7 @@ import {
   isPlausibleInviteToken,
   setPendingInviteToken,
   getPendingInviteToken,
-  clearPendingInviteToken,
+  settleInviteToken,
 } from "@/lib/inviteToken";
 
 // Stash on the accept page when user is signed out:
@@ -803,20 +803,23 @@ if (!user.isAuthenticated && isPlausibleInviteToken(rawToken)) {
 // Consume during auth (done automatically by userStore):
 const inviteToken = getPendingInviteToken() ?? undefined;
 await client.otpVerify(email, code, { inviteToken });
-if (inviteToken) clearPendingInviteToken();
+if (inviteToken) settleInviteToken(inviteToken); // pending → carried
 ```
 
-The token is saved to `sessionStorage` under the key `"primitive:pendingInviteToken"`. The template's `userStore` automatically reads and forwards it through every auth path — `login()` (OAuth), `verifyOtp()`, the magic-link callback, and `registerPasskey()`. For OAuth (which round-trips through Google), the token also rides in the OAuth `state` parameter so the callback page can recover it even if the OAuth response opens in a tab without the original `sessionStorage`.
+The token is saved to `sessionStorage` under the key `"primitive:pendingInviteToken"`. The template's `userStore` automatically reads and forwards it through every auth path — `login()` (OAuth), `verifyOtp()`, the magic-link callback, and `registerPasskey()`. For OAuth and emailed links, the token also rides in the `state` parameter so the callback page can recover it even when the link opens in a tab without the original `sessionStorage`.
+
+After a sign-in that sent it, the token moves to `"primitive:carriedInviteToken"`, which the accept page reads when the visitor returns and which is never sent to another sign-in.
 
 **`InviteAcceptPage` (template-provided):** The template ships a ready-made component at `src/pages/InviteAcceptPage.vue`, routed at `/invite/accept?inviteToken=...`. It handles:
 
+- **Preview** — reads `client.invitations.preview(token)` and shows what the invitation shares, to signed-in and signed-out visitors.
 - **Signed-in user** — prompts "Accept with this account or sign out and use a different one." Calls `client.invitations.accept(token)` on confirm.
-- **Signed-out user** — stashes the token in `sessionStorage` and redirects to login. After sign-in the pending token is consumed inside the auth method.
-- **Error states** — `INVITE_TOKEN_INVALID` (the one code for an invalid, expired, or already-redeemed token) and generic server errors.
+- **Signed-out user** — stashes the token in `sessionStorage` and redirects to login with `continueURL=/invite/accept`. The auth method sends the token, so the server accepts the invitation during sign-in, and the visitor lands back on the page, which shows the invitation accepted. A sign-in that sent no token (a passkey sign-in) leaves it pending, and the page accepts it on return without asking again.
+- **Error states** — unknown or revoked links, expired and already-accepted invitations, `INVITE_TOKEN_INVALID` from accept, and a retryable state when the preview can't be read after sign-in.
 
 If you're using the template, this route is already wired in `src/router/routes.ts`. Point your invitation emails at `${yourApp.baseUrl}/invite/accept?inviteToken=${token}`. You do **not** need to rebuild any of this.
 
-**When building on the raw API** (without the template): stash and restore the token manually, pass it to the auth method that completes sign-in, and clear it immediately afterward. The `isPlausibleInviteToken` helper (16–512 chars, URL-safe charset) guards against obviously invalid input before touching storage.
+**When building on the raw API** (without the template): stash and restore the token manually, pass it to the auth method that completes sign-in, and never send it to a later sign-in: a used token fails that sign-in with `INVITE_TOKEN_INVALID`. The `isPlausibleInviteToken` helper (16–512 chars, URL-safe charset) guards against obviously invalid input before touching storage.
 {{/lang}}
 
 ---

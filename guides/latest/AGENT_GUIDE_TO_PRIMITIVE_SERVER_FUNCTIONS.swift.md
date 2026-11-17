@@ -160,6 +160,147 @@ The run reads the app's data and writes to app-held databases. These throw
 creating a database, and changing one the app does not hold. A call about one user must pass `userId`, and naming a member
 works only for reads in a function that declares `users:readAny`.
 
+A JS or Swift client created without a token makes signed-out calls.
+
+#### Serving a database named by the caller
+
+A public function that reads a database id from its input must check it in
+`authorize`, or any caller can read any database of the app. Use a helper;
+both admit on public access only while the database is public and
+`[app] signedOutAccess` is on:
+
+| Helper | Admits | `ctx.auth` |
+|---|---|---|
+| `requirePublicDb3(db3IdOf, type?)` | anyone while the database is public | `{ db3Id }` |
+| `requireDb3Level(db3IdOf, type, minLevel, options?)` | a signed-in caller at `minLevel`+ (owner > read-write > reader); with `{ orPublic: true }` (needs `"reader"`) also anyone while public | `{ db3Id, via: "sharing" \| "public", level }` |
+
+```ts
+import { defineFunction, requireDb3Level } from "primitive-functions";
+
+export default defineFunction({
+  authorize: requireDb3Level((input) => input.db3Id, "notes", "reader", { orPublic: true }),
+  handler: async (input, ctx) => {
+    const page = await ctx.api.db3.get({ db3Id: ctx.auth.db3Id });
+    return { title: page.title, via: ctx.auth.via, canEdit: ctx.auth.via === "sharing" && ctx.auth.level !== "reader" };
+  },
+});
+```
+
+A caller a helper does not admit gets `404 NOT_FOUND` with one body for a
+private, missing or other-app database and for the setting off; an input with
+no id gets the uniform `403` (`INVALID`). Read `ctx.auth.db3Id`, not the input.
+`config push` warns on a public function whose handler passes an input-read id
+to `ctx.db3(…)` or `ctx.api.db3` while its HTTP `authorize` (for
+`allowCallers`, the `users` rule) checks no database access; a fixed id needs
+no check.
+
+#### Signed action links
+
+A link that works for whoever holds it (email confirmation, unsubscribe, order
+status): one function signs a token bound to another function of the app and
+some arguments; that function's `requireToken(tokenOf)` admits the holder,
+signed in or not, with `ctx.auth = { args, tokenId }`. The signer declares
+`capabilities = ["tokens:sign"]`; the opened function is usually `public`.
+Deliver the link only where holding it proves something (an email
+confirmation emails it to the address bound in `args`) and never return it to
+the caller who asked for it.
+
+
+`ctx.actionTokens.sign({ functionKey, args, expiresIn, singleUse? })` answers
+`{ token, tokenId, expiresAt }` and stores nothing: `args` a JSON object of at
+most 2,048 bytes, `expiresIn` required, 1–31,536,000 seconds. Refusals:
+`403 FUNCTION_TOKENS_GRANT_MISSING`, `400 ACTION_TOKEN_OPTIONS_INVALID`,
+`404 ACTION_TOKEN_FUNCTION_NOT_FOUND`. A single-use token is spent before the
+handler runs and stays spent if it fails.
+
+A refused token answers `404 NOT_FOUND` with `error` "This link has expired",
+"This link has already been used", "This link was signed with a key that is no
+longer in use" (another app's token, or `JWT_SECRET` rotated) or "This link is
+not valid" (altered, or for another function); no token in the input is the
+uniform `403` (`INVALID`). `args` are signed, not encrypted.
+
+#### Admitting the holder of an invitation
+
+`requireInvitation(tokenOf)` (beta) admits any caller, signed in or signed out,
+presenting the token of this app's unaccepted, unexpired invitation that still
+shares something:
+
+```ts
+import { defineFunction, requireInvitation } from "primitive-functions";
+
+export default defineFunction({
+  authorize: requireInvitation((input: { inviteToken: string }) => input.inviteToken),
+  handler: async (_input, ctx) => ({
+    role: ctx.auth.role,
+    databases: ctx.auth.shared.filter((item) => item.kind === "db3").map((item) => item.id),
+  }),
+});
+```
+
+`ctx.auth` is `{ invitationId, inviterId, role, shared, sharedTruncated }`.
+`shared` lists at most 20 items still pending, oldest first:
+`{ kind: "db3", id, title, level: "read-write" | "reader" }`,
+`{ kind: "group", id, groupType, title, level: "owner" | "manager" | "member" }`
+or `{ kind: "collection", id, title, level }`; deleted and already-granted
+items are left out. Every other token (unknown, revoked, expired, accepted,
+another app's, nothing left to share) gets `404 NOT_FOUND`; no token is the
+uniform `403` (`INVALID`). Use the ids in `ctx.auth.shared`, not the input.
+Its answers are never cached: push refuses `cacheSeconds` beside it
+(`FUNCTION_PUBLIC_CACHE_TOKEN_ADMITTED`).
+
+Two limits apply before the function runs, each answering
+`{ error, errorCode, retryAfter }` with `Retry-After`:
+
+| Limit | Default (provisional) | Past it |
+|---|---|---|
+| Calls per minute from one IP address to the app (IPv6 by /64) | 600 | `429 SIGNED_OUT_RATE_LIMITED` |
+| Calls per hour to the app, `[app] signedOutCeiling` (0–10,000,000; 0 refuses all) | 10,000 | `429 SIGNED_OUT_CEILING_REACHED` |
+
+An hourly ceiling that cannot be checked answers
+`503 SIGNED_OUT_CEILING_UNAVAILABLE`. `primitive usage get --meter
+signedout.invoke` (and `signedout.ceiling_refused`) reads the calls that
+reached the ceiling by day; `primitive rate-counters get signed-out` reads
+this hour's count, and `primitive rate-counters get ip:<address>` one
+address's count this clock minute (IPv6 by /64: `ip:2001:db8:0:1::-64`).
+
+`public` may be a table of options instead of `true`; it opens the function
+the same way:
+
+```toml
+[function]
+key = "landing-stats"
+public = { cacheSeconds = 60, cors = "*" }
+```
+
+| Option | Value | Effect |
+|---|---|---|
+| `cacheSeconds` | integer 1–300 | A signed-out call with the same `rootInput`, `meta` and `contextDocId` is answered from the cache for that long, after the setting and both limits; no code runs and the answer has no `invocationId`. Header `X-Function-Cache: hit \| miss \| bypass`. |
+| `cors` | `"*"` | Signed-out calls from any origin: the preflight answers `Access-Control-Allow-Origin: *` and allows `Content-Type`, never `Authorization`. |
+| `rate` | `"low"` \| `"medium"` \| `"high"` | Signed-out calls per minute from one IP address to this function: 10, 60 or 300. Past it `429 SIGNED_OUT_FUNCTION_RATE_LIMITED`, `Retry-After: 60`, checked first, so it spends neither limit above. |
+| `turnstile` | `true` | A signed-out call needs a body `turnstileToken` that Turnstile accepts, checked after `rate` (default `"high"` with `turnstile`) and before the limits above. |
+
+Only `completed` answers are stored; signed-in calls always run; a new version
+or a schema change runs again.
+
+**Turnstile.** Set `[app] turnstileSiteKey` and store the secret as
+`PRIMITIVE_TURNSTILE_SECRET` (`primitive secrets set PRIMITIVE_TURNSTILE_SECRET
+--value …`). The Admin Console's app settings also edit the site key (the
+**Signed-Out Access** card; saving it blank clears it); the secret stays the
+app secret `PRIMITIVE_TURNSTILE_SECRET`. The token is verified and stripped
+before `authorize`, the cache and the run; signed-in calls need none. Pushing a
+`turnstile` function while either is missing succeeds with a warning per missing
+item (prefix `turnstile not configured: `, in `config push` output and the
+configs push's `warnings`); signed-out calls answer
+`503 SIGNED_OUT_TURNSTILE_NOT_CONFIGURED` until both are set.
+
+
+| Answer | When |
+|---|---|
+| `403 SIGNED_OUT_TURNSTILE_REQUIRED` | No `turnstileToken`, or not a string of 1–2,048 characters. |
+| `403 SIGNED_OUT_TURNSTILE_FAILED` | Turnstile rejected the token; `turnstileErrors` carries its codes. |
+| `503 SIGNED_OUT_TURNSTILE_NOT_CONFIGURED` | No site key, no secret, or the secret was rejected. |
+| `503 SIGNED_OUT_TURNSTILE_UNAVAILABLE` | Turnstile could not be reached within 5 s; `Retry-After: 5`. The call fails closed. |
+
 Gotchas:
 
 - **Test the role, not `auth.user`.** `auth.user` is set for a signed-out
@@ -167,6 +308,28 @@ Gotchas:
 - **A credential that does not validate is `401`**, never anonymous.
 - **`public = true` without `authorize`** is refused at push with
   `FUNCTION_PUBLIC_REQUIRES_AUTHORIZE`.
+- **One ceiling for the whole app.** Every public function spends the same
+  hourly `signedOutCeiling`; size it for the app's total signed-out traffic.
+- **Cache only read-only functions.** Push refuses `cacheSeconds` on a
+  version that can write (`FUNCTION_PUBLIC_CACHE_WRITE_CAPABLE`) and any value
+  outside the table (`FUNCTION_PUBLIC_OPTIONS_INVALID`).
+- **Rotating `JWT_SECRET` voids every outstanding action link.**
+- **Never cache a token function.** Push refuses `cacheSeconds` with
+  `requireToken` (`FUNCTION_PUBLIC_CACHE_UNCACHEABLE_HELPER`) or `tokens:sign`.
+- **`ctx.reauthorize()` throws** ("A single-use link cannot be reauthorized")
+  in a run a single-use token admitted.
+- **One token, one call.** A reused token answers
+  `SIGNED_OUT_TURNSTILE_FAILED` (`timeout-or-duplicate`); render or reset the
+  widget before each call.
+- **`PRIMITIVE_TURNSTILE_SECRET` is reserved.** A new `secret:` capability,
+  CEL `secrets` entry, integration template, webhook reference or Google
+  `clientSecret` naming it is refused `400 RESERVED_SECRET_REFERENCE`.
+- **Revocation waits for the cache.** An answer can be up to `cacheSeconds`
+  old, after a data change, a database's public access is cleared, or an
+  earlier version's activation. After the
+  setting is turned off, the function is disabled or `cors` is removed, other
+  servers can answer the preflight for up to 90 seconds and browsers reuse it
+  for 10 minutes; the call itself is refused at once.
 
 ### Authorization
 
@@ -722,6 +885,10 @@ authorize: async (input: { db3Id: string }, auth) => {
 },
 ```
 
+`auth.db3(id, type).publicAccess()` → `"reader" | null`: `"reader"` while the database is public and
+`signedOutAccess` is on, the same for every caller (signed out included); one read. The helpers
+`requireDb3Level` and `requirePublicDb3` wrap both reads (see "Serving a database named by the caller").
+
 For another user, or from the handler: `ctx.api.db3.validateAccess({ db3Id, body: { userId } })` →
 `{ hasAccess, permission?, accessSource? }` (`accessSource`: `owner`, `grant`, `group`, `link`, `app`, or `resource` when a platform resource such as an agent session holds the database and its members read it).
 Omitting `body.userId` describes the function's own app authority, not the caller — always pass it.
@@ -827,14 +994,15 @@ operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#lim
 
 ## Capabilities
 
-`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only four kinds exist:
+`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only five kinds exist:
 
 | Kind | Strings | Unlocks |
 |---|---|---|
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
-| High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
+| High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess`, `db3:setPublicAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
 | Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), inbox, devices, agent sessions, user aliases, holdings, usage); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
+| Action links | `tokens:sign` | `ctx.actionTokens.sign`, which is otherwise refused `FUNCTION_TOKENS_GRANT_MISSING` |
 
 **Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
 
@@ -1312,7 +1480,8 @@ function and is refused until its runs finish or are terminated.
 On a version with `authorize`, `functions get` prints a `Handler input` row
 (the declared `input` keys, `none`, or `none (empty list)` for `[]`) and a
 `Trigger doors` row (`all`: trigger and agent hook doors hand the handler the
-whole input). One run's admissions are read with
+whole input). A version whose `public` is a table also gets a
+`Public options` row (`cacheSeconds = 60, cors = "*"`). One run's admissions are read with
 `primitive functions logs <function-id> --run <run-id> --json`: on an allowed
 call, `detail.authorize.input` is the key list, `"all"` or `"none"`; a refused
 call's block has no `input`. `functions runs --json` carries no `authorize`

@@ -12,6 +12,7 @@ primitive secrets set WEATHER_API_KEY --value <value> --summary "Weather API"
 primitive secrets set WEATHER_API_KEY --summary "Weather API (staging)"   # value unchanged
 primitive secrets set WEATHER_API_KEY --clear-summary
 primitive secrets list
+primitive secrets references WEATHER_API_KEY   # what names the key, set or not
 ```
 
 ```toml
@@ -31,6 +32,12 @@ Secret management lists names and summaries, never values.
 | Function | `ctx.secret("KEY")`, with `secret:KEY` in its capabilities. |
 | Webhook | Whole `{{secrets.KEY}}` reference in `signingSecret`. |
 | CEL | `secrets.KEY`, after declaring `secrets = ["KEY"]` on the owning metadata category config. Not in a function's `authorize`. |
+
+`primitive secrets references KEY` (`GET …/secrets/by-key/KEY/references`,
+beta) lists each reference by `kind` (`function-capability`, `cel-rule`,
+`integration`, `webhook-trigger`, `google-client`), `name` and `field`, with
+`stored` saying whether the key holds a value. It scans configuration, so a
+deleted or never-set key still lists what would read it once set.
 
 Prefer integration references when the secret is an API credential. Read it
 in function code only when the function needs the value itself, such as when
@@ -75,6 +82,14 @@ owning metadata category config before reading
   reference while retaining the old one for the grace period.
 - Removing a var from `vars.toml` deletes it on the next push without `--prune`.
   Pull takes server values; `--force` deliberately overwrites server changes.
+- `PRIMITIVE_TURNSTILE_SECRET` holds the app's Turnstile secret and is
+  reserved: saving a new reference to it from any surface above is refused
+  `400 RESERVED_SECRET_REFERENCE`; `config push` reports a function file whose
+  `capabilities` newly name it before anything is applied. `secrets list` and
+  `secrets set` print a conflict for each reference saved before
+  (`reservedConflicts` with `--json`, plus `reservedConflictsTruncated: true`
+  when the scan stopped at 1,000 objects of a kind); move that value to
+  another key.
 - CEL can read only declared keys; an undeclared or dynamic reference is refused
   at save. For optional vars, check `'KEY' in vars` before reading.
 
