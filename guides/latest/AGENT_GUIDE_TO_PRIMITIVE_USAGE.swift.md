@@ -15,7 +15,7 @@ The answer has the month's `meters` (quantity, unit, `estCostMicros`, costliest 
 
 Meters are named for what they count: `api.request`, `fn.invoke`, `fn.step`, `fn.cpu_ms`, `llm.tokens.in`, `llm.tokens.out`, `ws.msg.in`, `email.sent`, and others. Meters ending in `.bytes` are storage (`kind: "storage"`), counted in byte-days.
 
-`--meter <name>` prints that meter's quantity for each day of the month instead. A name that is not a meter, or a `deprecated.*` diagnostic meter (which the month read leaves out), is refused before anything is read. `signedout.invoke` and `signedout.ceiling_refused` count the signed-out function calls the app's hourly ceiling accepted and refused (see the server functions guide's "Callers who are not signed in"). They cost nothing of their own, so read them with `--meter`.
+`--meter <name>` prints that meter's quantity for each day of the month instead. A name that is not a meter, or a `deprecated.*` diagnostic meter (which the month read leaves out), is refused before anything is read. `signedout.invoke` counts the signed-out function calls the app's hourly ceiling accepted, `signedout.blob` the public blob URL requests it served, and `signedout.ceiling_refused` the function calls and public blob requests it refused (see the server functions guide's "Callers who are not signed in"). They cost nothing of their own, so read them with `--meter`.
 
 ## Read by user
 

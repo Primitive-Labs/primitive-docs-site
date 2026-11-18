@@ -293,6 +293,7 @@ primitive groups create --name "Engineering" --owner <user-id>   # that user hol
 import { defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: [],
   authorize: requireSignedIn(),
   handler: async (input, ctx) => {
     return ctx.api.groups.create({

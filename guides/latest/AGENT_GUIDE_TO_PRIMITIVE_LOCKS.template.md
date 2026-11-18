@@ -54,6 +54,7 @@ The function's `authorize` decides who may run it, and so who may take its keys.
 import { defineFunction, requireMember } from "primitive-functions";
 
 export default defineFunction("rebuild-team-report", {
+  input: [],
   authorize: requireMember((input: { teamId: string }) => input.teamId),
   handler: async (input, ctx) =>
     ctx.locks.withLock(`team-report:${ctx.auth.groupId}`, { ttlMs: 120_000, timeoutMs: 5_000 }, async () => {

@@ -56,8 +56,10 @@ export default defineFunction({
 
 Pass values under `variables`; templates read them under `input`.
 `configId` selects one of the prompt's configurations (any other id answers
-`PROMPT_NO_CONFIG`) and `modelOverride` changes the model for one call. No
-prompt capability is required. The calling function’s `authorize` decides who
+`PROMPT_NO_CONFIG`) and `modelOverride` changes the model for one call.
+`result.metrics` is typed: `durationMs`, `inputTokens`, `outputTokens`,
+`totalTokens`, `reasoningTokens` and `cost` (USD) are each `number | undefined`,
+absent when the provider reports none. No prompt capability is required. The calling function’s `authorize` decides who
 may run the prompt; the prompt carries no access rule of its own.
 
 ## Template syntax

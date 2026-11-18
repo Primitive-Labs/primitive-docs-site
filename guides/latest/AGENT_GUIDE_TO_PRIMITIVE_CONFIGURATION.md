@@ -371,8 +371,8 @@ characters of `A-Z a-z 0-9 _ -`. Pulled only when set; a file without the line
 clears it.
 `[app].iconUrl` (an absolute `https:` URL, at most 2,048 characters, no
 username or password) and `[app].brandColor` (`#` and six hex digits, stored
-lowercase) brand the app: `GET settings/sign-in`, `getAuthConfig()` and the
-invitation preview return them. A bad value is refused (`INVALID_ICON_URL`,
+lowercase) brand the app: `GET settings/sign-in` and `getAuthConfig()` return
+them, and the invitation preview returns the icon as `appIconUrl`. A bad value is refused (`INVALID_ICON_URL`,
 `INVALID_BRAND_COLOR`); pulled only when set; a file without the line clears it.
 
 `[app].allowFieldRemoval = true` lets `config push --allow-field-removal`

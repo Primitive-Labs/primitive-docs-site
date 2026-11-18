@@ -45,8 +45,9 @@ export default defineFunction("greet", {
 
 Every version pushed today must define `authorize` beside the handler — a
 version with none is refused `FUNCTION_AUTHORIZE_REQUIRED` at push. `input`
-lists the keys the handler reads; with no list, a member's call hands the
-handler `{}`. See
+lists the keys the handler reads, and `input: []` says it reads none; with no
+list, push refuses the function unless its TOML declares a trigger, and every
+caller's call is refused `FUNCTION_INPUT_LIST_MISSING`. See
 [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#declaring-input-keys).
 
 ```bash
@@ -163,6 +164,7 @@ both admit on public access only while the database is public and
 import { defineFunction, requireDb3Level } from "primitive-functions";
 
 export default defineFunction({
+  input: [],
   authorize: requireDb3Level((input) => input.db3Id, "notes", "reader", { orPublic: true }),
   handler: async (input, ctx) => {
     const page = await ctx.api.db3.get({ db3Id: ctx.auth.db3Id });
@@ -219,6 +221,7 @@ shares something:
 import { defineFunction, requireInvitation } from "primitive-functions";
 
 export default defineFunction({
+  input: [],
   authorize: requireInvitation((input: { inviteToken: string }) => input.inviteToken),
   handler: async (_input, ctx) => ({
     role: ctx.auth.role,
@@ -1396,7 +1399,8 @@ Archive preserves versions for existing runs. Prune permanently deletes the
 function and is refused until its runs finish or are terminated.
 
 On a version with `authorize`, `functions get` prints a `Handler input` row
-(the declared `input` keys, `none`, or `none (empty list)` for `[]`) and a
+(the declared `input` keys, `none (empty list)` for `[]`, or
+`missing (caller calls refused)` for a version with no list) and a
 `Trigger doors` row (`all`: trigger and agent hook doors hand the handler the
 whole input). A version whose `public` is a table also gets a
 `Public options` row (`cacheSeconds = 60, cors = "*"`). One run's admissions are read with

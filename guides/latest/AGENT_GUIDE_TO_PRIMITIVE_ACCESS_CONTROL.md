@@ -8,6 +8,7 @@ A server function's own call gate is a method you write: every version pushed to
 import { defineFunction, requireMember } from "primitive-functions";
 
 export default defineFunction("team-report", {
+  input: [],
   authorize: requireMember((input: { teamId: string }) => input.teamId),
   handler: async (input, ctx) => ({ team: ctx.auth.groupId }),
 });
@@ -46,6 +47,7 @@ Give a function an `authorize` method (object form of `defineFunction`) when the
 import { allow, defineFunction, deny } from "primitive-functions";
 
 export default defineFunction("get-order", {
+  input: [],
   authorize: async (input: { shopDb: string; orderId: string }, auth) => {
     if (!auth.user) return deny("FORBIDDEN");
     const order = await auth.db3(input.shopDb, "orders").model("orders").get(input.orderId);
@@ -65,7 +67,7 @@ export default defineFunction("get-order", {
 
 ### Declaring input keys
 
-`input` lists the top-level input keys the handler reads. After an allow on a caller door, the handler gets only those keys; `authorize` still reads the whole input. An `authorize` function with no `input` hands its handler `{}` there — the migration is "add `authorize`, declare `input`":
+`input` lists the top-level input keys the handler reads. After an allow on a caller door, the handler gets only those keys; `authorize` still reads the whole input. Every `authorize` function declares `input` — the migration is "add `authorize`, declare `input`":
 
 ```ts
 import { defineFunction, requireMember } from "primitive-functions";
@@ -97,13 +99,17 @@ type = "string"
 maxLength = 500
 ```
 
-The handler's input is typed to the listed keys, so reading another key fails the push typecheck. A listed key the caller didn't send is absent, not `undefined`. Push refuses a list it can't record:
+A handler that reads no input writes `input: []` and receives `{}`; the empty list needs no `inputSchema`. The handler's input is typed to the listed keys, so reading another key fails the push typecheck. A listed key the caller didn't send is absent, not `undefined`.
+
+With no `input` list, push refuses the function unless its TOML declares a trigger (webhook, cron or db3); then it pushes with a warning, its triggers run, and every caller-door call is refused. Push and a call refuse with:
 
 | Code | When |
 |---|---|
+| `FUNCTION_INPUT_LIST_REQUIRED` | Push: `authorize`, no `input` list, no trigger. Add `input: [...]`, or `input: []` when the handler reads no input |
+| `FUNCTION_INPUT_LIST_MISSING` | A caller-door call (invoke or task start, nested start, `--as system`, agent tool) to a version with `authorize` and no `input` list: `409` once `authorize` allows (the tool door: `AGENT_TOOL_FAILED` with this prefix); the handler doesn't run. Declare `input`, push again |
 | `FUNCTION_INPUT_LIST_INVALID` | Not an array of strings, a repeated key, over 64 keys, or a key that is empty, over 64 characters, or outside `[A-Za-z0-9_$.-]` |
 | `FUNCTION_INPUT_KEY_UNDECLARED` | A listed key isn't an `inputSchema` property; names the key and the declared properties |
-| `FUNCTION_INPUT_SCHEMA_REQUIRED` | `input` declared, but `inputSchema` declares no object properties |
+| `FUNCTION_INPUT_SCHEMA_REQUIRED` | `input` lists a key, but `inputSchema` declares no object properties |
 
 Trigger and agent hook doors (`webhook`, `cron`, `db3`, `users-batch`, `context`, `history`) hand the handler the whole input whatever `input` lists.
 
@@ -135,7 +141,7 @@ Declare `profile` as an object property of `inputSchema` with its own `propertie
 
 | Door | `auth.user` | Handler's input | A deny |
 |---|---|---|---|
-| `http` (invoke or start) | The caller | The listed keys (`{}` with no list) | `403`/`404` before a run id exists; the call's invocation log records it `denied` |
+| `http` (invoke or start) | The caller | The listed keys (`{}` for `input: []`) | `403`/`404` before a run id exists; the call's invocation log records it `denied` |
 | `function` (a nested start) | The chain's root caller, the same at every level however deep it nests; `null` when a trigger rooted it. `auth.trigger.functionKey` names only the parent directly above | The listed keys | Same as `http`. Every level's own `authorize` runs — a parent's `ctx.functions.start` is the capability to try, not a bypass |
 | `manual` (`--as system`) | The admin who ran it, with role `"admin"` | The listed keys | Same as `http` |
 | `tool` | The turn's initiator | The listed keys | `AGENT_TOOL_ACCESS_DENIED`, the tool error the model reads; logged the same way |
@@ -183,6 +189,7 @@ A selector denies `INVALID` when it can't read an id off the input. The two data
 import { allowCallers, defineFunction, requireRole } from "primitive-functions";
 
 export default defineFunction("daily-sweep", {
+  input: [],
   authorize: allowCallers({ cron: true, manual: true, users: requireRole("admin") }),
   handler: async () => ({ swept: true }),
 });
@@ -213,6 +220,7 @@ A task run's `ctx.auth` is the value resolved at its start, on every step and ev
 import { defineFunction, requireMember } from "primitive-functions";
 
 export default defineFunction("team-digest", {
+  input: [],
   authorize: requireMember((input: { teamId: string }) => input.teamId),
   handler: async (input, ctx, step) => {
     await step.sleep("collect", "1 hour");
@@ -319,6 +327,7 @@ For end-to-end checks, sign in as `+primitivetest` derived users with different 
 ## Gotchas
 
 - **Resolve provider IDs from the caller.** Read a trusted user-to-provider mapping using `ctx.user`; accepting a client’s provider ID could expose another account.
+- **Recompute, don't trust, the value a write finalizes on.** A function that completes a purchase, a booking or any other priced or limited action reads the price, availability or quota from the database at the moment it runs — never from what the caller sent back, and never from a cached answer, which can be up to `cacheSeconds` old (see [Server Functions — Callers who are not signed in](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#callers-who-are-not-signed-in)).
 - **Declare optional variables.** An undeclared or dynamic reference (`vars.?KEY`) is refused at save; guard an optional variable with `'KEY' in vars`.
 - **`authorize` gives owners and admins no bypass.** Admit them with an explicit check (`requireRole("admin")` or `if (auth.hasRole("admin")) return allow();`).
 - **A module-scope `assertRuntime` hides behind a uniform deny.** `authorize` shares the handler's module scope: a task-only function's module-scope `assertRuntime("task")` throwing while `authorize` loads settles as an `authorize-error` (uniform `403`). Call it the runtime it expects.
@@ -347,6 +356,7 @@ entry = "functions/export-report/index.ts"
 import { defineFunction, requireMember } from "primitive-functions";
 
 export default defineFunction("export-report", {
+  input: [],
   authorize: requireMember(() => "01JD7EB2C8H4K6M9P3R5S7T1V0"),
   handler: async (input, ctx) => { /* ... */ },
 });

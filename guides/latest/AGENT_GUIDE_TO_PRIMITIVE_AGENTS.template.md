@@ -251,6 +251,7 @@ type = "number"
 import { allowCallers, assertTrigger, defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: [],
   // the gate checks the turn's initiator; household membership is the body's own check below
   authorize: allowCallers({ agents: true, users: requireSignedIn() }),
   handler: async (_input, ctx) => {
@@ -301,6 +302,7 @@ type = "string"
 import { allowCallers, assertTrigger, defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
+  input: [],
   authorize: allowCallers({ agents: true, users: requireSignedIn() }),
   handler: async (_input, ctx) => {
     assertTrigger(ctx, "tool"); // refuses any other trigger

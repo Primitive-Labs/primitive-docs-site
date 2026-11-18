@@ -352,7 +352,7 @@ The mint answers `{ url, token, tokenId, maxBytes, contentType, filename, expire
 
 **Gotchas**
 
-- A signed-out page reaches the minting function only when the app sets `[app] signedOutAccess = true` in `app.toml` and the function's TOML declares `public = true` (with an `authorize`, such as `allowAnyone()`); otherwise its call answers `401` before the function runs.
+- A signed-out page reaches the minting function only when the app sets `[app] signedOutAccess = true` in `app.toml` and the function's TOML declares `public = true` (with an `authorize`, such as `allowAnyone()`); otherwise its call answers `401` before the function runs. A function whose `input` list names `contentType` and `filename` declares both under `[function.inputSchema.properties]`, or push refuses it (`FUNCTION_INPUT_SCHEMA_REQUIRED`).
 - Only a server function can mint, and only for a database whose `custodian` is `"app"`: anything else is refused (`FUNCTION_ROUTE_FUNCTION_ONLY`, `DB3_NOT_APP_HELD`). A value outside its range is `SIGNED_UPLOAD_OPTIONS_INVALID`, never clamped.
 - A URL is single use. A second upload (`SIGNED_UPLOAD_ALREADY_USED`, 409), another type (`SIGNED_UPLOAD_TYPE_MISMATCH`), a larger file (`SIGNED_UPLOAD_TOO_LARGE`), an expired URL (`SIGNED_UPLOAD_EXPIRED`) or a database deleted or moved since the mint (`SIGNED_UPLOAD_TARGET_GONE`) is refused; an upload cut off part way also uses up the URL. Mint a new URL to retry.
 - The function cannot know the `blobId` in advance: the page passes it back, and the function confirms it with `ctx.api.db3.blobs.get`.
