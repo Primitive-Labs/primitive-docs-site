@@ -57,9 +57,6 @@ primitive db3 indexes list <db3-id>                    # its indexes
 primitive db3 stats <db3-id>                           # record counts and size
 primitive db3 inspect <db3-id>                         # sync diagnostics for one database
 
-# Metadata
-primitive metadata get <type> <id> <category>          # resource metadata
-
 # Rate limits
 primitive rate-counters get <key>                      # a rate counter: limit, window, held and remaining
 ```
@@ -110,7 +107,7 @@ Outcome mapping, by source:
 
 | Source | `ok` | `error` | `pending` | `neutral` |
 |---|---|---|---|---|
-| Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
+| Integration | HTTP < 400 with no `errorCode` | HTTP ≥ 400, or any `detail.errorCode` — a call refused before sending (`REQUEST_BODY_CONFLICT`, `DISALLOWED_PATH`, …) or that got no response (`UPSTREAM_TIMEOUT`) has `nativeStatus: 0` | — | — |
 | Function log | `completed` | `failed`, `timeout`, a platform refusal code (`FUNCTION_BUNDLE_MISSING`, …) | `running` (a task slice that has printed and settled nothing) | anything else, and an absent status |
 | Activity | `function.invoke` with `status: "completed"` | `function.invoke` with `status: "failed"` or `"timeout"` | `function.invoke` with `status: "started"` | every other action, always |
 

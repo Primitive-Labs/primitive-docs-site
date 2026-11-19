@@ -1,29 +1,41 @@
 # Agent Guide to Primitive Notifications
 
+> **Status: experimental.** Experimental. Production does not serve this; every other environment does.
+
 Notifications create a durable inbox entry and can send push alerts to registered devices. Use `client.notifications` in the app and `ctx.api.notifications.send` in a server function.
 
 ## Sending
 
-Sending requires app-admin permission. Use a server function for member-triggered notifications.
+Send from a server function with `ctx.api.notifications.send` — sending requires app-admin permission, so the function's own `authorize` decides who may trigger it:
 
-```typescript
-  const { results } = await client.notifications.send({
-    title: "Your report is ready",
-    body: "Tap to view this week's summary.",
-    target: { userId },
-    channels: ["in-app", "ios"],
-    deepLink: "myapp://reports/latest",
-    idempotencyKey: `weekly-report-${userId}-2026-07-14`,
-  });
+```ts
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-  for (const result of results) {
-    console.log(result.channel, result.status); // "in-app" "delivered", "ios" "delivered"
-  }
+export default defineFunction({
+  input: ["jobId"],
+  authorize: requireSignedIn(),
+  handler: async (input: { jobId: string }, ctx) => {
+    const sent = await ctx.api.notifications.send({
+      body: {
+        title: "Your report is ready",
+        body: "Tap to view this week's summary.",
+        target: { userId: ctx.auth.userId },
+        channels: ["in-app", "ios"],
+        idempotencyKey: `report-ready:${input.jobId}`,
+      },
+    });
+    return { results: sent.results };
+  },
+});
 ```
 
 Set `title`, `body`, and `target.userId`. `channels` defaults to `["in-app"]`; add `"ios"` or `"android"` for push. `expiresAt` removes the inbox entry after an ISO date without affecting push delivery.
 
 Check `results` for each requested channel. A result can be delivered, failed, skipped, or invalidated. For push, inspect `tokenAttempts` when some devices need a retry.
+
+A resolved call is not full delivery: check `results[].status` per channel. Inside a task run, put the send inside a `step.do` so a replay does not repeat it, and still set `idempotencyKey` — a step retried after a partial failure then re-sends only the channels (and push tokens) that still need it.
+
+`send` hands something to a user, so it accepts any member as `target.userId`: restrict it to the caller as above, or check an id taken from input or a model before sending to someone else. A signed-out run cannot send (`FUNCTION_SIGNED_OUT_REFUSED`).
 
 ## Client SDK Reference
 
@@ -84,32 +96,9 @@ Register the device token with its platform and environment. Use the matching Ap
 
 Use live events for immediate UI updates. Read `list()` or `unreadCount()` after reconnecting to recover updates missed while disconnected.
 
-## Sending from a Server Function
+## Calling on Behalf of Another User
 
-Call `ctx.api.notifications.send({ body })` with the same send fields. The function’s `authorize` method controls who may trigger the send.
-
-```ts
-import { defineFunction, requireSignedIn } from "primitive-functions";
-
-export default defineFunction({
-  input: ["userId", "jobId"],
-  authorize: requireSignedIn(),
-  handler: async (input: { userId: string; jobId: string }, ctx) => {
-    const sent = await ctx.api.notifications.send({
-      body: {
-        title: "Your report is ready",
-        body: "Tap to view this week's summary.",
-        target: { userId: input.userId },
-        channels: ["in-app", "ios"],
-        idempotencyKey: `report-ready:${input.jobId}`,
-      },
-    });
-    return { results: sent.results };
-  },
-});
-```
-
-A resolved call is not full delivery: check `results[].status` per channel. Inside a task run, put the send inside a `step.do` so a replay does not repeat it, and still set `idempotencyKey` — a step retried after a partial failure then re-sends only the channels (and push tokens) that still need it.
+The inbox and device calls (`list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`) take an optional `userId` that defaults to the caller; a run with no caller (cron, a webhook) must name the member (`FUNCTION_SUBJECT_REQUIRED` otherwise): `await ctx.api.notifications.unreadCount({ userId: member.userId })`. In a run a plain member invoked, naming another member needs `users:readAny` for the inbox, unread count and device list, and `users:actAsAny` for the read and device calls — see the [Server Functions guide](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#capabilities).
 
 ## Idempotency and Deduplication
 

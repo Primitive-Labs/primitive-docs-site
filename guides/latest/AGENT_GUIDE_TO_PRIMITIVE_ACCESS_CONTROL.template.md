@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Access Control
 
-A server function's own call gate is a method you write: every version pushed today defines an `authorize` method that decides who may call it in code (below). Rule sets and metadata rules instead use CEL — test a CEL rule as a regular member, because app owners and admins bypass rules; an `authorize` method gives them no such bypass.
+A server function's own call gate is a method you write: every version pushed today defines an `authorize` method that decides who may call it in code (below). Rule sets instead use CEL — test a CEL rule as a regular member, because app owners and admins bypass rules; an `authorize` method gives them no such bypass.
 
 ## First rule
 
@@ -18,7 +18,7 @@ This function admits a member of the group the input names. Inside the function,
 
 ## Identity context
 
-Available to a rule set or metadata rule, but not to a webhook handshake
+Available to a rule set, but not to a webhook handshake
 `when`, which is CEL over the request shape (`body`, `query`, `headers`,
 `rawBody`), not an access rule; see the server-functions guide's webhook
 verification section.
@@ -37,7 +37,7 @@ verification section.
 
 Prefer membership checks over user-ID comparisons: `isMemberOf('01JD7E8V3K9Q2N6R4T5W0X1Y2Z')` (the `groupId` the group's create returned), `size(memberGroups()) > 0`.
 
-A rule set or metadata rule can check roles and group membership, but cannot read database records. Store entitlements as group memberships when they must be checked by a rule, or move the check into a function's `authorize` method (below), which can read records directly.
+A rule set can check roles and group membership, but cannot read database records. Store entitlements as group memberships when they must be checked by a rule, or move the check into a function's `authorize` method (below), which can read records directly.
 
 ## The `authorize` method
 
@@ -268,51 +268,24 @@ primitive functions authorize --cases --all          # run every case file in th
 | Surface | Rule controls | Default for regular members |
 |---|---|---|
 | Function `authorize` | Who can invoke it, decided in code | Required — push refuses a new or changed version with none |
-| Blob bucket preset or rule set | Reads, uploads, listing, deletion, sharing | A preset or rule set is required |
-| Metadata `readRule` / `writeRule` | Reading or writing category values | Denied without the rule |
+| Blob bucket preset | Reads, uploads, listing, deletion, sharing | One of four presets is required |
 
-Resource rules add context such as `record.blobCreatedBy`. See the feature guide for its variables. Metadata rules govern API reads and writes, not another rule's metadata lookups.
+Resource rules add context such as `record.blobCreatedBy`. See the feature guide for its variables.
 
 Groups and collections have no rule set: every group and collection has the same fixed, platform-enforced roles — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles); collections: owner, manager, editor, contributor, viewer. A rule the roles don't express goes in a server function's `authorize` (`requireMember`, `requireCollectionRole`, above).
 
-A function’s gate also authorizes its use of prompts, integrations and named locks, which carry no rule of their own; integrations require the declared capability. Admin routes and notification sending use app roles rather than CEL.
+A function’s gate also authorizes its use of prompts, integrations and named locks, which carry no rule of their own; integrations require the declared capability. Admin routes use app roles rather than CEL.
 
-[Metadata](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md) supplies `md.self.*` and declared related-resource paths. [Secrets and config variables](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) must be declared before a rule can read them.
+[Secrets and config variables](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) must be declared before a rule can read them.
 
 ## Rule sets (management operations)
 
-A function's `authorize` method decides who may run its code; **rule sets** govern who may manage platform resources directly — blob buckets. Groups and collections don't use one: every group and collection has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file. Put a rule those roles don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above).
+A function's `authorize` method decides who may run its code. The platform's own resources have fixed access models rather than rule sets of their own:
 
-```toml
-# primitive/dev/rule-sets/bucket-access.toml
-[ruleSet]
-name = "bucket-access"
-resourceType = "blob_bucket"
+- A **blob bucket** has one of four presets (`public`, `authenticated`, `admin-only`, `personal-uploads`) — see [Blob Buckets](AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.md). For access a preset can't express, make the bucket `admin-only` and return signed URLs from a function.
+- Every **group and collection** has the same fixed, platform-enforced roles (groups: owner, manager, member; collections: owner, manager, editor, contributor, viewer — see [Users and Groups](AGENT_GUIDE_TO_PRIMITIVE_USERS_AND_GROUPS.md#group-roles)), and `config push` refuses a `group-type-configs/` or `collection-type-configs/` file.
 
-[rules.blob]
-read = "!isAnonymous()"
-write = "!isAnonymous()"
-delete = "record.blobCreatedBy == user.userId"
-```
-
-```bash
-primitive config push --only rule-set/bucket-access
-```
-
-A **blob bucket** attaches a rule set via `ruleSetName` in its TOML — see the Blob Buckets guide for precedence semantics.
-
-Semantics:
-- **App owners/admins bypass rule sets entirely**; rules apply to regular members.
-- A blob bucket with no rule set bound falls back to its preset.
-- To deny an op for everyone except admins/owners, set that op's rule to `"false"`.
-
-**Subject-form membership in a metadata rule** — a category's `readRule`/`writeRule` can ask which groups a *loaded subject* belongs to, not just the caller: `memberGroupsOf(<subjectId>, '<groupType>')` returns that subject's list of groupIds of the type (a deprecated alias kept for metadata rules; new code checks membership with `isMemberOf`/`memberGroups`, one argument). Compose with `.exists()`/`.all()` to follow a relationship graph, e.g. grant a teacher of any class a student's metadata links to:
-
-```toml novalidate
-readRule = "memberGroupsOf(md.self.classLink.classId, 'class-students').exists(c, isMemberOf(c))"
-```
-
-`memberGroupsOf`'s subject must be a literal path such as `md.self.<category>.<key>`, and its type a literal string.
+Put a rule those models don't express in a server function whose `authorize` uses `requireMember` or `requireCollectionRole` (above). App owners/admins bypass presets and roles.
 
 ## Testing and debugging
 
@@ -322,7 +295,7 @@ primitive rule-sets schema                                   # available context
 primitive functions invoke <key> --user <user-id>           # exercise a function's authorize as that app user
 ```
 
-For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass rule sets, metadata rules, and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
+For end-to-end checks, sign in as `+primitivetest` derived users with different roles/memberships and invoke the function. Owners and admins bypass rule sets and bucket presets — so a gated or entitlement-gated state reads as open to them even when the gate is correct, and `primitive functions invoke` without `--user` runs as your own admin app user. Test that a gate actually denies as a plain `member`. An `authorize` method has no such bypass — invoking it as an admin exercises it exactly as any other caller would.
 
 ## Gotchas
 

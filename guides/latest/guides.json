@@ -15,7 +15,7 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-11-17",
+    "stampedAt": "2026-11-19",
     "channel": "alpha",
     "packages": {
       "js-bao-wss-client": "3.5.0",
@@ -189,7 +189,6 @@
         "databases",
         "authentication",
         "invitations",
-        "resource-metadata",
         "user-properties"
       ],
       "variants": [
@@ -344,6 +343,45 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "emptying-a-model",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_EMPTYING_A_MODEL.ts.md",
+      "description": "Emptying one model of a database in a single change",
+      "keywords": [
+        "clear",
+        "empty a model",
+        "records clear",
+        "clearModel",
+        "drop model",
+        "db3"
+      ],
+      "useCases": [
+        "Throwing away every record of one model before regenerating it",
+        "Removing a scratch model's declaration from an untyped database"
+      ],
+      "concepts": [
+        "client.db3.records(id).clear",
+        "clearModel",
+        "primitive db3 records clear",
+        "drop"
+      ],
+      "prerequisites": [
+        "databases"
+      ],
+      "relatedGuides": [
+        "databases"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_EMPTYING_A_MODEL.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_EMPTYING_A_MODEL.swift.md"
         }
       ]
     },
@@ -819,7 +857,8 @@
       "relatedGuides": [
         "server-functions",
         "integrations",
-        "blobs"
+        "blobs",
+        "client-versions"
       ],
       "variants": [
         {
@@ -867,7 +906,8 @@
       "relatedGuides": [
         "analytics",
         "server-functions",
-        "configuration"
+        "configuration",
+        "client-versions"
       ],
       "variants": [
         {
@@ -989,7 +1029,8 @@
       ],
       "relatedGuides": [
         "app-secrets",
-        "multi-client"
+        "multi-client",
+        "client-versions"
       ],
       "prerequisites": []
     },
@@ -1061,7 +1102,6 @@
         "Building a subscription-entitlement (Stripe billing) gate end to end"
       ],
       "relatedGuides": [
-        "resource-metadata",
         "user-properties"
       ],
       "prerequisites": []
@@ -1325,6 +1365,60 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_ERROR_HANDLING.swift.md"
+        }
+      ]
+    },
+    {
+      "topic": "client-versions",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.ts.md",
+      "description": "Per-platform app version policy: declare it, read client status, template banner/gate, enforce it",
+      "keywords": [
+        "client versions",
+        "app version",
+        "appVersion",
+        "clients",
+        "minRequired",
+        "minRecommended",
+        "latest",
+        "updateUrl",
+        "enforce",
+        "CLIENT_UPDATE_REQUIRED",
+        "update banner",
+        "update gate",
+        "app update",
+        "version policy",
+        "client.appVersion"
+      ],
+      "useCases": [
+        "Declaring an app's latest, recommended and required version per platform",
+        "Reading a build's status against the version policy from the JS or Swift client",
+        "Showing an update banner or a blocking update gate in the Vue or Swift template",
+        "Enforcing a minimum version on the server (opt-in)"
+      ],
+      "concepts": [
+        "[clients.<platform>] in app.toml",
+        "client.appVersion",
+        "client.getClientVersions",
+        "AppVersionStatus",
+        "enforce",
+        "CLIENT_UPDATE_REQUIRED",
+        "client.update_refused"
+      ],
+      "prerequisites": [
+        "configuration"
+      ],
+      "relatedGuides": [
+        "analytics",
+        "usage"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.swift.md"
         }
       ]
     },

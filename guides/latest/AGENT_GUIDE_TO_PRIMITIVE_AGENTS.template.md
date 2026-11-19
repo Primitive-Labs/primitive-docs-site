@@ -1,5 +1,7 @@
 # Agent Guide to Primitive Agents
 
+{{ area-status: agent-sessions }}
+
 An agent is a prompt of kind `agent`: it declares tools (server functions or client tools),
 event kinds, turn context and who may answer a paused call. A session is one running
 conversation with an agent, created by a server function; members then send messages,
@@ -487,6 +489,9 @@ removal that lands before the view is live rejects `open` with `DB3_ACCESS_REFUS
 nothing. Close the view; a fresh `open` after being re-added works as before.
 
 {{ example: agents/send-message }}
+
+The message is a `pending` entry in `messages` until its row syncs; the row then replaces it in
+the same change, before `send` returns if need be, so each message appears once.
 
 A send's `timezone` and `locale` render as `turn.timezone` and `turn.locale` for its turn and
 reach the context function's `input`. With no `turnContext.function`, the send also carries

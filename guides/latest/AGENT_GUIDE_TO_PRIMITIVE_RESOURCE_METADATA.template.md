@@ -1,10 +1,14 @@
 # Agent Guide to Primitive Resource Metadata
 
-**Deprecated.** Do not build new features on resource metadata. Store per-user data as user properties (`user-properties.toml`, `ctx.users`), and group or collection data in a db3 database keyed by the group or collection id. Existing calls keep working and are marked deprecated in the typings.
+{{ area-status: resource-metadata }}
 
 Resource metadata stores typed values about users, groups, and collections. Define categories with schemas and read/write rules, then read or replace each category’s values.
 
+Do not build new features on it. Store per-user data as user properties (`user-properties.toml`, `ctx.users`), and group or collection data in a db3 database keyed by the group or collection id. Existing calls keep working and are marked deprecated in the typings.
+
 ## Category configs
+
+{{ area-status: metadata-categories }}
 
 A category is defined once per `(resourceType, category)` — schema plus optional `readRule`/`writeRule` — and synced like any other config, one file per category:
 
@@ -209,6 +213,14 @@ Groups and collections expose a reserved, read-only `attrs` category with no sch
 writeRule = "md.self.attrs.createdBy == user.userId"
 ```
 
+**Subject-form membership in a metadata rule** — a category's `readRule`/`writeRule` can ask which groups a *loaded subject* belongs to, not just the caller: `memberGroupsOf(<subjectId>, '<groupType>')` returns that subject's list of groupIds of the type (a deprecated alias kept for metadata rules; new code checks membership with `isMemberOf`/`memberGroups`, one argument). Compose with `.exists()`/`.all()` to follow a relationship graph, e.g. grant a teacher of any class a student's metadata links to:
+
+```toml novalidate
+readRule = "memberGroupsOf(md.self.classLink.classId, 'class-students').exists(c, isMemberOf(c))"
+```
+
+`memberGroupsOf`'s subject must be a literal path such as `md.self.<category>.<key>`, and its type a literal string.
+
 ### Declared paths — a related resource's metadata
 
 A manifest can chain to another resource (up to 3 hops) via a metadata key holding its id:
@@ -303,20 +315,44 @@ primitive groups create --name "Reading group" --initial-metadata '{"classLink":
 
 A group's stamp only writes fresh rows: a category already stored under the new group's id fails the create with `409 METADATA_EXISTS` (delete the stored category, or leave it out of `initialMetadata`), and a staged unique value another resource already holds fails it with `409 UNIQUE_VALUE_CONFLICT` (change the value). Either way neither the group nor any metadata is created, and a stored row is untouched.
 
-## Reporting which user categories hold rows
+## Copy a metadata category into properties
 
-`primitive metadata report user` starts a report over the app's current members and polls it to a table of each user category still holding rows, its exact row count, and whether its config still exists. The report is admin-only (the admin API's `apps/{appId}/users/metadata-report`, `write` to start and `read` to read).
+Declare and push the target [user properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) fields, add a batch function (`[function]` with `key = "copy-user-metadata"`, `entry = "functions/copy-user-metadata.ts"`), and run it as a [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user). `primitive metadata report user` lists the categories holding rows (see the user-properties guide). The core of the function, per user in the batch:
 
-```bash
-primitive metadata report user --json             # { status, report: { members, membersWithRows, rows, categories: [{ category, rows, configured }] }, note }
-primitive metadata report user --no-wait          # prints the run id
-primitive metadata report user --run <run-id>     # read that run
+```ts
+// row: the user's category data, from ctx.api.resourceMetadata.getBatch (50 users per call)
+const patch: Record<string, unknown> = {};
+for (const [key, property] of Object.entries(input.fields)) {
+  if (Object.hasOwn(row, key)) patch[property] = valueFor(key, row[key]); // valueFor returns raw unchanged
+}
+if (Object.keys(patch).length === 0) skipped++;
+else {
+  try {
+    await ctx.users.setProperties(userId, patch);
+    copied++;
+  } catch (error) {
+    const code = (error as PrimitivePlatformError).errorCode;
+    if (code === "USER_PROPERTY_UNIQUE_CONFLICT" || code === "USER_PROPERTY_INVALID") refused.push({ userId, code });
+    else throw code ? new Error(`${code}: ${(error as Error).message}`) : error; // fails the batch
+  }
+}
+// the batch returns { copied, skipped, refused }
 ```
 
-- Rows held by users who are no longer members of the app are not counted.
-- `configured: false` marks a category whose config was deleted: its rows exist but are unreachable until the config is pushed again.
-- To move a category's values into typed user properties, run the copy function as a walk — see [Copy a metadata category into properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#copy-a-metadata-category-into-properties).
-- Exit codes: `0` with a report, `1` for a failed run or a report whose totals could not be read back whole (`reportUnavailable` names why), `124` when `--timeout` (default 600 s) passes first.
+```bash
+primitive users walk start --function copy-user-metadata --key copy-billing-1 --input '{"category":"billing","fields":{"customerId":"stripeCustomerId","plan":"plan"}}' --wait
+```
+
+- `authorize: allowCallers({ usersBatch: true })` — only a walk runs it, never a client with its own list of users.
+- The walk's `input` is `{ category, fields: { <metadata key>: <property name> } }`. Throw at once when it's missing or malformed, so the walk fails with nothing written. From a function, start it with `ctx.users.forEachBatch({ function: "copy-user-metadata", key, input })`.
+- A batch of up to 100 users costs one `getBatch` per 50 users plus one write per user with a row. A per-category answer with `ok: false` (for example, a deleted config) must throw `<code>: <message>`. Treating it as "no row" copies nothing silently.
+- A unique conflict or a value that doesn't fit is one user's data problem: record it under `refused` and carry on. Any other error (for example `USER_PROPERTY_UNKNOWN`, an undeclared target) fails the batch, so the walk retries it and then fails `USER_WALK_BATCHES_FAILED`. Put the code in the thrown message, because the walk records only the message.
+- A completed walk copied everyone not under `refused`. Sum the `refused` lists from the batch runs (`primitive functions runs <function-id> --json`) before treating the copy as done.
+- Every write is a merge-patch of the row's current values, so a rerun under a new `key` is safe and picks up changed rows.
+
+### Copy one property into a new one
+
+To change a field's type or uniqueness, declare the new field and run the same function with two changes. Read the source from the user instead of the category: `const row = (await ctx.users.get(userId))?.properties ?? {}`. And convert in `valueFor`, because a field keeps its type and a copy without conversion refuses every user. For example, use `Number(raw)` for text into a number when `Number.isFinite` holds for the result (a non-finite number would be written as `null` and clear the field), or `[raw]` for a scalar into a stringset. Return what you can't convert unchanged, so the write refuses it into `refused`. A unique target lists each conflicting user under `refused`; the walk still completes.
 
 ## Metadata lifecycle
 
@@ -344,4 +380,4 @@ A write never checks that the target resource exists — a write for a not-yet-c
 - **users-and-groups** — group/collection `metadataManifest` and the projected `attrs` category
 - **server-functions** — `ctx.api.resourceMetadata` and the system authority it runs with
 - **app-secrets** — the declared-only `secrets.*` binding a category manifest can also reach
-- **user-properties** — typed fields on the platform user, and copying a user category into them
+- **user-properties** — typed fields on the platform user, where the copy recipe above lands a category's values

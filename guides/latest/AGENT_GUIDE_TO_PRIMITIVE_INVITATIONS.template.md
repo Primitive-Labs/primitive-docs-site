@@ -153,7 +153,7 @@ The template provides `/invite/accept?inviteToken=...`. It shows the preview; a 
 Resolve the URL with `client.links`. Accept immediately when signed in; otherwise retain `inviteToken` and pass it through sign-in. For a returning Apple identity, call `invitations.accept` after sign-in. Handle `INVITE_TOKEN_INVALID` by offering to request another invitation.
 {{/lang}}
 
-### Preview before sign-in (beta)
+### Preview before sign-in {{ status: op:invitations.preview }}
 
 `GET /app/{appId}/api/invitations/preview?inviteToken=…` answers, with no session and in every app, `{ appName, appIconUrl, inviterName, role, shared, sharedTruncated, maskedEmail, status, expiresAt }`. `shared` lists at most 20 items the invitation shares, oldest first, each `{ kind: "db3" | "group" | "collection", title, level }`; `status` is `pending`, `expired` or `accepted`; `maskedEmail` reads `a***@example.com`. No id, token or full email is answered. Show it on the invite page before sending the visitor through sign-in.
 

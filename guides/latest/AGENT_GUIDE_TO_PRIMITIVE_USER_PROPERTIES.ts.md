@@ -28,7 +28,7 @@ primitive config push --only user-properties
 primitive user-properties get             # active version, fields, unique constraints
 ```
 
-Same field grammar as a [database type](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#types), no `[models.*]` level, plus `client` (see [The client table](#the-client-table)). Never on a property: `required` (absence is the unset state), `auto_assign`, `auto_stamp`, `vector`. A unique field never carries a `default` and a push refusing it a writable `client` (`self-write`/`self-write-members`). A field's **name, type and uniqueness are fixed at declaration** — changing any of them is refused at push, naming the field; declare a new field and [copy the values into it](#copy-one-property-into-a-new-one) instead. Removing a field keeps stored values but stops serving them; redeclaring the same name with its original type picks them back up.
+Same field grammar as a [database type](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#types), no `[models.*]` level, plus `client` (see [The client table](#the-client-table)). Never on a property: `required` (absence is the unset state), `auto_assign`, `auto_stamp`, `vector`. A unique field never carries a `default` and a push refusing it a writable `client` (`self-write`/`self-write-members`). A field's **name, type and uniqueness are fixed at declaration** — changing any of them is refused at push, naming the field; declare a new field and copy the values into it with a [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user) instead. Removing a field keeps stored values but stops serving them; redeclaring the same name with its original type picks them back up.
 
 Caps (per app, raise with `primitive users index limits --max-fields/--max-unique/--max-indexed/--max-bytes`): 100 fields, 10 unique fields+constraints combined, 10 indexed fields, 16 KB stored per user.
 
@@ -117,44 +117,20 @@ const invited = await ctx.invitations.getBy("stripeCustomerId", "cus_123"); // p
 
 `initialProperties` is admin-API/CLI/function-only — a client session sending it is refused `USER_PROPERTY_NOT_CLIENT_WRITABLE`. At acceptance, only properties the user has not already set are filled; a unique value someone else took meanwhile is dropped (logged `USER_PROPERTY_UNIQUE_CONFLICT`), not a failed signup. `primitive users create` fills the same way when it attaches an existing `User`.
 
-## Copy a metadata category into properties
+## Reporting which user categories hold rows
 
-Declare and push the target fields, add a batch function (`[function]` with `key = "copy-user-metadata"`, `entry = "functions/copy-user-metadata.ts"`), and run it as a [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user). `primitive metadata report user` lists the categories holding rows. The core of the function, per user in the batch:
-
-```ts
-// row: the user's category data, from ctx.api.resourceMetadata.getBatch (50 users per call)
-const patch: Record<string, unknown> = {};
-for (const [key, property] of Object.entries(input.fields)) {
-  if (Object.hasOwn(row, key)) patch[property] = valueFor(key, row[key]); // valueFor returns raw unchanged
-}
-if (Object.keys(patch).length === 0) skipped++;
-else {
-  try {
-    await ctx.users.setProperties(userId, patch);
-    copied++;
-  } catch (error) {
-    const code = (error as PrimitivePlatformError).errorCode;
-    if (code === "USER_PROPERTY_UNIQUE_CONFLICT" || code === "USER_PROPERTY_INVALID") refused.push({ userId, code });
-    else throw code ? new Error(`${code}: ${(error as Error).message}`) : error; // fails the batch
-  }
-}
-// the batch returns { copied, skipped, refused }
-```
+For an app that keeps per-user values in resource metadata categories, `primitive metadata report user` (beta) starts a report over the app's current members and polls it to a table of each user category still holding rows, its exact row count, and whether its config still exists. The report is admin-only (the admin API's `apps/{appId}/users/metadata-report`, `write` to start and `read` to read).
 
 ```bash
-primitive users walk start --function copy-user-metadata --key copy-billing-1 --input '{"category":"billing","fields":{"customerId":"stripeCustomerId","plan":"plan"}}' --wait
+primitive metadata report user --json             # { status, report: { members, membersWithRows, rows, categories: [{ category, rows, configured }] }, note }
+primitive metadata report user --no-wait          # prints the run id
+primitive metadata report user --run <run-id>     # read that run
 ```
 
-- `authorize: allowCallers({ usersBatch: true })` — only a walk runs it, never a client with its own list of users.
-- The walk's `input` is `{ category, fields: { <metadata key>: <property name> } }`. Throw at once when it's missing or malformed, so the walk fails with nothing written. From a function, start it with `ctx.users.forEachBatch({ function: "copy-user-metadata", key, input })`.
-- A batch of up to 100 users costs one `getBatch` per 50 users plus one write per user with a row. A per-category answer with `ok: false` (for example, a deleted config) must throw `<code>: <message>`. Treating it as "no row" copies nothing silently.
-- A unique conflict or a value that doesn't fit is one user's data problem: record it under `refused` and carry on. Any other error (for example `USER_PROPERTY_UNKNOWN`, an undeclared target) fails the batch, so the walk retries it and then fails `USER_WALK_BATCHES_FAILED`. Put the code in the thrown message, because the walk records only the message.
-- A completed walk copied everyone not under `refused`. Sum the `refused` lists from the batch runs (`primitive functions runs <function-id> --json`) before treating the copy as done.
-- Every write is a merge-patch of the row's current values, so a rerun under a new `key` is safe and picks up changed rows.
-
-### Copy one property into a new one
-
-To change a field's type or uniqueness, declare the new field and run the same function with two changes. Read the source from the user instead of the category: `const row = (await ctx.users.get(userId))?.properties ?? {}`. And convert in `valueFor`, because a field keeps its type and a copy without conversion refuses every user. For example, use `Number(raw)` for text into a number when `Number.isFinite` holds for the result (a non-finite number would be written as `null` and clear the field), or `[raw]` for a scalar into a stringset. Return what you can't convert unchanged, so the write refuses it into `refused`. A unique target lists each conflicting user under `refused`; the walk still completes.
+- Rows held by users who are no longer members of the app are not counted.
+- `configured: false` marks a category whose config was deleted: its rows exist but are unreachable until the config is pushed again.
+- To move a category's values into typed properties, declare the fields and copy the values with a [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user).
+- Exit codes: `0` with a report, `1` for a failed run or a report whose totals could not be read back whole (`reportUnavailable` names why), `124` when `--timeout` (default 600 s) passes first.
 
 ## Consistency contract
 
@@ -165,10 +141,23 @@ To change a field's type or uniqueness, declare the new field and run the same f
 
 See the [Server Functions guide](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#querying-users) for `ctx.users.query`'s filter grammar, paging and scan signals.
 
+## Existing apps
+
+An app whose user index has not been built yet starts with no index: `primitive users index status` answers a `null` generation and no shards. The index fills itself in the background — the first property write opens it holding only that one user, and revalidation adds the rest over time; `primitive users index rebuild` (after the step-up) builds a complete index now — so a non-`null` generation doesn't by itself mean the index is complete. Until it is, `query`/`count`/`aggregate` can answer an empty or a partial page, count or aggregate rather than erroring — a real filter can silently look like it matches none or only some of the real members. A [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user) is stricter: `forEachBatch` refuses to start with `409 USER_INDEX_NOT_READY`.
+
+```bash
+primitive users index status            # Generation: none yet → no index
+primitive login --step-up --scope admin # a plain login lacks the admin scope; run this first
+primitive users index rebuild           # builds a complete index now, needs the admin scope
+primitive users index reconcile --wait  # checks every member against the live record
+```
+
+See [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions) for the step-up prompt.
+
 ## Gotchas
 
 - **A patch and null are different things.** `setProperties`/`me.update` merge: an omitted field is untouched, an explicit `null` clears it back to its default. Don't send `{}` meaning "no change" if you actually meant to clear something — name it with `null`.
 - **A unique field's write refusal is a push-time rule, not a runtime check.** You cannot declare `unique = true` with `client = "self-write"` in the first place; the push itself is refused.
-- **Changing a field's type or uniqueness isn't an edit.** Declare a new field under a new name and [copy the values with a walk](#copy-one-property-into-a-new-one); there's no in-place change for either.
+- **Changing a field's type or uniqueness isn't an edit.** Declare a new field under a new name and copy the values with a [walk](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#walking-every-user); there's no in-place change for either.
 - **A condition can't see membership.** `role`, `status`, `addedAt` and friends live on the membership row, not `properties`; read them in the function instead of putting them in `condition`.
 - **`getBy`/`get` are not what `query` reads.** A property you just wrote is visible immediately to `get`/`getBy`, but `query`/`count`/`aggregate` can lag by seconds — don't poll `query` right after a write expecting it there instantly.

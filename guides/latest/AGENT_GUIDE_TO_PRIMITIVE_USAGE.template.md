@@ -1,5 +1,7 @@
 # Agent Guide to Primitive Usage
 
+{{ area-status: usage }}
+
 Primitive meters what an app uses — requests, function runs and steps, AI tokens, realtime messages, emails, rows read and written, stored bytes — and puts an estimated cost on each figure from list prices. App admins read it by meter and day, by user, and traced to what ran it, through `primitive usage` or the admin API. Every command takes `--json` and prints what the route answers. App code reads one member's quantities from a server function or the JS client.
 
 ## Read a month
@@ -15,7 +17,7 @@ The answer has the month's `meters` (quantity, unit, `estCostMicros`, costliest 
 
 Meters are named for what they count: `api.request`, `fn.invoke`, `fn.step`, `fn.cpu_ms`, `llm.tokens.in`, `llm.tokens.out`, `ws.msg.in`, `email.sent`, and others. Meters ending in `.bytes` are storage (`kind: "storage"`), counted in byte-days.
 
-`--meter <name>` prints that meter's quantity for each day of the month instead. A name that is not a meter, or a `deprecated.*` diagnostic meter (which the month read leaves out), is refused before anything is read. `signedout.invoke` counts the signed-out function calls the app's hourly ceiling accepted, `signedout.blob` the public blob URL requests it served, and `signedout.ceiling_refused` the function calls and public blob requests it refused (see the server functions guide's "Callers who are not signed in"). They cost nothing of their own, so read them with `--meter`.
+`--meter <name>` prints that meter's quantity for each day of the month instead. A name that is not a meter, or a `deprecated.*` diagnostic meter (which the month read leaves out), is refused before anything is read. `signedout.invoke` counts the signed-out function calls the app's hourly ceiling accepted, `signedout.blob` the public blob URL requests it served, and `signedout.ceiling_refused` the function calls and public blob requests it refused (see the server functions guide's "Callers who are not signed in"). They cost nothing of their own, so read them with `--meter`. `client.update_refused` counts the calls and socket connects an enforcing client version policy refused, with the platform as the resource; it costs nothing either.
 
 ## Read by user
 
@@ -62,7 +64,7 @@ All routes are `GET` under `/admin/api/apps/{appId}/usage`, need an admin token 
 
 ## From app code
 
-A server function reads one member's usage with `ctx.usage.forUser(userId, { since?, until? })`; the route is `GET /app/{appId}/api/usage/users/{userId}` (beta). The answer is `{ appId, userId, since, until, meters: [{ meter, unit, quantity, bytes, points }], storage: [{ meter, bytes }] }` with no cost field, over the same window rules as above (`since`/`until` may also be `Date`s).
+A server function reads one member's usage with `ctx.usage.forUser(userId, { since?, until? })`; the route is `GET /app/{appId}/api/usage/users/{userId}` {{ status: op:usage.forUser }}. The answer is `{ appId, userId, since, until, meters: [{ meter, unit, quantity, bytes, points }], storage: [{ meter, bytes }] }` with no cost field, over the same window rules as above (`since`/`until` may also be `Date`s).
 
 ```ts
 const usage = await ctx.usage.forUser(member.userId, { since: new Date(Date.now() - 86_400_000) });

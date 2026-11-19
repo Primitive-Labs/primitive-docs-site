@@ -65,7 +65,7 @@ A database's models are declared once, in `primitive/<env>/db3-types/<name>.toml
 
 Each client points at the type files by path; the `db3-types/` directory covers every kind of database the app opens:
 
-- **Web** — the template's `pnpm codegen` reads every type file in the selected environment's `db3-types/` and generates one `src/models/<type>/` per type, plus a `src/models/index.ts` whose `allModels` holds them all. Outside the template, `js-bao-codegen-v2 -i ../primitive/dev/db3-types -o src/models` generates the whole directory in one run.
+- **Web** — the template's `pnpm codegen` reads every type file in the selected environment's `db3-types/` and generates one `src/models/<type>/` per type, plus a `src/models/index.ts` whose `allModels` holds them all. A `bao-codegen.json` beside the web client's `package.json` narrows that to the types it names, `{ "types": ["notes"] }` (type names, not paths, resolved in whichever environment is generated; each must exist in every environment the client builds for, and a type that names a model through `[type] models` needs the declaring type selected too). Outside the template, `js-bao-codegen-v2 -i ../primitive/dev/db3-types -o src/models` generates the whole directory in one run.
 - **Swift** — `bao-codegen.json` at the root of the target's source directory:
 
   ```json

@@ -1,5 +1,7 @@
 # Agent Guide to Primitive Databases
 
+> **Status: beta.** Beta. Served in production; the API can still change.
+
 All app data on Primitive lives in **databases**. In code and on the CLI a database is a **`db3`**: `client.db3`, `primitive db3`, `ctx.db3(...)` in server functions, `db3-types/` in the config tree. This guide is the one data-storage guide: it covers types and codegen, records, synced databases, access, and partitioning.
 
 ## The decision that shapes everything
@@ -128,7 +130,7 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `user.writer`, 
   let db = try await client.db3.create(title: "Q3 plan", type: "project")
 ```
 
-**Who creates a type.** `[type] create = "admins"` keeps creating databases of the type to app admins and owners; `[app] untypedDb3Create = "admins"` in `app.toml` does the same for databases with no type. A member is then refused 403 `DB3_CREATE_ROLE_REQUIRED` (`details.type`, `null` for no type), nothing created, on `client.db3.create`, `getOrCreateWithAlias` whose alias names nothing, and `setType` naming a restricted type. Exempt: app admins and owners, server functions (`ctx.api.db3.create` creates for the calling member), and `localOnly: true` creates. `"members"` or no key is open to every member; `PUT db3-types/:name` takes `create` (`"admins"`, `"members"`/`null`; omitted keeps it) and `db3-types list`/`get` show it. A create made on the device resolves first, then `db3:create-failed` fires with the `id`, `code: "DB3_CREATE_ROLE_REQUIRED"` and the `type`; its records stay on the device, and a create that already committed still answers it. Offer the create only to users who can make it.
+**Who creates a type.** `[type] create = "admins"` keeps creating databases of the type to app admins and owners; `[app] untypedDb3Create = "admins"` in `app.toml` does the same for databases with no type. A member is then refused 403 `DB3_CREATE_ROLE_REQUIRED` (`details.type`, `null` for no type), nothing created, on `client.db3.create`, `getOrCreateWithAlias` whose alias names nothing, and `setType` naming a restricted type. Exempt: app admins and owners, server functions (`ctx.api.db3.create` creates for the calling member), and `localOnly: true` creates. `"members"` or no key is open to every member; `PUT db3-types/:name` takes `create` (`"admins"`, `"members"`/`null`; omitted keeps it) and `db3-types list`/`get` show it. A create made on the device resolves first, then `db3:create-failed` fires with the `id`, `code: "DB3_CREATE_ROLE_REQUIRED"` and the `type`; its records stay on the device, and a create that already committed still answers it. Offer the create only to users who can make it. `primitive init` sets `untypedDb3Create = "admins"` on an app it creates for the web template.
 
 ```swift
   // Listen before creating. Hold the subscription for as long as the handler
@@ -181,6 +183,22 @@ Every codegen reads the **same type files**, so clients and functions agree on m
 
 - iOS: the template's `scripts/codegen.sh` regenerates the structs on every scripted build path (`./build.sh`, `./run.sh`, `./test.sh`) and every Xcode build; a bare `swift build` compiles the committed output. Put `bao-codegen.json` (`{ "inputs": ["../../primitive/dev/db3-types"] }`: type files or directories, generated with one `GeneratedModels` barrel; or `{ "input": "<type file>" }` for one) at the root of the app target's sources, and call `GeneratedModels.register(on: client)` once at startup (the template's `AppState` does). The SwiftPM codegen plugin reads the same file. Elsewhere run `swift run swift-bao-codegen --input primitive/dev/db3-types --output Sources/<App>/Models/Generated` (`--input` repeatable; a file or a directory). Codegen reads `schemas/` beside `db3-types/` to expand a shared-enum `ref`. The SwiftPM plugin reruns when a type file changes, so after editing only a `schemas/` def, clean the build folder. Load a type that uses `ref` through its generated models: `TomlSchemaLoader` reads fields as written.
 - iOS, shared enums: the type is `enum Status`, declared in `Primitive.generated.swift` by `primitive functions codegen --lang swift` (the template's `scripts/codegen.sh` runs it when `schemas/` is synced); the app target must compile that file. A struct field that refs the def is `status: Status?` (assign a case; a `String` does not compile) over a read-only `statusRaw: String?` holding the stored text, so a value outside the enum reads `nil` and is kept; a required one takes `Status` in the initializers. The function helpers and `Primitive.generated.swift`'s row types use the same `Status`. `statusEnum` and `<Model>.StatusValue` are deprecated; `<Model>.StatusValue` is not generated when a shared enum the model refs is named `StatusValue`.
+- Known types: `--known-types-only` (both generators; the web template's `scripts/codegen.mjs` sets it through its `knownTypesOnly` constant) declares every input type in the barrel, archived ones marked; on iOS `GeneratedModels.register(on:)` registers them. With it, `client.db3.create` of an undeclared or build-archived type is refused on the device `INVALID_ARGUMENT` (`details.reason: "unknown-type"`, `type`, `knownTypes`, `archived`), before anything is created; `getOrCreateWithAlias` refuses an undeclared type and sends an archived one. Subscribing to (and `client.db3.records(id)` on) a database of an undeclared type is refused `DB3_TYPE_UNKNOWN_TO_CLIENT` (`details.db3Id`, `type`): nothing applied, not retried, the state carries the error; `stored()` and `listMine()` mark it `knownType: false` and `evict` removes it. `allowUnknownType: true` on create, alias, subscribe/refresh and `records(id, …)` lets that database through on the client for its lifetime; listings still mark it. A type attached while a device has the database open is refused at that device's next open (reconnect, subscribe, restart). Functions, CLI and console are not guarded.
+
+```swift
+  let subscription = try client.db3.subscribe(db3Id)
+  do {
+    try await subscription.ready()
+    return subscription
+  } catch let error as JsBaoError where error.code == .db3TypeUnknownToClient {
+    var options = Db3SubscribeOptions()
+    options.allowUnknownType = true
+    let escaped = try client.db3.subscribe(db3Id, options: options)
+    try await escaped.ready()
+    return escaped
+  }
+```
+
 - Functions: `primitive config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; `ctx.db3(id, "<type>")` then accepts only existing types, `.model("<key>")` only declared models, and rows are typed (a type's `timestamps` fields required numbers on read rows of the models it stamps, absent on the others; writes leave them out).
 
 A database that grew without a type: `primitive db3 schema <db3-id> --toml --output primitive/dev/db3-types/<name>.toml` writes its observed fields as a type file to review, push and attach.
@@ -264,6 +282,25 @@ Operators: `$eq $ne $gt $gte $lt $lte $in $nin $exists`, text `$startsWith $ends
 
 Also group by membership (`{ field: "tags", contains: "urgent" }` → group key `has_tags_urgent`) or by a date period (`{ field: "dueDate", period: "month" | "quarter" | "year" }` → group key `dueDate_month`). A function aggregates with `ctx.db3(id, type).model(key).aggregate({ options: { groupBy, operations, filter, sort, limit } })`, which resolves to the bare row array.
 
+### Checked queries
+
+A generated model can check a filter, sort and aggregate against its fields at compile time:
+
+```swift
+  let f = Task.fields
+  let open = ModelFilter<Task>.and([f.completed.eq(false), f.dueDate.lt("2026-07-01")])
+
+  let tasks = try Task.query(where: open, sort: [.asc(f.dueDate), .desc(f.priority)], options: QueryOptions(db3: [db3Id]))
+  let remaining = try Task.count(where: open, options: QueryOptions(db3: [db3Id]))
+
+  let category = f.category.group, hours = f.estimatedHours.sum()
+  let rows = try Task.aggregate(groupBy: [category], operations: [hours], where: open, db3: [db3Id])
+  let totals = rows.map { row in (row[category] ?? "none", row[hours] ?? 0) } // (String, Double)
+```
+
+
+Every generated model has `fields`, one token per field (`id` included; none for a `vector` field), and conforms to `TypedQueryModel`, which adds `query(where:sort:options:)`, `queryPaged(where:sort:options:)`, `queryOne(where:sort:options:)` (each also with `include:`), `count(where:options:)` and `aggregate(groupBy:operations:where:sort:limit:documents:db3:)` beside the `DocumentFilter` forms, which are unchanged. A token's type fixes its operators and operand: `eq`/`ne`/`in`/`notIn`/`exists`/`isNull` on every kind but string sets and JSON; `gt`/`gte`/`lt`/`lte` on `string`, `id`, `date` (an ISO `String`, not a `Date`) and `number` (`Double`); `startsWith`/`endsWith`/`containsText` on `string` and `stringset`; `contains`/`all`/`size` on `stringset` (`size(2)` or comparisons, `size(.gte(1), .lt(3))`); a JSON field only `exists`; a shared-enum field takes its enum or a `String`. A field the model lacks, a wrong-typed operand or a missing operator fails to compile. Combine with `ModelFilter.and([...])`/`.or([...])`; `ModelFilter(unchecked: DocumentFilter)` for what tokens can't say (`$search`). `sort: [.asc(f.x), .desc(f.y)]` is sent as `sortOrder` in that order; with an `options` that sets `sort` or `sortOrder` too it throws `.invalidArgument`. Aggregate levels: `f.x.group` (a `stringset` facet answers the member `String`), `f.tags.has("m")` (`Bool`), `f.date.period(.month)` (`String`); operations: `Model.aggregateCount()` (`Int`), `f.n.sum()`/`avg()` (`Double`), `min()`/`max()` (the field's type), each with `as:` for a custom result key. `row[key]` answers `Value?` (`nil` for a key not requested); `row.raw` is the `aggregate(_:)` row.
+
 ### Includes
 
 ```swift
@@ -340,7 +377,7 @@ await ctx.db3(input.db3Id, "workspace").batch(
 const { reads } = await tasks.batch([{ action: "create", data: { title: "c" } }, { action: "count" }]); // reads[0].count sees the create
 ```
 
-`patch` (here, over HTTP and from the CLI) changes a record that exists: a missing id is refused `DB3_RECORD_NOT_FOUND` (404) and nothing is created; create with `save`.
+`patch` (here, over HTTP and from the CLI) changes a record that exists: a missing id is refused `DB3_RECORD_NOT_FOUND` (404) and nothing is created; create with `save`. A `condition` is judged first: a `patch` or `delete` with a `condition` on a missing id is refused 409 `DB3_CONDITION_NOT_MET`, not 404, with `details.current.row` `null` (the machine-readable "no such record"). A `delete` of a missing id without a `condition` is a no-op, not an error. An `increment` of a missing id is always 404 `DB3_RECORD_NOT_FOUND`, with or without a `condition`. A trigger's `refuse` is also 409 (`DB3_TRIGGER_REFUSED`, your code in `details.reason`), so tell the 409s apart by `code`, never by status.
 
 Batch writes: `create`, `patch`, `delete`, `upsert` (`constraint`: a `unique` field's name or a constraint name, as `upsertOn` takes; any other name is refused 400 `DOCUMENT_ENTRY_INVALID`, nothing written), `increment`, each with optional `condition` and `requestId`; up to 100 operations per call, reads included; all-or-nothing unless `atomic: false`. Pass a `requestId` (a ULID) on any server write you may retry. A batch may also carry reads (`{ model, action: "query" | "count" | "aggregate", ... }`, taking what `query`, `count` and `aggregate` take): they run in order, each seeing the writes before it, and answer in `reads` at their `index`. A `requestId` retry answers the writes as first applied and the reads again.
 
@@ -363,7 +400,7 @@ Batch writes: `create`, `patch`, `delete`, `upsert` (`constraint`: a `unique` fi
   ])
 ```
 
-Server function: `await ctx.db3(id, "workspace").batchRead([{ model: "tasks", action: "count" }, ...])`, or `.model("tasks").batchRead([{ action: "count" }])`. CLI: `primitive db3 records batch-read <db3-id> --data-file reads.json` (one line per result; `--partial`, `--json`).
+Server function: `await ctx.db3(id, "workspace").batchRead([{ model: "tasks", action: "count" }, ...])`, or `.model("tasks").batchRead([{ action: "count" }])`. Each result is typed by the read at its position: after `if (r.ok)`, a `query` read's `items` are that model's rows (as `model(m).query()` types them), a `count` read has `count`, an `aggregate` read `result`; a mixed `batch`'s `reads` likewise, in op order, writes skipped. No cast is needed, and a field the model doesn't declare, or a cast to an unrelated row type, fails the push typecheck. CLI: `primitive db3 records batch-read <db3-id> --data-file reads.json` (one line per result; `--partial`, `--json`).
 
 - Up to 100 reads; no read may use another's result.
 - The whole answer is at most 8 MiB: a page that would pass it ends early with `hasMore`; a read that still can't fit (a first record, a page with `include`, aggregate rows) is refused `DB3_PAGE_TOO_LARGE` with `details.index`.
@@ -392,41 +429,23 @@ Use a bulk load — not saves or `batch()` — for imports, reference datasets, 
   // loaded.refusedRows counts rows the database refused, refusedSample names a few.
 ```
 
-CLI: `primitive db3 ingest <db3-id> --input <dir> -y` (one `<model>.ndjson[.gz]` per model, each line an id and a patch), `primitive db3 ingests get|abort <db3-id> <session-id>`. To move a database: `primitive db3 export <db3-id> --output <dir>`, then `primitive db3 import <dir>` (a new id), `--into <db3-id>`, or `--keep-id` (the exported id, which must be free in the target app).
+From a server function, `ctx.db3(id, type).load(rows)` runs the whole load in one call ([Server functions guide](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#bulk-loads-load)).
 
-- A row is `{ model, id, patch }`: values replace fields, `{ "_deleted": true }` deletes the record. `null` stores `null` on a plain field (it does not remove the key); on a string-set field it empties the set.
+CLI: `primitive db3 ingest <db3-id> --input <dir> -y` loads one `<model>.ndjson[.gz]` per model, each line one record with its `id` and fields side by side; `primitive db3 ingests get|abort <db3-id> <session-id>`. A line of `Security.ndjson`:
+
+```json
+{"id":"sec-vti","symbol":"VTI","name":"Vanguard Total Stock Market ETF"}
+```
+
+To move a database: `primitive db3 export <db3-id> --output <dir>`, then `primitive db3 import <dir>` (a new id), `--into <db3-id>`, or `--keep-id` (the exported id, which must be free in the target app).
+
+- In code, a row is `{ model, id, patch }`: values replace fields, `{ "_deleted": true }` deletes the record. `null` stores `null` on a plain field (it does not remove the key); on a string-set field it empties the set.
 - `mode: "merge"` (default) touches only named records; `mode: "refresh"` also deletes every record of the rows' models no row names.
-- Rows that break the type, an enforced enum, a record's value rules (value kinds, field names, vector encoding) or a unique key are skipped and counted in `refusedRows` (`refusedSample` names a few); the load continues.
+- Rows that break the type, an enforced enum, a record's value rules (value kinds, field names, vector encoding) or a unique key are skipped and counted in `refusedRows` (`refusedSample` names a few); the load continues. `primitive db3 ingest` exits 1 when every row is refused and warns with the count when some are; `primitive db3 inspect <db3-id> --refused <session-id>` lists them.
 - A load fills `default`s and `auto_stamp` fields but runs no `triggers`, `autoPopulatedFields` or `timestamps`, and starts no `[[function.triggers.db3]]` run.
 - Records appear together at completion; subscribed devices receive them in chunks. App writes made during the load win over conflicting rows.
 - `buildChunks` holds all rows in memory — use the CLI beyond a few hundred thousand rows. A load can't be undone, and stopping the CLI's wait doesn't stop it — check `primitive db3 ingests get`.
 - A session's `timings.totals.counters` gives per stage `statements`, `rowsRead` and `rowsWritten`, split `byTarget` like a batch's `cost`: a load fills `manifest`, `apply` (the rows), `reconcile` (a refresh's deletions) and `register` (completion).
-
-### Emptying a model
-
-Clear a model, not a `refresh` load with no rows or per-record deletes, to remove every record of it: one call whatever the record count, one change on the server, and one change for each device to apply.
-
-```swift
-  do {
-    let result = try await client.db3.clearModel(db3Id, model: "embeddings")
-    print("removed \(result.rows) records")
-  } catch Db3ClearError.clearApplyPending(let result) {
-    // The server emptied the model; this device has not caught up yet.
-    // Don't clear again. Wait for sync before writing to the model here.
-    print("removed \(result.rows) records; this device catches up shortly")
-  }
-```
-
-CLI: `primitive db3 records clear <db3-id> <model> [--drop] [-y] [--json]` (asks first unless `-y`). HTTP: `POST db3/{db3Id}/records/{model}/clear`, body `{ "drop"?: boolean }`.
-
-- Answers `{ model, rows, lsn, epoch, dropped, cost }`. With no live record `rows` is 0, `lsn` and `epoch` are `null`, and nothing is written.
-- Needs write access. 409 `DOCUMENT_INGEST_ACTIVE` (with `sessionId`) while a bulk load is open, committed or applying. Runs no trigger, hook or `[[function.triggers.db3]]` run. Not idempotent: a retry clears what the model holds then.
-- On a db3 open here and syncing, the call returns only after this device applied the clear. It returns at once when nothing was written, when the db3 is not open here, or when its sync is off.
-- Racing writes end as against a deleted record. A create stamped before the writing device applied the clear (an offline queue, an in-flight save) is accepted and discarded, even for a new id. A patch or delete of a cleared record leaves it gone. An increment is refused `DB3_RECORD_NOT_FOUND`. Server writes after the clear apply.
-- `drop: true` on an untyped db3 also removes the model's declaration, observed fields and registered indexes, so `schema` stops listing it. It needs the owner or an app admin (as index registration does). On a typed db3 it is refused 409 `DB3_MODEL_DROP_REFUSED_TYPED` and nothing changes. A device that still declares the model declares it again on its next open.
-- Refill a model by clearing it and then bulk loading.
-
-**Watch out when clearing:** if this device has not applied the clear 10 s after the server answered, the call fails `DB3_CLEAR_APPLY_PENDING` carrying the server's answer, as the example catches. The server did clear the model, so don't retry. Until the device catches up, a record it creates in the model is discarded, so hold writes to that model until it has synced.
 
 ### From the CLI
 
@@ -677,7 +696,7 @@ A refusal is remembered on the device: the copy refuses writes (`WRITE_ACCESS_DE
   }
 ```
 
-A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) resolves at once, online or offline, with `pendingCreate` true in the state, and the client saves it under the same id in the background (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A refusal only the server decides (`DB3_TYPE_NOT_FOUND`, `DB3_TYPE_REFUSED`) arrives as that event, never as a rejection of `create`. A create overlapped by a change of signed-in user (another user's sign-in, a sign-out) rejects `INVALID_ARGUMENT` with the reason `identity-changed` and keeps nothing; create again under the new user. Await `client.db3.commitCreate` with the id to get the server's answer (`created`, or `refused` with the reason; a refused create is tried again), and `client.db3.cancelPendingCreate` drops a create the server doesn't have yet, sending nothing; `client.db3` calls that ask the server about the database wait for the commit on their own, rejecting `PENDING_CREATE` offline or after 30 s. A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
+A resident copy answers reads and takes writes while unsubscribed or offline; writes queue and send at the next subscribe, in order. `db3.create` for the user's own synced database (no `custodian`) resolves at once, online or offline, with `pendingCreate` true in the state, and the client saves it under the same id in the background (`db3:created`, or `db3:create-failed` with its `id`, keeping its records). A refusal only the server decides (`DB3_TYPE_NOT_FOUND`, `DB3_TYPE_REFUSED`) arrives as that event, never as a rejection of `create`. A create overlapped by a change of signed-in user (another user's sign-in, a sign-out) rejects `INVALID_ARGUMENT` with the reason `identity-changed` and keeps nothing; create again under the new user. Await `client.db3.commitCreate` with the id to get the server's answer (`created`, or `refused` with the reason; a refused create is tried again), and `client.db3.cancelPendingCreate` drops a create the server doesn't have yet, sending nothing; `client.db3` calls that ask the server about the database (`delete` included) wait for the commit on their own, rejecting `PENDING_CREATE` offline or after 30 s; drop an unwanted pending create with `cancelPendingCreate`, not `delete`. A device may write offline for 7 days by default (`largeDocumentWindowDays` in `app.toml` `[app]`, 1–14).
 
 `setRetentionPolicy` with `maxDocs` keeps at most that many of the copies `stored()` lists, subscribed ones included, evicting the least recently used first (`db3:evicted` with `reason: "retention"`). A copy's last use is the later of its last open and the end of its last subscription (a dispose, a sign-out, or the client shutting down). A subscribed copy, one with unsent writes and one still being created (`pendingCreate`) are never evicted and still count, so the device may keep more. `maxBytes` never removes a database copy. `maxDocs` is a positive integer; leave it unset for no cap. `0`, a negative or a non-integer is refused with `INVALID_ARGUMENT`, and the policy stays as it was.
 `ttl` evicts copies unused for that long: a positive number of seconds, a fraction included; `nil` is no TTL. `0`, a negative or a non-finite `ttl` is refused the same way. `client.db3.setRetentionPolicy` throws the refusal; assigning a refused policy to `client.retentionPolicy` leaves it unchanged and logs an error.
@@ -712,6 +731,7 @@ A `DB3_DISPOSED` rejection carries a `reason` in its details saying why the subs
 
 Every generated model has `subscribe(callback)` → unsubscribe function; it fires on local and remote changes. Re-run the query in the callback.
 
+In the iOS template, `BaoDataLoader` wraps this: `bind(client:subscribeTo:load:)` re-runs `load` when the subscribed models or the database change, and `phase` is `.loading`, `.empty` or `.loaded(data)`. A change made while `isPaused` is true reloads once when `isPaused` goes back to false.
 
 ```swift
     Group {
@@ -753,7 +773,8 @@ A device write (save, patch, delete, increment) applies to the local copy and re
 | Code | Cause |
 |---|---|
 | `DOCUMENT_CONSTRAINT_VIOLATED` | Unique key taken by another device first |
-| `DB3_CONDITION_NOT_MET` | Condition no longer held (`current`) |
+| `DB3_CONDITION_NOT_MET` | Condition no longer held (`current`); also a conditional patch or delete of a missing record, with `current.row` `null` |
+| `DB3_RECORD_NOT_FOUND` | Increment of a missing record, with or without a condition |
 | `DB3_TRIGGER_REFUSED` | A type rule refused (`error.details.reason`: the rule's code, or `TRIGGER_EVALUATION_FAILED` when its `when` couldn't be evaluated) |
 | `DB3_MODEL_NOT_DECLARED` | Model not in the database's type |
 | `DB3_VALUE_NOT_IN_ENUM` | A value outside a field's enforced enum (refused on the device first; an app on an older client library gets `DOCUMENT_ENTRY_INVALID`) |

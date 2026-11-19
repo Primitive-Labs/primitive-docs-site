@@ -309,13 +309,6 @@ export default defineFunction({
 
 The server assigns the group's id, a ULID, and returns it as `groupId` in the response — the same way databases and collections get their ids. A create names no id: a body that sends `groupId` (any value, `null` included) is refused with `400 GROUP_ID_NOT_ACCEPTED`. The creator does not become a member unless the create names them (directly, or via `custodian`/`initialMembers`) — there is no `autoAddCreator`.
 
-`groups.create()` also takes an optional `initialMetadata` — category name → that category's values — stamped on the group in the same call: each category is schema-validated before the group is created, the category's `writeRule` is waived for this stamp, at most 10 categories, and an invalid entry fails the whole create (neither the group nor any metadata is left).
-
-```bash
-primitive groups create --name "Reading group" \
-  --initial-metadata '{"classLink":{"classId":"class-A"}}'
-```
-
 ## Managing Groups
 
 ### List / Get / Update / Delete
@@ -468,7 +461,7 @@ Every group has the same fixed roles, enforced by the platform — no types, no 
 The owner is the user named by `custodian`, or nobody while `custodian` is `"app"`. `POST /groups/{groupId}/transfer` with `{ to: "user:<userId>" | "app" }` moves the custodian and the owner row together (the previous owner becomes a manager); a session may move a group only between users, and a server function or the admin API also to and from the app. While a transfer is in progress, another transfer and any owner-row change answer `409 TRANSFER_PENDING`. A server function lists one custodian's groups with `ctx.api.groups.listByCustodian({ custodian, cursor })`. Removing a user from the app passes each group they hold to the app when anyone else is a member, and deletes it otherwise. `group-type-configs/` is no longer part of a config tree: `primitive config push` refuses a tree holding a file there, before any request, naming each file and the replacement:
 
 - A rule the roles do not express → a server function whose `authorize` uses `requireMember(groupIdOf, role)` (see the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md)).
-- A group metadata manifest (`[metadata.self]`, `[metadata.paths.*]`, `secrets`) → a metadata category config (see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md)).
+- A group metadata manifest (`[metadata.self]`, `[metadata.paths.*]`, `secrets`) → a metadata category config.
 
 ## Groups and databases
 
@@ -652,9 +645,6 @@ A function can check any level: a fixed one in its `authorize` (`requireMember((
 | `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMemberByEmail(groupId:email:)` or `groups.revokePendingInvitation(groupId:invitationId:)`. |
 | `addMember` returns `status: "already_member"` | User already in the group | Idempotent — no error. |
 | 400 `GROUP_ID_NOT_ACCEPTED` on `groups.create` | The body sent `groupId` | Omit it; read `groupId` from the response. |
-| 400 on `groups.create` with `initialMetadata` | A staged category is unknown, reserved (`attrs`), fails its schema, or there are more than 10 | Fix the payload; nothing was created. |
-| 409 `METADATA_EXISTS` on `groups.create` | Metadata for a staged category is already stored under the new `groupId` | Delete the stored category (`resourceMetadata.delete`, gated by the category's `writeRule`) or leave it out of `initialMetadata`. Nothing was created. |
-| 409 `UNIQUE_VALUE_CONFLICT` on `groups.create` | A staged category's unique field holds a value another resource already holds | Change the conflicting value. Nothing was created. |
 | 403 `FUNCTION_ROUTE_FUNCTION_ONLY` on `groups.create` | A client session called it | Create from a server function (`ctx.api.groups.create`) or the admin API / CLI instead. |
 | CEL `isMemberOf` returns false unexpectedly | Wrong `groupId`, user not yet added (deferred), or membership cache stale | Verify with `listUserMemberships(userId)`; remember email-based adds defer until sign-up. |
 | Can't restrict admin/owner access via rules | By design — app owner/admin bypass all rule evaluation | Use group memberships and roles for fine-grained access; don't try to gate admins. |

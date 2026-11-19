@@ -88,8 +88,9 @@ owning metadata category config before reading
   `capabilities` newly name it before anything is applied. `secrets list` and
   `secrets set` print a conflict for each reference saved before
   (`reservedConflicts` with `--json`, plus `reservedConflictsTruncated: true`
-  when the scan stopped at 1,000 objects of a kind); move that value to
-  another key.
+  when the scan stopped at 1,000 objects of a kind), and
+  `primitive secrets references PRIMITIVE_TURNSTILE_SECRET` lists them; move
+  that value to another key.
 - CEL can read only declared keys; an undeclared or dynamic reference is refused
   at save. For optional vars, check `'KEY' in vars` before reading.
 

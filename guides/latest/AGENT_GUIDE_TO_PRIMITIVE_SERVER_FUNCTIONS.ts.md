@@ -89,7 +89,8 @@ a version. It preserves authored sources for `config pull`.
   with `CLI_VERSION_TOO_OLD`, or `COMPILED_PAYLOAD_REQUIRED` when it carries no compiled
   schemas; run `npm install -g primitive-admin@latest` and push again.
 - Treat generated declarations as build output. Use `primitive functions
-  codegen --check` in CI. Function, prompt, `schemas/`, db3 and user property
+  codegen --check` in CI; it fails, with push's message, on a schema or a
+  db3 type file push refuses. Function, prompt, `schemas/`, db3 and user property
   types are all in `functions/primitive.d.ts`; import them with
   `import type { Functions, Schemas } from "./primitive"` and write
   `Functions.<Key>Input`, `Schemas.<Def>`. Push, pull and codegen remove a
@@ -154,7 +155,7 @@ the membership helpers deny that caller; `allowAnyone()` admits it.
 
 The run reads the app's data and writes to app-held databases. These throw
 `FUNCTION_SIGNED_OUT_REFUSED` (403): `ctx.functions.start`,
-`ctx.users.forEachBatch`, any `ctx.agents` call, `notifications.send`,
+`ctx.users.forEachBatch`, any `ctx.agents` call,
 creating a database, and changing one the app does not hold. A call about one user must pass `userId`, and naming a member
 works only for reads in a function that declares `users:readAny`.
 
@@ -387,9 +388,8 @@ Gotchas:
 - **One token, one call.** A reused token answers
   `SIGNED_OUT_TURNSTILE_FAILED` (`timeout-or-duplicate`); render or reset the
   widget before each call.
-- **`PRIMITIVE_TURNSTILE_SECRET` is reserved.** A new `secret:` capability,
-  CEL `secrets` entry, integration template, webhook reference or Google
-  `clientSecret` naming it is refused `400 RESERVED_SECRET_REFERENCE`.
+- **`PRIMITIVE_TURNSTILE_SECRET` is reserved** for Turnstile; see the App
+  Secrets guide.
 - **Revocation waits for the cache.** An answer can be up to `cacheSeconds`
   old, after a data change, a database's public access is cleared, or an
   earlier version's activation. After the
@@ -476,7 +476,7 @@ required = true
 | a root that is not an object | `type` on the table itself |
 | bounds | `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items` |
 | a union, or any other JSON Schema | `schema = { ... }` on that field |
-| a shared shape or db3 model | `ref = "<name>"` (beside it only `description`, `required`, `nullable`) |
+| a shared shape or db3 model | `ref = "<name>"` (beside it only `description`, `required`, `nullable`, and for a db3 model `pick` or `omit`) |
 
 A field table takes the keys `type`, `required`, `fields`, `open`, `items`, `item`, `nullable`, `enum`, `default`, `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items`, `coerce`, `ref`, `description`, `schema`.
 
@@ -554,7 +554,8 @@ ref = "Currency"                         # short: <Name> or <file>.<Name>
   `<file>.<Name>` must not also be a function, prompt or db3-type key.
   Otherwise push refuses the ref and lists every long form.
 - Beside `ref`, only `description`, `required` (the array) and `nullable` are
-  allowed; each replaces the def's own.
+  allowed; each replaces the def's own. `pick` or `omit` is allowed too when
+  the def is a db3 model ref (below).
 - A db3 field can `ref` a def that is a plain string enum; push expands it to
   the def's `enum` (databases guide, **Shared enums**).
 - `config push` stores each changed file as a new version, dependencies
@@ -621,6 +622,27 @@ ref = "workspace.tasks"            # row: a stored record, with its id
   `max_length`, `max_count` and `default` carry over).
 - Validation messages end `(validated against the row projection of db3 <type>.<model>)`,
   and the generated hover on the field names the projection.
+
+`pick` or `omit` beside the ref keeps some of the model's fields, each with
+the model's type; declare a subset used by several functions once as a
+`schemas/` def and ref it by name:
+
+```toml
+[function.outputSchema.properties.post]
+ref = "shop.posts"
+pick = ["id", "title"]               # these fields only; closed
+
+# schemas/catalog.toml — used as ref = "PostSummary", typed Schemas.PostSummary
+[defs.PostSummary]
+ref = "shop.posts#row"
+omit = ["body"]                      # every other field; a row stays open
+```
+
+- `pick` closes the object; `omit` keeps the projection's openness (`row`
+  open, `declared` closed). Fields come from the chosen projection, so
+  `pick = ["id"]` on a `declared` ref needs a declared `id`.
+- A ref to a subset def can take `pick` or `omit` again. The field-table
+  spelling takes `pick` or `omit` beside `ref` too.
 - `config push` pushes a db3 type before the `schemas/` files, functions and
   prompts that use it. `config diff` shows
   `pinned to db3-types/<type>.toml#<model>/<projection> (older|removed|deleted)`.
@@ -631,6 +653,11 @@ Watch out when using db3 models:
   `db3-types/<type>.toml`; push the type first or in the same push.
 - `config push --only` compiles a ref to an unselected type against the
   server's copy; select the type when the change depends on it.
+- Push and `functions codegen` refuse a `pick`/`omit` name the projection lacks,
+  listing its fields; when a model drops a picked field, the next push of the
+  function is refused until the list is updated.
+- `pick`/`omit` beside `"$ref"` are kept as annotations and select nothing;
+  beside a `fn.`/`prompt.` ref or a def that is not a db3 model, push refuses them.
 
 ## Task runs
 
@@ -742,6 +769,8 @@ Each batch reaches the named function as `{ userIds, input }` under `ctx.trigger
 
 The walk's own run — not a batch's — fails with one of: `USER_WALK_DENIED` (the door refused it), `USER_WALK_INPUT_REFUSED` (the batch function's `inputSchema` refused `{ userIds, input }`), `USER_WALK_FUNCTION_UNAVAILABLE` (disabled, archived, missing, or no pushed version), `USER_WALK_BATCHES_FAILED` (a batch exhausted its retries), `USER_WALK_ORPHANED` (its coordinator held no state), or `USER_INDEX_SHARD_UNAVAILABLE` (a shard it reads was unreachable). The first three fail it before any batch runs.
 
+A start on an app with no user index is refused before any of this: `forEachBatch` itself throws `409 USER_INDEX_NOT_READY`, and no run is created. Build the index with `primitive users index rebuild`, which needs an `admin` step-up (see [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions)).
+
 Read progress (`status.walk`: phase, match count, batches done/failed/in-flight/retrying/remaining) and stop it (`terminate`: no new batch starts, in-flight ones finish) through `primitive users walk status|terminate <run-id>` or the admin API's `apps/{appId}/users/walks/{runId}` routes — there is no way to poll or stop a walk from inside a function. Batch starts never count against the batch function's own `ratePerMinute`.
 
 ### Step discipline
@@ -764,7 +793,7 @@ Choose how the task exposes its result:
 
 - **Return output.** Read it with `getStatus`, `waitFor`, or
   `primitive functions runs wait`. Results remain on the run for 45 days.
-- **Save state.** Write records or notifications inside a step for results the
+- **Save state.** Write records inside a step for results the
   app should retain. Return what the step wrote — `{ wrote: true, recordId }`
   or `{ wrote: false, reason }` — so the run's output states the outcome
   without a second lookup.
@@ -817,7 +846,7 @@ may have completed some work. Report repeated platform failures.
 | `FUNCTION_STALLED` | The run showed no progress for 30 minutes past its open step's own `timeout` and retry delay, so the platform ended it. The message names the step. | Give the step's awaits a timeout of their own, or split the step. A step that needs longer sets its own `timeout` in `step.do`. Start a new run with a new `runKey` if the work still needs doing. |
 | `ENGINE_ISOLATE_EVICTED` | The execution environment was reset. | Retry with a new run key and idempotent steps. |
 | `ENGINE_CODE_UPDATED` | A platform update interrupted execution and retries were exhausted. | Retry with a new run key and idempotent steps. |
-| `ENGINE_STORAGE_ERROR` | Task storage failed. | Retry with a new run key and idempotent steps. |
+| `ENGINE_STORAGE_ERROR` | Task storage failed. After it, later `step.do` calls in the same run may reject at once with the same message, without running their bodies. A step whose body never ran wrote nothing and is safe to retry; when it is the task runtime's own storage that failed, the platform keeps the run open for the runtime to resume. | If the run ends `failed`, retry with a new run key and idempotent steps. |
 | `ENGINE_INTERNAL_ERROR` | The task runtime reported an internal error. | Retry with a new run key and idempotent steps. |
 | `ENGINE_SLICE_DEADLINE` | A platform call was refused because the slice's token deadline had passed. | The slice outlived its token. Look for a step that runs longer than the slice ceiling and split it. |
 | `ENGINE_INSTANCE_LOST` | The engine no longer reports the instance, and nothing recorded how the run ended. | `primitive functions logs <function-id> --run <run-id>` shows what the platform did record. Start a new run with a new `runKey` if the work still needs doing. |
@@ -962,16 +991,15 @@ started from one — must name the user, or the call throws
 
 ```ts
 // A cron fire has no caller: name the member.
-const { unreadCount } = await ctx.api.notifications.unreadCount({ userId: member.userId });
 const page = await ctx.api.collections.list({ userId: member.userId });
 ```
 
 | Calls | `userId` |
 | --- | --- |
-| `collections.list`; `notifications.list`, `unreadCount`, `markRead`, `markAllRead`, `listDevices`, `registerDevice`, `unregisterDevice`; `db3.aliases.set` (in `body`), `resolve`, `delete`; `ctx.agents.*` | Optional; defaults to the caller |
+| `collections.list`; `db3.aliases.set` (in `body`), `resolve`, `delete`; `ctx.agents.*` | Optional; defaults to the caller |
 | `collections.listForUser`, `groups.listUserMemberships`, `db3.listHeldByUser`, `db3.listSharedWithUser`, `ctx.usage.forUser` | Required |
 | App-wide reads (`groups.list`, `users.list`) | None |
-| Calls that hand something to a user (`notifications.send`, `users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
+| Calls that hand something to a user (`users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
 
 Naming a user other than the caller, with an optional or a required `userId`:
 
@@ -994,8 +1022,8 @@ Gotchas:
 - **A subject grant reaches any member the code names.** A function holding
   `users:readAny` or `users:actAsAny` lets every member who may invoke it name
   anyone; take the user id from your own data, not from input.
-- **Writes toward a named user are not restricted.** `users.setProfile`,
-  `notifications.send` and `ctx.channels.authorize` accept any member, so a
+- **Writes toward a named user are not restricted.** `users.setProfile` and
+  `ctx.channels.authorize` accept any member, so a
   tool that passes a model-supplied user id to them changes that user's data.
   Check the id before passing it.
 - **`ctx.channels.authorize` keeps its own code.** With no caller and no
@@ -1057,7 +1085,7 @@ operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#lim
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
 | High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess`, `db3:setPublicAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
-| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), inbox, devices, agent sessions, user aliases, holdings, usage); `users:actAsAny` on calls that act as them (notification read and device calls, `ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
+| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), agent sessions, user aliases, holdings, usage); `users:actAsAny` on calls that act as them (`ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
 | Action links | `tokens:sign` | `ctx.actionTokens.sign`, which is otherwise refused `FUNCTION_TOKENS_GRANT_MISSING` |
 
 **Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
@@ -1112,7 +1140,7 @@ const result = await ctx.users.send(input.userId, { kind: "order-ready", orderId
 return { delivered: result.connections, truncated: result.truncated };
 ```
 
-- **Presence is not guaranteed and there is no durable record.** A user with no connected client answers `{ connections: 0, truncated: false }` — a success. A client that was offline never receives the frame later; use a notification when the message must survive being missed.
+- **Presence is not guaranteed and there is no durable record.** A user with no connected client answers `{ connections: 0, truncated: false }` — a success. A client that was offline never receives the frame later; write a record the client reads when the message must survive being missed.
 - **One socket, one frame.** A client with several databases open is one connection, delivered once.
 - **Fan-out is bounded** at 64 unique connections per user, and the lookup behind it is bounded too; past either, the send delivers what it found and answers `truncated: true` — "there may be more", not an error.
 - **Payloads are capped at 64 KiB** serialized (`FUNCTION_SEND_PAYLOAD_TOO_LARGE`; nothing delivered).
@@ -1278,10 +1306,10 @@ The handle's contract:
 
 - **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
 - **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). A write's `data` takes `null` on any field the model leaves optional (`patch(id, { data: { note: null } })`), with no cast: it stores `null` and does not remove the field; on a string set it empties the set. A required field refuses `null`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
-- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name (`<M extends "tasks" | "users">(name: M) => db.model(name).query(...)`) passes its filter as a string, `filter: JSON.stringify(filter)`: inside it the model isn't known, so an object filter can't be typed against one model's fields.
+- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name is written with the types `primitive-functions` exports keyed by the database type: `Db3TypeModelName<"orders">` bounds `M`, `Db3TypeRow<"orders", M>` is a row, `Db3TypeFilter<"orders", M>` and `Db3TypeSort<"orders", M>` type a filter and sort the caller passes, and `Db3TypeBatchOp<"orders", M>` is one `batch` write (any model's when `M` is left out), its `data` checked against the model its `model` names: `async function readAll<M extends Db3TypeModelName<"orders">>(ctx: FunctionContext, id: string, model: M, filter: Db3TypeFilter<"orders", M>): Promise<Array<Db3TypeRow<"orders", M>>>` loops `ctx.db3(id, "orders").model(model).query({ filter, sort: { id: 1 }, cursor })`, and a chunked writer takes `ops: Array<Db3TypeBatchOp<"orders">>` and calls `ctx.db3(id, "orders").batch(ops.slice(at, at + 100))`. At the call site the rows and the filter are the named model's. Gotcha: a literal filter or sort inside the helper is checked against every model `M` may be, so a field another candidate types differently is a mismatch (take the filter as a `Db3TypeFilter` parameter instead), and a literal `upsertOn` there is refused (pass a `string`).
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
-- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`. `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database.
-- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`), `DB3_RECORD_NOT_FOUND` (404, `patch` or `increment` on a missing record; nothing is created), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare).
+- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`. `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database. Each result of `batchRead`, and of a batch's `reads` (in op order, writes skipped), is typed by the read at its position: after `if (r.ok)` a `query` read's `items` are that model's rows, a `count` read has `count`, an `aggregate` read `result`. Read rows without a cast; a field the model doesn't declare, or a cast to an unrelated row type, fails the push typecheck.
+- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`; the condition is judged first, so a `patch` or `delete` with a `condition` on a missing record is this 409, with `details.current.row` `null`), `DB3_RECORD_NOT_FOUND` (404, a `patch` without a `condition` on a missing record, or an `increment` on a missing record with or without one; nothing is created), `DB3_TRIGGER_REFUSED` (409, a type rule's `refuse`; its code in `details.reason`), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare). A `delete` of a missing record without a `condition` is a no-op, not a refusal. Two refusals answer 409, so branch on `code`, never on status.
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
 - **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
@@ -1298,6 +1326,29 @@ The handle's contract:
 | `vector` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$all`, `$size` |
 
 Every operation's options and server-function examples are in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Creating a database, transferring it, and switching its sync or app access go through `ctx.api.db3` with the `db3:*` capabilities — see [Access](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access).
+
+### Bulk loads: `load`
+
+`ctx.db3(id, type).load(rows, options?)` writes any number of records in one call, as one bulk load: it cuts the rows into chunks, sends them, and waits for the database to apply them. Use it past what one `batch` carries.
+
+```ts
+const result = await ctx.db3(input.db3Id, "ledger").load(
+  input.transactions.map((t) => ({ model: "transactions", id: t.id, patch: { amount: t.amount } }))
+);
+if (!result.done) return { pending: result.sessionId }; // read loadStatus(sessionId) later
+```
+
+- **Rows:** `{ model, id, patch }`, in any order, across models, each record once. `patch` is the model's fields (each optional; an optional field takes `null`) or exactly `{ _deleted: true }` to delete; a typed handle refuses a wrong model, a wrong field type or a delete mixed with fields at compile time. The untyped handle (`ctx.db3(id)`) takes open rows.
+- **Options:** `mode` `"merge"` (default) or `"refresh"` (also removes the records of the rows' models, and of `models`, that no row names); `models`; `reserveEpoch` `"open"` (default) or `"commit"`; `waitMs`, the wait after sending: 20,000 ms by default, at most 600,000 ms, `0` returns at once.
+- **Result:** `{ sessionId, state, done, mode, rows, chunks, applied, refusedRows, refused, failure }`. `state` is `uploading`, `committed`, `validating`, `staging`, `applying`, `finalizing`, `registering`, `complete`, `failed` or `aborted`; `done` is true for the last three. A `failed` load resolves with `failure`, it does not reject. `refused` is the first 20 refused rows (`{ model, id, code }`); `sessionId` is `null` only when there was nothing to send.
+- **Later:** `loadStatus(sessionId)` answers the same result; `loadRefused(sessionId, { limit, cursor })` pages every refused row as `{ items, hasMore, nextCursor }`.
+
+Gotchas:
+
+- **The wait is bounded by the invocation.** It ends 1,000 ms before the request deadline (default timeout 5 s) or the task slice's, and answers `done: false` with the `sessionId` instead of timing out. Return the id and poll `loadStatus` from a later call, raise `timeoutMs`, or run a large load as a task.
+- **One load per database at a time.** `load` while another load on the database is open or applying rejects with `DOCUMENT_INGEST_ACTIVE` (409). An invocation the platform ends while it is still sending rows leaves its load open until it expires, refusing other loads until then.
+- **`DB3_LOAD_INVALID` rejects before any request:** a record named twice, an id that is empty or carries a tab, newline or carriage return, a model name outside letters, digits and `_`, a patch that is not an object or holds a non-finite number, rows past a load's limits, `waitMs` out of range, and any of the three methods on a handle opened with `asUser` (a load runs on the app's authority). Branch on `error.code`.
+- **Rows the database refuses** (a type mismatch, a unique-key collision, a delete carrying a field) are skipped and counted in `refusedRows`; the load still completes.
 
 ### A member's collections, databases and profile
 
@@ -1492,6 +1543,78 @@ response = { status = 200, contentType = "text/plain", body = "{{ body.challenge
 Removing a webhook block stops delivery; restoring it resumes the same URL.
 Removing a cron entry cancels the schedule.
 
+## Unit-testing a handler
+
+Run a handler's logic offline with the test doubles in
+`primitive-functions/testing`: `createTestContext(overrides)` returns a
+`FunctionContext`, `createTestStep(overrides)` a `FunctionStep`. Install
+`primitive-functions` as a dev dependency on the CLI's channel
+(`primitive-functions@alpha` beside an alpha CLI), put the logic in a module of
+its own as a function of `(input, ctx, step)` that the entry passes to
+`defineFunction`, and override only what it calls. Overrides
+are typed from the generated declarations, so a drifted override fails the
+typecheck; keep spec files under `functions/` (or copy its tsconfig `paths`).
+
+```typescript
+import type { FunctionContext, FunctionStep } from "primitive-functions";
+import { createTestContext, createTestStep } from "primitive-functions/testing";
+
+// functions/archive-order/archive-order.ts — the logic, in a module of its own
+// that calls nothing from `primitive-functions` at module scope.
+export async function archiveOrder(input: { orderId: string }, ctx: FunctionContext, step: FunctionStep) {
+  const ordersDb = await ctx.configVar("ORDERS_DB");
+  const orders = ctx.db3(ordersDb).model("orders");
+  return step.do("archive", () => orders.patch(input.orderId, { data: { archived: true } }));
+}
+
+// functions/archive-order/index.ts — the entry, the only module that calls
+// `defineFunction`; the test never imports it:
+//
+//   import { defineFunction, requireSignedIn } from "primitive-functions";
+//   import { archiveOrder } from "./archive-order";
+//
+//   export default defineFunction("archive-order", {
+//     input: ["orderId"],
+//     authorize: requireSignedIn(),
+//     handler: archiveOrder,
+//   });
+
+// functions/archive-order/archive-order.spec.ts — the test imports the logic
+// module (`import { archiveOrder } from "./archive-order"`) and overrides only
+// what it calls. Anything else it touches throws TEST_MEMBER_NOT_PROVIDED,
+// naming the member.
+const ctx = createTestContext({
+  configVar: async () => "orders-db",
+  db3: (db3Id: string) => ({
+    model: () => ({
+      patch: async (recordId: string) => ({ record: { id: recordId, archived: true } }),
+    }),
+  }),
+});
+
+const result = await archiveOrder({ orderId: "o1" }, ctx, createTestStep());
+console.log(result.record.id); // "o1"
+```
+
+| Member | Not overridden |
+| --- | --- |
+| Function (`ctx.configVar`, `ctx.users.send`, `ctx.api.<ns>.<op>`, `step.sleep`) | Throws `TEST_MEMBER_NOT_PROVIDED` when called; `error.member` is the path. |
+| `ctx.user`, `trigger`, `runtime`, `runId`, `sliceId`, `auth` | Throws the same error when read. Set `null` or a value to read it. |
+| `ctx.tool` | Reads `undefined`. |
+| `step.do` | Runs the body once and resolves to its result, for both call forms. |
+
+Gotchas:
+
+- A namespace override (`users`, `api.groups`) must be a plain object; a class
+  instance throws a `TypeError` at creation. Pass `{ send: fakes.send.bind(fakes) }`.
+- A partial handle a function override returns has only the methods you gave it.
+- Import the logic module, never the entry: a named import still runs the
+  module, and its `defineFunction` call throws outside the platform.
+- Annotate a `db3` override's parameters (`db3: (db3Id: string) => …`); it has
+  several call forms. Leave `type` off or type it `string`: the override must
+  fit every db3 type the pushed types declare.
+- `config push` refuses a function whose bundle imports `primitive-functions/testing`.
+
 ## Recording
 
 HTTP calls create `function.invoke` analytics events attributed to the caller.
@@ -1512,6 +1635,29 @@ attempt. Owners and admins can read them for seven days.
 
 A shortened record ends with
 `… truncated: the platform's per-record cap dropped later lines`.
+
+A record can carry `timing`: the phases of `durationMs` the platform measured,
+in whole milliseconds, each omitted when it could not be measured. The phases
+present add up to `durationMs`.
+
+- `waitMs`: request arrival to the function starting to load (lookup, access
+  check, input schema, rate limit); on a task record, the record's start to
+  the handler being called.
+- `authorizeMs`: the `authorize` call, on a version that has one.
+- `startupMs`: minting the credential and loading the bundle (request only).
+- `handlerMs`: the handler's run, including a cold isolate's start; on a task
+  record, the slice's run with every step in it.
+- `settleMs`: the answer to the record (output checks; on a task record, also
+  reading the console output).
+- `coldStart: true`: the first call an isolate served.
+- `beforeStart.startupMs` (task records): loading before `startedAt`, not part
+  of `durationMs`.
+- `calls`: up to 50 `ctx` platform calls as `{ op, offsetMs, ms, ok }`;
+  `callsTruncated` counts the rest. No need to wrap `ctx` to time calls.
+
+The time to send the answer comes after the record and is not in it.
+`functions logs --invocation` and `--run` print a one-line summary;
+`--json` carries the block under `detail.timing`.
 
 - Pre-execution refusals have no invocation log; inspect the HTTP error. An
   `authorize` denial is different: it writes no run row, but the call's

@@ -249,6 +249,8 @@ ref = "schemas.common.Money"
 
 A db3 ref gets the `row` in a prompt's, a configuration's and an agent tool's
 `outputSchema`, and the `declared` shape in every other schema, unless it names one.
+`pick` or `omit` beside a db3 ref keeps some of its fields, as in a function;
+beside a `prompt.` or `fn.` ref push refuses them.
 
 The explicit spellings are `"$ref" = "prompt:<key>#/$defs/output"` and
 `"$ref" = "fn:<key>#/$defs/input"`; `<key>.input` or `<key>.output` alone works when the key

@@ -148,7 +148,8 @@ scripts/child-app.sh down feature-x
 to repeat, so rerunning `up` resumes an interrupted run. A Swift app is then
 rebuilt so `primitive.json` names the child. `down` checks the child's
 environment the same way, runs `scripts/child-app-teardown`, then deletes the
-child and its local state.
+child and its local state; when the child was selected, `down` selects its
+parent, so the next command targets the parent app.
 
 The two hooks are the app's own code; the templates ship neither. Add one as
 an executable file when the app needs it:
@@ -157,6 +158,11 @@ an executable file when the app needs it:
   databases, the child's own config vars (`primitive config set vars
   KEY=value`). It runs before the first push because a function caches the
   config vars it reads, and on every `up`, so it must be safe to repeat.
+  Seeding that needs a schema pushes it first: a typed `primitive db3 create
+  --type <type>` needs the type, and `primitive users create
+  --initial-properties` needs the user-properties schema. Push them from the
+  hook before seeding:
+  `primitive --env "$PRIMITIVE_ENV" config push --only user-properties,db3-type/<type> --yes`.
 - **`scripts/child-app-teardown`** revokes or deletes anything the child
   created outside the platform — third-party connections, webhooks, external
   buckets. That cleanup is the app's responsibility: deleting the child
@@ -165,7 +171,9 @@ an executable file when the app needs it:
 
 Each hook runs from the app root with `PRIMITIVE_ENV` (the child's local
 environment name), `CHILD_APP_ID`, `CHILD_APP_SLUG` and `PARENT_ENV` set.
-Address the child through `PRIMITIVE_ENV` or `--env`, never through the
+The Vue `up` also passes the init hook `CHILD_APP_PORT`, its `--port` value
+(default 5173), for anything that needs the child's dev origin before the
+push. Address the child through `PRIMITIVE_ENV` or `--env`, never through the
 selected environment: a hook may change the selection, and the scripts don't
 rely on it afterwards. A hook that exits non-zero stops the script before the
 push (`up`) or the delete (`down`); a hook that exists but isn't executable
@@ -398,13 +406,23 @@ minRequired = "2.0"
 updateUrl = "itms-apps://apps.apple.com/app/id1234567890"
 ```
 
-Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`, at least one. A
+Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`, `enforce`, at least one. A
 platform name matches `[a-z][a-z0-9-]{0,31}`; a version is one to three
 dot-separated numbers of up to six digits, compared numerically; `minRequired`
 ≤ `minRecommended` ≤ `latest` where set; `updateUrl` is `https:`,
 `itms-apps:`, `itms-beta:`, `macappstore:` or `market:`. Push and
 `PUT settings` refuse anything else with `INVALID_CLIENT_VERSIONS`, naming
 `[clients.<platform>].<key>`.
+
+`enforce = true` (a boolean, only beside `minRequired`) makes the server
+refuse a caller that reports the platform and a lower version in
+`X-Primitive-App-Version` / `X-Primitive-App-Platform`: HTTP 426
+`CLIENT_UPDATE_REQUIRED` with `details: { platform, version, minRequired }`,
+and a socket closed with 4426. `settings/client-versions`, `settings/sign-in`,
+`oauth-config`, `auth/refresh` and `auth/logout` always answer; a caller
+reporting no version, another platform or an unparseable version is
+admitted. Each refusal adds one point to the `client.update_refused` usage
+meter.
 
 Removing a managed setting clears it or restores its default. Keep explicit
 values when a feature must stay disabled, especially
@@ -421,6 +439,9 @@ values when a feature must stay disabled, especially
   run, or the push fails and `app.toml` is not applied.
 - `CLIENT_VERSIONS_CHANGED` means the stored policy changed after the push
   compared it; nothing was written. Run the push again.
+- `enforce` without `minRequired`, at either value, is refused. Turning it on
+  refuses every older build at once; ship the build that meets `minRequired`
+  first.
 
 ### Push failures
 
@@ -523,7 +544,9 @@ user is an admin of; outside a project a login needs `--app all` or
 `--app <ids>`. `primitive whoami` shows the user, server and app a command run
 from the current directory uses, and the session's kind, scope and pins;
 outside a project the server is `PRIMITIVE_SERVER_URL` or the default and there
-is no app. Every login, step-up and CI session is
+is no app. Outside a project `apps list`, `apps delete` and the `usage` reads
+given an app id (`usage get <app-id>`, `--app`) run against that server with
+its login; every other command needs a project. Every login, step-up and CI session is
 granted only when the user presses Approve on a console page naming its apps
 and access, so an agent cannot complete one alone; ask the user to approve it.
 
