@@ -1,91 +1,12 @@
 # Agent Guide to Primitive Analytics
 
-Guidelines for AI agents implementing analytics tracking in Primitive apps.
-
-## Overview
-
-Primitive provides built-in analytics. The platform tracks user activity and resource lifecycle automatically and stores events server-side for querying. The system handles offline persistence, rate limiting, and automatic lifecycle events out of the box.
-
-Read aggregated analytics (DAU/WAU/MAU, retention, top users, event feeds) through the `primitive` CLI, the REST API, or a server function (`ctx.api.analytics`) — covered below.
-
----
-
-## What's Tracked Automatically (Zero Developer Work)
-
-Standing up an app gets you DAU/WAU/MAU tracking, session analytics, document/permission audit trails, and function/prompt/integration observability with no instrumentation.
-
-**Key constraints for custom events:**
-- Every analytics event requires an authenticated user. Events without a `user_ulid` are dropped silently. Use the unauthenticated-user constant for pre-auth screens.
-- A tenant ID (resolved automatically from the client's `appId`) must also be present, or the event is dropped.
-
-### Client-Side Auto Events
-
-All enabled by default. The client automatically emits these lifecycle events:
-
-| Action | Feature | Default | When it fires |
-|--------|---------|---------|---------------|
-| `user_active_daily` | `session` | on | First authenticated activity on a UTC day |
-| `user_returned` | `session` | on | Tab becomes visible (suppressed if a previous `user_returned` fired less than `minResumeMs` ago — default 5 min) |
-| `session_end` | `session` | on | `beforeunload` or `client.destroy()` (records `duration_ms`) |
-| `sync_error` | `sync` | on | Outbound sync fails (rate-limited, default min 30s between events) |
-| `blob_upload_started` | `blobs` | on | Blob upload begins |
-| `blob_upload_succeeded` | `blobs` | on | Blob upload completes |
-| `blob_upload_failed` | `blobs` | on | Blob upload fails |
-
-### Server-Side Events
-
-The platform emits these from the server. No client code at all.
-
-| Action | Feature | When |
-|--------|---------|------|
-| `session.refreshed` | `auth` | JWT refresh succeeds |
-| `document.created` | `documents` | Document created |
-| `document.viewed` | `documents` | Document info fetched — fires on every open (the client fetches info as part of opening) |
-| `document.opened` | `documents` | Document opened via alias resolution; plain `documents.open(id)` does not fire it |
-| `document.updated` | `documents` | Document metadata updated (title/thumbnail/metadata) — document content edits are not individually evented |
-| `document.deleted` | `documents` | Document deleted |
-| `document.tag_added` | `documents` | Tag added |
-| `document.tag_removed` | `documents` | Tag removed |
-| `access_request.created` | `documents` | User requested access to a document |
-| `access_request.approved` | `documents` | Access request approved |
-| `access_request.denied` | `documents` | Access request denied |
-| `permission.granted` | `permissions` | Permission granted |
-| `permission.revoked` | `permissions` | Permission revoked |
-| `permission.pending.cancelled` | `permissions` | Pending invite-permission cancelled |
-| `ownership.transferred` | `permissions` / `ownership` | Document ownership transferred (emitted from both controllers) |
-| `invitation.sent` | `invitations` | Invitation sent |
-| `invitation.cancelled` | `invitations` | Invitation cancelled |
-| `invitation.declined` | `invitations` | Invitation declined |
-| `user.removed` | `users` | User removed from app |
-| `user.role_changed` | `users` | User role changed |
-| `prompt.executed` | `prompts` | Prompt execution completes |
-| `function.invoke` | `functions` | A server function's HTTP invoke or task start, attributed to the caller. Context: `functionKey`, `functionId`, `configId`, `contentHash`, `status` (the terminal status of an invoke; `started` for a task start, plus `executionMode: "durable"`). A trigger fire (webhook, cron) has no caller and emits none |
-| `integration.invoke` | _(integration key)_ | Integration call |
-| `created` | `token` | API token created |
-| `revoked` | `token` | API token revoked |
-
-Function and prompt events also record `duration_ms`, and prompt events record LLM token counts (`input_tokens`, `output_tokens`, `total_tokens`) when available. A prompt event also records `cost` — USD, as the provider reported it — when the provider reports one: today a decisions prompt does and a chat run does not. A run with no reported cost is recorded as **cost-unknown**, not as zero, which is why the aggregate carries a count of the costed executions beside the money: never divide a cost total by the execution count, or you will report a per-run price cheaper than any run cost. A prompt run from a function emits `prompt.executed` attributed to the function's caller, and none on a trigger fire.
-
-### Auto-Populated Fields
-
-Every event (auto or custom) gets these populated automatically:
-
-`tenant_id` (from `client.appId`), `route` (from `window.location.pathname`), `device_type`, `os_name`, `os_version`, `browser_name`, `browser_version`, `plan` (default `"unknown"`), `connection_id`.
-
-### Offline Persistence and Rate Limiting
-
-Events are buffered on the device and persisted locally while offline; persisted events are flushed automatically when the WebSocket reconnects.
-A rate limiter caps emission at **300 events/minute with a 60-token burst** — events over the cap are dropped silently. No special code needed.
-
-The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap the **oldest** events are dropped.
-
----
+Primitive records user activity and resource events automatically. Log custom events for app-specific actions, then query activity through the CLI, REST API, or `ctx.api.analytics` in a server function.
 
 ## Logging Custom Events
 
 ### Basic Event
 
-`action` and `user_ulid` are required; `feature` (defaults to `"unspecified"`) groups related events.
+Set `action` to the event name. Use `feature` to group related events; it defaults to `"unspecified"`.
 
 ```typescript
   client.analytics.logEvent({
@@ -95,7 +16,7 @@ The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap t
   });
 ```
 
-`action` and `user_ulid` are required by the TypeScript interface. At runtime, `user_ulid` will be back-filled from the queue's user-resolver if you omit it AND the resolver returns a value — but the type checker won't let you omit it, so always pass it explicitly (or use `ANALYTICS_UNAUTHENTICATED_USER`).
+Pass `action` and `user_ulid` explicitly. Use `ANALYTICS_UNAUTHENTICATED_USER` on pre-auth screens.
 
 ### Event with Context
 
@@ -133,25 +54,76 @@ Pass a `context_json` object for per-event debug data. The serialized payload is
 | `app_version` | `string` | No | Your app's version (or set via `setAppVersionOverride`) |
 | `context_json` | `string \| Record<string, unknown> \| null` | No | Debug context (truncated to 1 KiB) |
 
-### Don't
+### Gotchas when logging
 
-```typescript
-// WRONG: No user_ulid — TypeScript error AND silently dropped at runtime
-client.analytics.logEvent({ action: "click", feature: "nav" });
+- Supply `user_ulid` explicitly so the event has an identity.
+- Keep `context_json` below 1 KiB; oversized context loses data.
+- Log meaningful actions rather than mouse movement or other high-frequency activity. Excess events are dropped.
 
-// WRONG: huge context payload (will be truncated to 1 KiB, losing data)
-client.analytics.logEvent({
-  action: "report_generated",
-  user_ulid: u,
-  context_json: { entireReportBody: hugeString },
-});
 
-// WRONG: high-frequency telemetry (will be rate-limited and dropped)
-window.addEventListener("mousemove", () => {
-  client.analytics.logEvent({ action: "mouse_move", user_ulid: u });
-});
-```
+---
 
+## What's Tracked Automatically
+
+The client and server record active users, sessions, database and permission changes, and function, prompt, and integration activity.
+
+### Client-Side Auto Events
+
+All enabled by default. The client automatically emits these lifecycle events:
+
+| Action | Feature | Default | When it fires |
+|--------|---------|---------|---------------|
+| `user_active_daily` | `session` | on | First authenticated activity on a UTC day |
+| `user_returned` | `session` | on | Tab becomes visible (suppressed if a previous `user_returned` fired less than `minResumeMs` ago — default 5 min) |
+| `session_end` | `session` | on | `beforeunload` or `client.destroy()` (records `duration_ms`) |
+| `sync_error` | `sync` | on | Outbound sync fails (rate-limited, default min 30s between events) |
+| `blob_upload_started` | `blobs` | on | Blob upload begins |
+| `blob_upload_succeeded` | `blobs` | on | Blob upload completes |
+| `blob_upload_failed` | `blobs` | on | Blob upload fails |
+
+### Server-Side Events
+
+The platform emits these from the server. No client code at all.
+
+| Action | Feature | When |
+|--------|---------|------|
+| `session.refreshed` | `auth` | JWT refresh succeeds |
+| `document.created` | `documents` | Database created |
+| `document.deleted` | `documents` | Database deleted (record writes are not individually evented) |
+| `document.tag_added` | `documents` | Tag added |
+| `document.tag_removed` | `documents` | Tag removed |
+| `access_request.created` | `documents` | User requested access to a database |
+| `access_request.approved` | `documents` | Access request approved |
+| `access_request.denied` | `documents` | Access request denied |
+| `permission.granted` | `permissions` | Permission granted |
+| `permission.revoked` | `permissions` | Permission revoked |
+| `permission.pending.cancelled` | `permissions` | Pending invite-permission cancelled |
+| `ownership.transferred` | `permissions` / `ownership` | Database ownership transferred |
+| `invitation.sent` | `invitations` | Invitation sent |
+| `invitation.cancelled` | `invitations` | Invitation cancelled |
+| `invitation.declined` | `invitations` | Invitation declined |
+| `user.removed` | `users` | User removed from app |
+| `user.role_changed` | `users` | User role changed |
+| `prompt.executed` | `prompts` | Prompt execution completes |
+| `function.invoke` | `functions` | A server function's HTTP invoke or task start, attributed to the caller. Context: `functionKey`, `functionId`, `configId`, `contentHash`, `status` (the terminal status of an invoke; `started` for a task start, plus `runtime: "task"`). A trigger fire (webhook, cron) has no caller and emits none |
+| `integration.invoke` | _(integration key)_ | Integration call |
+| `created` | `token` | API token created |
+| `revoked` | `token` | API token revoked |
+
+Function and prompt events include `duration_ms`. Prompt events also include token counts and provider-reported cost when available. A missing cost is unknown, not zero.
+
+### Auto-Populated Fields
+
+Every event (auto or custom) gets these populated automatically:
+
+`tenant_id` (from `client.appId`), `route` (from `window.location.pathname`), `device_type`, `os_name`, `os_version`, `browser_name`, `browser_version`, `plan` (default `"unknown"`), `connection_id`.
+
+### Offline Persistence and Rate Limiting
+
+Events are buffered on the device and persisted locally while offline; persisted events are flushed automatically when the WebSocket reconnects.
+A rate limiter caps emission at **300 events/minute with a 60-token burst** — events over the cap are dropped silently. No special code needed.
+
+The offline buffer is persisted with a **~1 MiB** cap; when it exceeds the cap the **oldest** events are dropped.
 
 ---
 
@@ -169,7 +141,7 @@ This logs an event with `action: "_snapshot"`, `feature: "_state"`, and your con
 
 ## Pre-Auth Events
 
-Events with no authenticated user are dropped. To log on pre-auth screens (landing pages, sign-up flow), pass the unauthenticated-user constant as the `user_ulid`. Its value is `"UNAUTHENTICATED"`. Use sparingly — most analytics should be tied to real users.
+For pre-auth screens, pass the unauthenticated-user constant as `user_ulid`. Its value is `"UNAUTHENTICATED"`. Use an identified user for signed-in activity.
 
 ```typescript
   client.analytics.logEvent({
@@ -189,15 +161,7 @@ Events are buffered and flushed automatically — including when the WebSocket r
   client.analytics.flush();
 ```
 
-The queue auto-flushes every **100ms** or when the buffer reaches **25 KiB**, and the client also flushes on `beforeunload`, on tab visibility hidden, and on reconnect.
-
-Pre-existing browser hooks (added by the client itself):
-- `beforeunload` → fires `session_end`, then flushes
-- `visibilitychange` (hidden) → flushes
-- `visibilitychange` (visible) → triggers `user_returned`
-- `status` → on reconnect, flushes
-
-So **don't** add your own `beforeunload → flush` listener — it's redundant and `session_end` is already handled.
+The queue flushes every **100ms** or at **25 KiB**, and on reconnect, page hide, and page unload. Do not add a duplicate unload listener; the client also records `session_end`.
 
 ---
 
@@ -217,7 +181,7 @@ If your app reports its plan/version dynamically (e.g. after an in-app upgrade),
 
 ## Writing Events from a Server Function
 
-A server function writes an event with `ctx.api.analytics.writeForUser`, attributed to the **subject** user it names rather than to whoever is running — so a webhook- or cron-fired function (no caller, `ctx.user` is `null`) still records activity against the member it acted for. No capability line is needed.
+Use `ctx.api.analytics.writeForUser` to attribute an event to an app member. Scheduled and webhook-triggered functions can use it without a caller. No capability declaration is required.
 
 ```ts
 await ctx.api.analytics.writeForUser({
@@ -227,11 +191,11 @@ await ctx.api.analytics.writeForUser({
 
 | Body field | Required | Notes |
 |---|---|---|
-| `userId` | Yes | The subject. Must be a member of this app; another app's user id is refused exactly as an id that never existed. |
+| `userId` | Yes | App member whose activity to record. |
 | `action` | Yes | verb_noun, as on the client. |
 | `feature` | No | Always pass one, so per-feature queries find the event. |
 | `route` | No | |
-| `context` | No | Your object. `appId` and `userId` are reserved and written last — a `context` cannot rewrite whose activity the event is. |
+| `context` | No | Additional data; cannot override reserved `appId` or `userId`. |
 | `durationMs` | No | Recorded in the event's context as `timings.totalMs`. |
 | `metrics` | No | Recorded in the event's context as `metrics`. |
 
@@ -270,12 +234,13 @@ Accepted shapes:
 
 ## Querying Analytics (CLI)
 
-The `primitive` CLI provides commands for querying analytics. All accept `--json` for machine-readable output.
+The `primitive` CLI provides commands for querying analytics. All accept `--json` for machine-readable output, and `--fresh` to bypass the server's short-lived answer cache (it sends `_bust=1`).
 
 ```bash
 # DAU / WAU / MAU + growth (default --window-days 28)
 primitive analytics overview
 primitive analytics overview --window-days 28 --json
+primitive analytics overview --fresh   # recompute instead of reading the cache
 
 # Active users time series
 primitive analytics daily-active --window-days 28
@@ -287,8 +252,13 @@ primitive analytics cohort-retention
 # Top users (default --window-days 30, --limit 10)
 primitive analytics top-users --window-days 7 --limit 20
 
-# Search users (give --query, or a signup filter)
+# Search users (give --query, a signup filter, or --test-users)
 primitive analytics user-search --query user@example.com
+
+# +primitivetest test users: exclude | include | only. Summary commands default
+# to exclude; events, events-grouped and user-search --query to include.
+primitive analytics overview --test-users include
+primitive analytics top-users --test-users only
 
 # Who joined the app on a given UTC day, or across a range of up to 90 days
 primitive analytics user-search --signup-day 2026-09-06
@@ -299,29 +269,54 @@ primitive analytics user-search --signup-start-day 2026-09-01 --signup-end-day 2
 primitive analytics user-search --signup-day 2026-09-06 --limit 100 --json
 primitive analytics user-search --signup-day 2026-09-06 --limit 100 --offset 100 --json
 
-# Per-user breakdown
+# Per-user breakdown; --anonymous reads events with no signed-in user
+# (its one optional argument is then the app ID)
 primitive analytics user-detail <user-ulid>
+primitive analytics user-detail --anonymous
 primitive analytics user-snapshot <user-ulid>
 
 # Raw event feed (default --window-days 7, --page 0)
 primitive analytics events --window-days 7 --page 0
 
+# Filter: --where <field><op><value>, repeatable, ANDed (see below)
+primitive analytics events --where action=login --where country!=US --where route^=/api
+
 # Group by: action | feature | route | country | deviceType | plan | day
 primitive analytics events-grouped --group-by feature --window-days 14
+primitive analytics events-grouped --group-by country --where feature~chat
 
 # Error groups: failures grouped by fingerprint with per-day counts
 # (default --window-days 7, --limit 50). Filter: --status-class 4xx|5xx|transport,
-# --source workflow_run|workflow_step|integration|function_invocation|function_run
+# --source integration|function_invocation|function_run|analytics_relay
 primitive analytics errors-groups --window-days 7 --status-class 5xx
+primitive analytics errors-groups --where source!=integration --where statusClass!=4xx
 
 # Integration / prompt analytics (default --window-days 30)
 primitive analytics integrations
 primitive analytics prompts --limit 5
 ```
 
-Per-subject analytics live under the top-level `analytics` noun — `analytics prompts` and `analytics integrations` are the homes for them; no subject noun carries its own analytics group. There is no per-function top list: function invocations are `function.invoke` events, counted with `events-grouped --group-by action` and listed by `events`.
+Use `analytics prompts` and `analytics integrations` for their respective services. Query `function.invoke` events to count or inspect function invocations.
 
-`--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
+`--test-users` is accepted by `overview`, `daily-active`, `rolling-active`, `cohort-retention`, `top-users`, `user-search`, `events` and `events-grouped`; omitted, the server default applies.
+
+`--where <field><op><value>` filters `events`, `events-grouped` and `errors-groups`; each one becomes a `filter[<field>][<operator>]` query entry and all must match. Operators: `=` (is), `!=` (is not), `~` (contains), `^=` (starts with). Fields and the operators each takes:
+
+| Command | Field | Operators |
+| --- | --- | --- |
+| `events`, `events-grouped` | `user`, `route` | `=`, `~`, `^=` |
+| | `action`, `feature`, `os`, `browser`, `appVersion` | `=`, `!=`, `~` |
+| | `country`, `plan`, `deviceType` | `=`, `!=` |
+| | `region`, `city` | `=`, `~` |
+| `errors-groups` | `fingerprint` | `=`, `~`, `^=` |
+| | `source`, `statusClass` | `=`, `!=` |
+
+### Gotchas when filtering with `--where`
+
+- The CLI refuses an operator a field does not take, an unknown field, an empty `~`/`^=` value and two `=` filters on one field before sending anything. Use one `=` per field.
+- More than 10 filters (`--user-id`, `--source` and `--status-class` count) is a `400` from the server.
+
+`--json` prints the endpoint's own payload ([Response shapes](#response-shapes)) for every command except two, which are shaped for the terminal: `analytics events --json` prints the shared inspection envelope `{ items, page, pageSize, totalRows, testUsers }` with each row projected through the operator-facing allowlist, and `analytics overview --json` calls the four separate DAU/WAU/MAU/growth endpoints and prints them as one `{ dau, wau, mau, growth }` object.
 
 ---
 
@@ -359,47 +354,57 @@ GET /app/{appId}/api/analytics/errors/groups?windowDays=7&limit=50
 # Integrations / prompts (admin-only top lists)
 GET /app/{appId}/api/analytics/integrations?windowDays=30
 GET /app/{appId}/api/analytics/prompts/top?windowDays=30&limit=10
+
+# Test users: exclude | include | only on every overview, series, cohort,
+# users.top, users.search, events and events.grouped query
+GET /app/{appId}/api/analytics/overview/dau?testUsers=include
+GET /app/{appId}/api/analytics/events?windowDays=7&testUsers=only
 ```
 
-> The REST API does **not** expose `users/{userUlid}/timeline`, `users/{userUlid}/events`, `prompts/overview`, or a combined `overview` endpoint. Use the granular endpoints above.
+`testUsers` selects `+primitivetest` test users:
+
+| Query | Default |
+| --- | --- |
+| `overview.*`, `daily-active`, `rolling-active`, `cohort-retention`, `users.top`, `users.search` without `q` or with a signup filter | `exclude` |
+| `events`, `events.grouped`, `users.search` with `q` | `include` |
+
+The response echoes the mode in `testUsers`. A blank value is the default; any other value returns `400`.
 
 ### Response shapes
 
 Every endpoint returns a JSON object, and `ctx.api.analytics` in a server function answers the same body. The first column names each query.
 
-Every payload also carries `_timing: { total_ms, wae_queries }` — diagnostics for the query itself, not data to consume. It is left out of the shapes below.
-
 | Query type — endpoint | Payload |
 | --- | --- |
-| `overview.dau` / `overview.wau` / `overview.mau` — `/overview/{dau,wau,mau}` | `{ value, previous, deltaPct }` |
-| `overview.growth` — `/overview/growth` | `{ window_days, retained_users, new_users, reactivated_users, churned_users, current_active, previous_active, deltaPct }` |
-| `daily-active` — `/daily-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }] }` |
-| `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }] }` shape |
-| `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages }` |
-| `users.top` — `/users/top` | `{ windowDays, limit, results: [{ userUlid, email, name, firstSeen, firstSeenInWindow, lastSeen, eventCount }] }` |
-| `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
+| `overview.dau` / `overview.wau` / `overview.mau` — `/overview/{dau,wau,mau}` | `{ value, previous, deltaPct, testUsers }` |
+| `overview.growth` — `/overview/growth` | `{ window_days, retained_users, new_users, reactivated_users, churned_users, current_active, previous_active, deltaPct, testUsers }` |
+| `daily-active` — `/daily-active` | `{ window_days, rows: [{ day_ts, day_label, active_users }], testUsers }` |
+| `rolling-active` — `/rolling-active` | same `{ window_days, rows: [{ day_ts, day_label, active_users }], testUsers }` shape |
+| `cohort-retention` — `/cohort-retention` | `{ weeks, rows: [{ signup_week, signup_week_label, cohort_size, retention }], averages, testUsers }` |
+| `users.top` — `/users/top` | `{ windowDays, limit, testUsers, results: [{ userUlid, email, name, firstSeen, firstSeenInWindow, lastSeen, eventCount }] }` |
+| `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, testUsers, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
 | `users.detail` — `/users/{userUlid}/detail` | `{ user: { user_ulid, email, name }, stats: { first_seen, last_active, total_events, days_active }, events_by_action: [{ action, event_count, last_occurred }], events_by_feature: [{ feature, event_count, pct }] }` |
 | `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
-| `events` — `/events` | `{ page, page_size, total_rows, rows }` — row fields under [Event row shape](#event-row-shape) |
-| `events.grouped` — `/events/grouped` | `{ group_by, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
+| `events` — `/events` | `{ page, page_size, total_rows, testUsers, rows }` — row fields under [Event row shape](#event-row-shape) |
+| `events.grouped` — `/events/grouped` | `{ group_by, testUsers, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
 | `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
 | `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens, executionsWithCost, totalCost, avgCost }] }` — `totalCost` / `avgCost` are `null` when no execution in the window reported a cost |
 | `integrations` — `/integrations` | `{ windowDays, integrations: [{ integrationKey, invocations, errorRate, medianDurationMs, p10DurationMs, p50DurationMs, p95DurationMs }] }` |
 
-Read these before computing anything from a payload:
+### Gotchas when calculating metrics
 
-- **`value` / `previous` / `deltaPct`.** `value` is the distinct active users over the current window; `previous` is the immediately preceding, non-overlapping window. Both windows start on a UTC calendar-day boundary, but the current one ends at query time, so it holds a partial final day while `previous` is `windowDays` complete days. Expect `deltaPct` to read low early in the UTC day — most visibly for `overview.dau`, where "today so far" is compared against all of yesterday. A month-over-month comparison is still one `overview.mau` call, not a second series query. `deltaPct` is a **fraction, not a percentage** — `0.25` means +25%, and it is rounded to 4 decimal places. Against a zero base it is a fixed sentinel rather than a real ratio: `1` when `value > 0`, `0` when `value` is 0 too. Render "no baseline" instead of a percentage when `previous` is 0.
-- **`overview.dau` / `wau` / `mau` windows are fixed** at 1, 7, and 28 days; they ignore `windowDays`. `overview.growth` honors it (1–90, default 28) and reports both halves as `current_active` / `previous_active`, with `deltaPct` on the same fraction scale. `overview.growth` builds its windows the same way, so `current_active` carries the same partial final day — and `churned_users` / `reactivated_users`, which are derived from the two counts, inherit it.
-- **`firstSeen` is all-time; `firstSeenInWindow` is not.** On a `users.top` row, `firstSeen` is the user's first recorded event across the app's whole retained history — it does not move when you change `windowDays`, so `firstSeen` inside the last day is a genuinely new user. `firstSeenInWindow` is the first event *inside* the window, and it moves with `windowDays` by definition; the rest of the row (`eventCount`, `lastSeen`) is window-scoped too. Derive "new signups" from `firstSeen` (or from `overview.growth`'s `new_users`, which counts the same thing) — never from `firstSeenInWindow`, which over a short window marks every returning user as a new signup, day after day. Both are bounded by retention: a user whose first event has aged out reads as first seen at the oldest event still retained.
-- **`daily-active` is dense.** It returns exactly `windowDays` rows (7–90, default 28), one per UTC day, zero-filled for days with no activity. `day_ts` is the day's UTC-midnight epoch second; `day_label` is `YYYY-MM-DD`.
-- **`rolling-active` always returns 28 rows**, one per day. Its `windowDays` (1–28, default 7) is the length of the trailing window each point counts distinct users over — not the number of points.
-- **A prompt's cost is over its costed executions, not its executions.** On a `prompts.top` row, `executionsWithCost` is how many of the window's runs reported a price at all. `totalCost` sums those runs and `avgCost` divides by that same count, so neither reads cheaper than the runs it describes; both are `null` — never `0` — when the count is `0`, which is what a prompt whose provider reports no price (every chat prompt today) looks like. `executionsWithCost < executions` means the money covers part of the window, so say so when you report it, and do not recompute an average from `totalCost / executions`.
-- **Per-user surfaces count app users only.** `users.top`, `users.search`, `daily-active`, `rolling-active`, `overview.dau` / `wau` / `mau` and `overview.growth` exclude the app's synthetic system principal (`sys:<appId>`), so machine activity — a cron-fired function every night — never appears as a user and never marks anyone active. `events` still returns that principal's rows when you ask for it by id, and a trigger-fired function's own record is its run row (`primitive functions runs`).
-- **Asking for the system principal by name still works.** The exclusion is on the unfiltered listings, not on a lookup: `users.search` with a `q` of `sys:<appId>` returns it, exactly as `events` with that `userId` does. Only `users.search` *without* a `q` — which lists the app's most recently active principals — drops it.
-- **Signup means "joined this app".** Every user-attributed event the server writes carries the app-membership join time, so `users.search` can answer "who signed up on day D": pass `signupDay` (one UTC calendar day, `YYYY-MM-DD`) or `signupStartDay` + `signupEndDay` (an inclusive range of at most 90 days), and each row comes back with `signedUpAt` (ISO) and `signupDay` (UTC day). A user who belongs to two apps carries each app's own join date, so joining a second app makes them new on that app the day they joined it. Two limits worth knowing: the answer is drawn from activity, so a member who has not produced an event in the last 90 days does not appear; and `signedUpAt` is `null` for a user none of whose events carries a join time yet, which is why a range that includes `1970-01-01` returns nobody rather than everybody.
-- **Page a signup day until it says it is done.** A filtered search returns at most `limit` rows (1–100) and sets `truncated: true` when more match. Repeat the call with `offset += limit`, stepping by the `limit` the response echoes rather than the one you asked for, until `truncated` is `false`; rows are ordered by signup time then user id, so pages do not overlap. `offset` is accepted only alongside a signup filter. A day whose signups are still arriving can shift a row between pages, so re-run the day's pages once it has closed if you need an exact set.
-- **`cohort-retention` retention values are percentages** (0–100, one decimal place), with `null` for a week a cohort hasn't reached yet; week 0 is always 100. `averages` is the per-week mean across the returned cohorts. A cohort is keyed on the app-join time above, and a member who leaves and rejoins counts in exactly one cohort — their latest — for both the cohort size and every activity week, so no cell can exceed 100%.
-- **`errors.groups` `daily` buckets are sparse** — see [Error groups](#error-groups).
+- **Current windows include a partial day.** `previous` covers complete preceding days. Avoid interpreting an early-day decline as a complete-day comparison.
+- **`deltaPct` is fractional.** `0.25` means 25%. When `previous` is zero, render “no baseline”; the returned `1` or `0` is a sentinel.
+- **Overview windows are fixed.** DAU, WAU, and MAU use 1, 7, and 28 days. Growth accepts `windowDays` from 1–90, default 28.
+- **Activity is not a signup date.** `firstSeen` is the first retained event; `firstSeenInWindow` is the first event in the selected window. Use `signedUpAt` or `signupDay` for when the user joined the app.
+- **Series have different windows.** `daily-active` returns one row per day, including zeros (7–90 days, default 28). `rolling-active` returns 28 points; its `windowDays` sets each point's trailing window (1–28, default 7).
+- **Costs may be incomplete.** `totalCost` and `avgCost` cover `executionsWithCost`, not all executions. They are `null` when no price was reported. Label partial coverage and do not divide by all executions.
+- **Older events can count test users as real.** An event is classified when it is recorded; one recorded without the classification counts under `exclude` and never under `only`, until it leaves the 90-day retention window.
+- **System activity is excluded from user metrics.** Query `sys:<appId>` explicitly through user search or events when inspecting system work.
+- **Signup searches use activity records.** They omit users without activity in the retained 90 days; `signedUpAt` can be `null`. A signup range spans at most 90 days.
+- **Page signup searches.** While `truncated` is true, increment `offset` by the returned `limit` (1–100). Re-read a completed day if new signups could have shifted pages during the search.
+- **Retention uses percentages.** Values range from 0–100; `null` means the cohort has not reached that week. A rejoining member belongs to their latest cohort.
+- **Error day buckets are sparse.** Divide totals by `window_days`, not by the number of returned buckets.
 
 ### Filtering events / events-grouped
 
@@ -424,30 +429,39 @@ Supported `FIELD`s and the `OPERATOR`s each accepts:
 
 Example: `?windowDays=7&filter[feature][is]=billing&filter[action][contains]=upgrade`. Unknown fields, unsupported operators, or rejected values are silently dropped.
 
-**At most 10 filter params per request.** `/analytics/events`, `/analytics/events/grouped` and `/analytics/errors/groups` answer `400` — `Too many filters: N. Maximum is 10.` — for anything above that, rather than applying the first ten and dropping the rest. The body carries `code: "FILTER_LIMIT_EXCEEDED"`; **branch on that code, not the message**, which interpolates the submitted count and so cannot be matched literally. The count is over the `filter[…][…]` params you send, so a value that gets rejected by the allowlist still counts, and repeating the same field/operator with different values (each param is ANDed separately) counts once per param.
+### Gotchas when filtering
+
+Event, grouped-event, and error-group queries accept at most **10 filters**. More returns `400 FILTER_LIMIT_EXCEEDED`; match the code, not the message. Each supplied parameter counts, including repeated or invalid filters. Repeated parameters are ANDed.
 
 ### Error groups
 
-`/analytics/errors/groups` groups failure events by a stable **fingerprint** — a hash over the rules version, source, scope, step, normalized message, and status class. Messages that differ only in ids, numbers, URLs, quoted free-text values, or timestamps normalize to the same title and share a fingerprint.
+`/analytics/errors/groups` groups similar failures by `fingerprint`. Use the returned title for a summary and `exemplar` for one concrete failure.
 
-Five surfaces emit failure events, and `source` says which: a failed workflow run (`workflow_run`), a failed workflow step (`workflow_step`), a failed integration call (`integration`), a failed server-function invocation (`function_invocation`) and a failed server-function task run (`function_run`). The two function sources are separate because the runner is part of the failure: a caller was answered with a terminal envelope, or a scheduled run died with nobody watching. For a function group, `scope_key` on the exemplar is the function key and `run_id` is the task run.
+| Field | Use |
+|---|---|
+| `normalized_title` | Message with request-specific values removed |
+| `source` | Kind of operation that failed |
+| `total` | Failures in the selected window |
+| `daily` | Per-day counts; days without failures are omitted |
+| `first_seen` / `last_seen` | First and latest occurrence, as ISO-8601 timestamps |
+| `exemplar` | Sample with message, scope, and run identifiers, or `null` |
 
-Normalization preserves the tokens that tell two failures apart: JSON **keys** (an identifier-shaped quoted span that is followed by `:` *and* sits in JSON object position — after `{` or `,`; a quoted span in prose, like `Failed to parse "x.txt": ...` or `User "alice": not found`, is templated even though it precedes a colon), quoted `SCREAMING_SNAKE` error enums (`UNAVAILABLE`, `RESOURCE_EXHAUSTED` — but not an uppercase id such as `ABC123XYZ` or `DEADBEEFCAFE`, which are templated), a 3-digit status under a `code` / `status` / `statusCode` key, and an `HTTP <n>` code. A `Caused by:` chain folds to its head message, so a chained error groups with the unchained form of the same failure.
+For a function failure, the exemplar's `scope_key` names the function and `run_id` identifies its task run.
 
-Each response row is one fingerprint: `fingerprint`, a representative `normalized_title`, `source`, `status_class`, a `total` over the window, `daily` — a per-day `{ day, count }` series (sampling-weighted, ascending, `day` a `YYYY-MM-DD` label) — `first_seen` / `last_seen` (ISO-8601), and an `exemplar`. One call covers the whole window, so "today versus the trailing baseline" needs no rolling store.
+An `analytics_relay` group records tracked events the platform could not store; its exemplar message gives the number dropped.
 
-**The exemplar is how you identify a group.** `normalized_title` is a grouping key with the variable parts replaced by placeholders; `exemplar` is a raw sample of one real failure — `{ message, action, scope_key, step_id, run_id, at }` — so you can go from a spiking group straight to a concrete failure without paging `/analytics/events`. `step_id` and `run_id` are `null` when the failure had none. The whole object is `null` when no sampled row for that fingerprint carried a sample: a very noisy group can consume the sampling budget and leave a quieter one without one. Treat `exemplar: null` as a normal result, not an error.
+#### Gotchas when handling error groups
 
-`status_class` is the integration failure's real HTTP status class, including `transport`, which no message text can express. On every other source it is inferred from the message and is `` (empty) when the message embeds no HTTP status, so do not filter a function or workflow group by it expecting to find everything.
-
-**The `daily` series is sparse.** A day on which that fingerprint produced no events has no bucket at all, so `daily` is shorter than the window for any intermittent error. Divide by `window_days` (the response echoes it) to get a per-day baseline — dividing by `daily.length` averages over only the days the error fired, which overstates the baseline and suppresses exactly the spike an alert should catch. A window with no failures returns `rows: []`.
+- `exemplar` may be `null`. Fall back to `normalized_title`.
+- HTTP status class is reliable for integration failures. Other sources may have no HTTP status, so filtering by it can omit failures.
+- An empty window returns `rows: []`. Sparse daily buckets do not imply missing data.
 
 Only a bounded set of dimensions is filterable (the exact error code is inside the fingerprint, never a filter):
 
 | Field | Operators | Values |
 | --- | --- | --- |
 | `fingerprint` | `is`, `contains`, `starts with` | any |
-| `source` | `is`, `is not` | `workflow_run`, `workflow_step`, `integration`, `function_invocation`, `function_run` |
+| `source` | `is`, `is not` | `integration`, `function_invocation`, `function_run`, `analytics_relay` |
 | `statusClass` | `is`, `is not` | `4xx`, `5xx`, `transport` (bounded enum; other values → 400) |
 
 Query params: `windowDays` (1–90, default 7), `limit` (1–200 groups, default 50). Also available as the CLI `primitive analytics errors-groups` (add `--verbose` to print each group's exemplar and provenance).
@@ -458,22 +472,49 @@ Each row from `/analytics/events` includes geographic and per-event metric field
 
 - `region_code`, `region`, `city`, `colo` — derived from the request edge
 - `entity_key` — caller-provided correlation handle (e.g. a prompt id)
-- `duration_ms` — for `*_succeeded` / `*_failed` events that record latency
-- `input_tokens`, `output_tokens`, `total_tokens` — populated for `prompt_succeeded` events
+- `duration_ms` — for server events that record latency (`function.invoke`, `prompt.executed`)
+- `input_tokens`, `output_tokens`, `total_tokens` — populated for `prompt.executed` events
 
 These fields are absent (or zero) when the event type doesn't produce them.
 
 ---
 
-## Best Practices
+## Finding Expensive Database Queries
 
-1. **Use verb_noun action names** — `"photo_uploaded"`, `"report_generated"`, `"settings_changed"`.
-2. **Group with `feature`** — set consistently to enable per-feature dashboards (`"gallery"`, `"settings"`, `"billing"`).
-3. **Keep `context_json` small** — bounded at 1 KiB. Don't dump request bodies or full reports.
-4. **Don't log high-frequency events** — rate limiter caps at 300/min with burst 60. Design around meaningful actions, not continuous telemetry.
-5. **Use the override setters** instead of passing `plan` / `app_version` on every event.
+Every database read the server answers (record `query`, `count` and `aggregate`, and `ctx.db3(...)` reads in server functions) is recorded with its rows read. Two readers rank them per app; both need app `admin`.
 
-6. **Don't add your own `beforeunload` flush** — the client already does this.
+```bash
+# Query shapes by rows read (default --window-days 7, --limit 50, --order-by rows-read)
+primitive analytics db3-queries
+primitive analytics db3-queries --window-days 30 --order-by rows-per-returned --json
+# Request wall time and platform storage calls per endpoint and function
+primitive analytics requests --window-days 7
+```
+
+```text
+GET /app/{appId}/api/analytics/db3/queries?windowDays=7&limit=50&orderBy=rowsRead
+GET /app/{appId}/api/analytics/requests?windowDays=7&limit=50
+```
+
+`windowDays` 1–90, `limit` 1–200, `orderBy` `rowsRead` | `rowsPerReturned`; anything else returns `400`. `fresh=1` (the CLI's `--fresh`) skips the five-minute cache. The console shows both tables on the Analytics section's **Database Queries** tab.
+
+A row is one query shape from one caller (`endpoint` and `function_id`). The shape names the type, model, `op` and the fields and operators of `filter`, `sort` and `include`, never values: `{ status: "open", total: { $gte: 10 } }` → `status:$eq,total:$gte`; sort `{ createdAt: -1 }` → `createdAt:desc`; an include leg → `Line:hasMany:orderId{status:$eq;}`. Reads differing only in values share a `shape_id`.
+
+| `db3/queries` field | Meaning |
+|---|---|
+| `calls`, `rows_read`, `rows_returned` | Totals over the window |
+| `rows_read_per_call` | `rows_read / calls` |
+| `rows_read_per_returned` | `rows_read / rows_returned`; `null` when nothing was returned |
+| `scanned_calls` | Calls that read rows an index on a filtered field (or sort, or include leg) would have skipped |
+| `function_key` | The function's key, `null` for a direct read or a deleted function |
+
+`requests` rows: `method`, `path` (the route template, such as `/db3/:db3Id/records/:model`), `function_id`, `function_key`, `requests`, `wall_ms_avg`, `wall_ms_p50`, `wall_ms_p95`, `dynamo_calls_per_request`, `dynamo_ms_per_request`, `cold_starts`. A function's calls into the platform appear under the function, authorization included.
+
+### Gotchas when reading query costs
+
+- Index the shape with the most `scanned_calls` and the highest `rows_read_per_returned` first; compare `cost.rowsRead` on one read before and after registering the index.
+- Rows appear a few minutes after the reads. Poll with `fresh=1`; don't expect a read made a second ago.
+- Device reads of a synced database cost the server nothing and are not recorded. A local development server records nothing, so read the figures on a deployed environment.
 
 ---
 

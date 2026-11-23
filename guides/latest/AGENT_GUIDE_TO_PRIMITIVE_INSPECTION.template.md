@@ -1,6 +1,14 @@
 # Agent Guide to Primitive Inspection
 
-Guidelines for AI agents inspecting a running Primitive app from the CLI — reading what happened (server function runs and invocation logs, live connections, sessions, blobs, records, metadata) without opening the Admin Console. The inspection commands share one set of conventions so they behave the same across resources.
+Use the CLI to read function logs, inspect runs, and query app state. Start with the failing invocation or run, then use its IDs to find related records.
+
+## Triaging a failing function
+
+1. `primitive functions logs <function-id>` — find the failed invocation; add `--json` for the full error and captured output.
+2. `primitive functions logs <function-id> --invocation <id>` — inspect one invocation.
+3. `primitive functions logs <function-id> --run <run-id>` — inspect a task's step trace and logs.
+4. `primitive functions runs <function-id>` — check task, cron, and webhook run status.
+5. `primitive functions get <function-id>` — check the function's trigger configuration.
 
 ## The inspection surface
 
@@ -24,45 +32,47 @@ primitive functions logs <function-id> --follow           # tail new invocations
 # The other log views
 primitive integrations logs <integration-id>           # outbound calls: status, timing, actor
 primitive integrations logs <integration-id> --run <run-id>   # just the calls one run made
+primitive integrations logs <integration-id> --run <run-id> --step <name>   # one step of that run
 primitive analytics events                             # app activity events
 
 # Blob storage
 primitive blob-buckets list                            # buckets in the app (app-scoped)
-primitive blob-buckets head <bucket> <key>             # object metadata without downloading
+primitive blob-buckets head <bucket> <blob-id>         # object metadata without downloading
 
 # Live connections and sessions
 primitive connections list --user-id <id>              # active WebSocket connections
 primitive sessions list --user-id <id>                 # auth sessions
 
-# Records and documents
-primitive databases list --owner <user-id>             # databases one user created
-primitive databases records query <database> ...       # read database records
-primitive databases records get <database> <model-name> <record-id>
-primitive databases records count <database> <model-name> [--filter '{...}']
-primitive databases records aggregate <database> <model-name> --op <count|sum|avg|min|max>
-primitive documents records query <document> <model-name> [--filter '{...}']
-primitive documents records get <document> <model-name> <record-id>
-primitive documents records count <document> <model-name> [--filter '{...}']
-primitive documents records aggregate <document> <model-name> --op <count|sum|avg|min|max>
-primitive documents dump <document-id>                 # every model's records as JSON
-primitive documents export <document-id>               # dump a document's contents
+# Databases and their records
+primitive db3 list --custodian user:<user-id>          # databases one user holds
+primitive db3 list --user-id <user-id> [--via held,shared,app]  # every database a user can open, sync-off included
+primitive db3 list --custodian app --tag <tag>         # the databases carrying a tag (also with --user-id)
+primitive db3 get <db3-id>                             # title, type, sync, tags and who holds it
+primitive db3 records query <db3-id> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
+primitive db3 records count <db3-id> <model-name> [--filter '{...}']
+primitive db3 records aggregate <db3-id> <model-name> --op <count|sum|avg|min|max> [--field <f>] [--group-by <f>]
+primitive db3 records query <db3-id> <model-name> --filter '{...}' --explain  # the indexes a read used and the rows it read; --index <name|none> forces one
+primitive db3 schema <db3-id>                          # models and fields, declared and observed
+primitive db3 type get <db3-id>                        # the type the database has
+primitive db3 indexes list <db3-id>                    # its indexes
+primitive db3 stats <db3-id>                           # record counts and size
+primitive db3 inspect <db3-id>                         # sync diagnostics for one database
 
-# Metadata
-primitive metadata get <type> <id> <category>          # resource metadata
+# Rate limits
+primitive rate-counters get <key>                      # a rate counter: limit, window, held and remaining
 ```
 
 ## Uniform flags
 
-Every inspection command honors the same read flags:
+| Option | Meaning |
+|---|---|
+| `--app <id>` | Target app; defaults to the environment's app |
+| `--json` | JSON on stdout; status, warnings, and progress on stderr |
+| `--limit <n>` / `--cursor <c>` | Pagination where the command supports it |
 
-- `--app <id>` — target app; falls back to the resolved environment's app.
-- `--json` — the output you parse. Most commands print the endpoint payload as-is; the log views below normalize theirs into the shared item shape described in the next section. It is always one JSON document, and never a bare array. `--json` goes to stdout; status, warnings, progress, and the `CLI Version: …` banner all go to stderr, so a redirected stdout stays a single parseable document. That holds for the always-JSON commands too — `primitive documents dump <doc> | jq .` parses without a `--json` flag.
-- **The list envelope.** Every `list` verb prints the same envelope under `--json` — every noun, with no exceptions, the type-config readers included: `{ items, hasMore, nextCursor? }`, where `items` holds the rows, `hasMore` says whether the listing continues past them, and `nextCursor` is present only when it does. So `jq '.items[]'` reads any noun's listing, and an empty result is `{ "items": [], "hasMore": false }` rather than nothing or `[]`. A `list` whose subject carries something that is not a row — `env list`'s current selection, `guides list`'s resolved docs version, `metadata list`'s resource — prints that as extra keys BESIDE those three, which always mean the same thing.
-- `--limit <n>` / `--cursor <c>` — paged reads. Pagination follows the ROUTE, not the verb: a `list` whose route pages declares both flags, prints exactly one page, and reports that page's `hasMore`/`nextCursor` — pass the cursor back as `--cursor` to get the next one. It never walks the chain on your behalf, so a script that means "all of them" follows `nextCursor` itself. A `list` whose route does not page declares neither flag and prints the whole set with `hasMore: false`. `primitive help --json` says which flags a given verb carries. `functions logs` and both `records query` verbs print the same envelope whatever shape the underlying endpoint returns; aggregate reads, which are not `list` verbs, walk the `nextCursor` chain to the end.
+Every `list --json` result contains `items`, `hasMore`, and an optional `nextCursor`. Some listings also include resource-specific metadata. Follow the cursor while `hasMore` is true; a single call does not fetch every page. A non-paginated list returns `hasMore: false`.
 
-`list` always requires a **selector** — `--user-id`, `--owner`, a resource id — so it never enumerates the whole app. `--user-id` is the spelling on every list and inspection selector. The exception to the selector rule is a genuinely app-scoped resource such as `blob-buckets list` or `functions list`, which list the app's buckets and functions directly.
-
-Permission sub-verbs differ by resource on purpose: documents use `permissions grant`/`revoke` (a reader/read-write/owner ladder), databases use `permissions add-manager`/`remove-manager` (a manager/owner ladder). What is uniform is `permissions list` and group nesting — not the mutation verb names.
+Use `primitive help --json` to discover flags. Most listings need a user, owner, or resource selector; app-wide functions and buckets can be listed directly.
 
 ## The log views and their shared item shape
 
@@ -91,24 +101,32 @@ Three views read "what happened" in the shared shape: `functions logs`, `integra
 | `timestamp` | ISO-8601 event time, or `null` when the record carries none. |
 | `outcome` | Normalized verdict: `ok`, `error`, `pending`, `neutral`. |
 | `nativeStatus` | The source's own status, verbatim — HTTP integer (integration), `completed`/`failed`/`timeout`/`running` or a platform refusal code (function log), `null` for an activity row other than `function.invoke`. |
-| `correlation` | Pivot keys — including the row's own id, so a printed row can always be looked up again. Only the keys a source records are present. |
-| `detail` | Per-source allowlist of operator-facing fields — a projection, not the stored record. |
+| `correlation` | IDs for looking up related records; only recorded keys are present. |
+| `detail` | Fields specific to the source. |
 
 Outcome mapping, by source:
 
 | Source | `ok` | `error` | `pending` | `neutral` |
 |---|---|---|---|---|
-| Integration | HTTP < 400 | HTTP ≥ 400 | — | — |
+| Integration | HTTP < 400 with no `errorCode` | HTTP ≥ 400, or any `detail.errorCode` — a call refused before sending (`REQUEST_BODY_CONFLICT`, `DISALLOWED_PATH`, …) or that got no response (`UPSTREAM_TIMEOUT`) has `nativeStatus: 0` | — | — |
 | Function log | `completed` | `failed`, `timeout`, a platform refusal code (`FUNCTION_BUNDLE_MISSING`, …) | `running` (a task slice that has printed and settled nothing) | anything else, and an absent status |
 | Activity | `function.invoke` with `status: "completed"` | `function.invoke` with `status: "failed"` or `"timeout"` | `function.invoke` with `status: "started"` | every other action, always |
 
-Activity events are `neutral` with ONE exception. They are counts, and inventing a verdict for a count would be fabricating a signal — but `function.invoke` carries the settled status in its own event context, so a failed invocation is reported as `error`, which is what makes failures countable through this contract. `started` is `pending`: a task start is in flight when its row is written, and its terminal outcome lives on the run row (`functions runs`). The context may arrive as an object or as a JSON string; an unparseable one stays `neutral` rather than being guessed at.
+### Gotchas when interpreting logs
+
+- Logs are retained for seven days. Output printed before a task pauses is not recoverable; use step results to track progress.
+- `--invocation` cannot be combined with `--run`, `--follow`, `--cursor`, or `--limit`.
+- A filtered run query may return a continuation cursor with no matching rows. Follow it before concluding that no records exist.
+
+- Activity events normally have outcome `neutral`. `function.invoke` uses its recorded status; a task start is `pending`, so check the run for completion.
+- Missing or unparseable event context stays `neutral`.
+- Authorization, schema, and rate-limit refusals happen before execution and write no invocation log. Inspect the HTTP response.
 
 The `function-log` source is a server function's invocation records. Its `detail` carries `functionKey`, `configId`, `contentHash`, `triggerKind` (`http`, `webhook`, `cron`, `function`, `manual`), `runtime` (`request` or `task`), `errorCode`, `errorMessage`, `errorStack`, `stdout`, `stderr`, `truncated`, `logsUnavailable` and `contentSuppressed`; `stdout` and `stderr` are arrays of `{ t, s, line }` entries, where `t` is milliseconds after the capture began and `s` is `out` or `err`. Its `correlation` carries the record's own `eventId` (the invocation id), the `runId` of a trigger fire or task run, and the attributed `userId`. Records are kept seven days and outlive an archived function.
 
-The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test`, `workflow` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`. Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a workflow step, `functionId` for a server function, and `runId` for either one's run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
+The `integration` source is one outbound call. Its `detail` carries `method`, `path`, `callSource` (`user`, `admin`, `test` or `function`), `requestBytes`, `responseBytes`, `errorCode`, `actorType`, `actorEmail` and — for a call a server function made — `functionKey`, plus `stepAttempt` for a call made inside a function's `step.do` (which run of the body, from 1; it restarts after the task pauses, exactly as the function log's attempt does). Its `correlation` carries the `traceId`, the `integrationKey`, the attributed `userId`, and the keys that say where the call came from: `stepId` for a function step, `functionId` for a server function, and `runId` for its run. A function step also carries `correlation.stepOccurrence`, which use of the step name it was (from 0), so `runId`, `stepId` and `stepOccurrence` together identify one step of the run. A call made from a request invocation has no `runId`, because a request invocation writes no run row.
 
-Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`.
+Pagination per view: `functions logs` returns `{ items, hasMore, nextCursor? }` and takes `--limit` (default 25, max 100) / `--cursor`; `integrations logs` returns `{ items }` and takes `--limit` plus `--status`/`--from`/`--to`/`--run`/`--step` (it filters inside a bounded scan rather than paging); `analytics events` returns `{ items, page, pageSize, totalRows }` and takes `--page`/`--window-days`/`--user-id`/`--where`.
 
 Not in the shared shape: `functions runs --json` prints the run rows as `{ items, nextCursor }` (each row adds `runtime`), and `functions runs steps --json` prints one run's full trace under `items`, never paged.
 
@@ -116,22 +134,11 @@ The normalization is `--json`-only. The human tables stay per-view, because each
 
 Invalid filter values are rejected, not ignored: an unparseable `--from`/`--to`, a non-positive `--limit`, or a malformed `--cursor` fails with the server's validation message.
 
-## Triaging a failing function
-
-1. `functions logs <function-id>` — newest first; the table is `TIME | STATUS | TRIGGER | RUNTIME | VERSION | RUN/INVOCATION ID | CODE | ERROR`, where ERROR is the first line of the error (or of stderr). `--json` carries the whole message, the stack, and every printed line.
-2. `functions logs <function-id> --invocation <id>` — one record in full. A record that never existed, belongs to another function, or aged past seven days all answer the same 404.
-3. For a task run: `functions logs <function-id> --run <run-id>` prints the step trace, then each record the run wrote, oldest first, with its lines under it. A run that slept writes one record per slice that settled; output printed before a hibernation is not recoverable.
-4. `functions runs <function-id>` — the run level: `RUN ID | STATUS | FIRED BY | RUNTIME | VERSION | PARENT | REFRESHES | RESETS | STARTED | ENDED | CODE`. Every cron fire and every webhook delivery writes a run row, so this is where a schedule's or a provider's effect shows. A run that RESET (a platform deploy tore a slice down and the engine replayed the step) and then completed carries no error — the RESETS column is the only place it shows.
-5. `functions list` — every function's triggers in one call: which carry a webhook or crons, and each one's status, schedule, next and last fire. `functions get <function-id>` remains where the receiver URL, ids and secret state are read: the webhook's id, URL, scheme, signing secret, status and last delivery; each cron entry's id, name, schedule, timezone, status, next fire, fire count and last run.
-
-`--invocation` cannot be combined with `--run`, `--follow`, `--cursor` or `--limit`. A filtered `--run` page that holds only other runs' records is followed a bounded number of times; if it is still empty the command prints the `--cursor` to continue rather than a bare "none".
-
-A gate refusal (403 access, 404 unknown key, 400 input schema, 429 rate) writes no record — it never reached the code; debug it from the HTTP response.
-
 ## Reading one user's activity
 
 ```bash
 primitive analytics events --user-id <user-id>   # that user's activity events, function.invoke included
+primitive analytics events --user-id <user-id> --where action=function.invoke   # only their invocations
 ```
 
 An invocation's record carries the attributed user as `correlation.userId`, so a `function.invoke` row in the user's events pivots to `functions logs` by function and time. Work with no human behind it is recorded against the app's own principal `sys:<appId>`, which the analytics surfaces display as `System`; `analytics events --user-id sys:<appId>` reads exactly that activity.
@@ -152,4 +159,18 @@ Rules:
 - `--json --follow` emits **NDJSON** — one shared-shape item per line. Pipe it to `jq -c` and read line by line.
 - Ctrl-C stops a tail cleanly.
 
-What it guarantees: an invocation id is minted at START and its record written at SETTLE, so a slow invocation lands below rows already printed. The tail looks back a minute past its high-water mark (the 30 s request ceiling plus the token's grace) and remembers which ids in that window it has shown, so each record prints once and the slow, failed and timed-out ones are not skipped. A burst larger than one page between polls is walked page by page back to the mark rather than skipped.
+Slow invocations are included when their records become available. The command also reads additional pages when a poll finds more than one page of new records.
+
+## Server Timing
+
+Every REST response carries `Server-Timing: total;dur=<milliseconds>`, readable from any HTTP tooling (not just a browser's Network panel), to attribute slow requests to server-side handler work.
+
+`client.db3.create` / `getOrCreateWithAlias` and alias lookups add one entry per step that ran — `db3Lookup`, `db3Install`, `db3Begin`, `db3Row` — so a slow create shows which step took the time. A create also reports the new database's first request: `db3Room<Stage>` entries for the stages it timed (`db3RoomRead`, `db3RoomTables`, `db3RoomJudge`, ...) and `db3RoomResidual` for the part it could not time (startup and transport).
+
+A server function call adds `fnRateSlot` (milliseconds waited for its `ratePerMinute` slot) and `fnRateLeaseCalls` (requests to the function's count for slots; 0 when the server already held some).
+
+A signed-out call adds `signedOutIp` (milliseconds its per-address limit took) and `signedOutIpLeaseCalls` (requests to the address's count for slots; 0 when the server already held some). An instance asks for five slots at a time, and an address's calls spread over many instances, so expect a 1 on each instance's first call for the address, not one call in five. A signed-out call to a function with a `rate` adds `signedOutTier` and `signedOutTierLeaseCalls` for that limit. `primitive rate-counters get ip:<address>` reads an address's count this minute (IPv6 by /64: `ip:2001:db8:0:1::-64`).
+
+## Response Caching
+
+Authenticated app API responses carry `Cache-Control: no-store`, and every client request bypasses the HTTP cache, so concurrent reads of the same URL reach the server in parallel rather than queuing. A caller using its own `fetch` should pass `cache: "no-store"` for the same behavior. Avatar responses are publicly cacheable. Blob downloads support conditional requests with `ETag` / `If-None-Match`; keep the original body yourself to reuse it after a `304`.

@@ -1,6 +1,22 @@
 # Deploying Primitive apps to production
 
-This guide is the reference for shipping a Primitive app to production through its native distribution channel.
+Deploy the web template to its hosting environment, or distribute the native app through TestFlight and the App Store.
+
+## Protect the app
+
+Before real users reach the app, raise its protection level in `app.toml`:
+
+```toml
+# primitive/prod/app.toml
+[app]
+protection = "protected"
+```
+
+```bash
+primitive config push --only app
+```
+
+A CLI login can still read the app, but its writes, such as a `config push` or a deploy, then need a step-up pinned to the app (`primitive login --step-up --scope write --app <app-id>`); a CI session pinned to the app writes without one. Only the app's console owner changes the level. See [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions) for the full access rules.
 
 ## Web (Cloudflare Workers)
 
@@ -44,7 +60,7 @@ The Vite mode selects `.env.<deploy-env>`. It carries no identity:
 VITE_OAUTH_REDIRECT_URI=https://my-app-prod.your-subdomain.workers.dev/oauth/callback
 ```
 
-The app ID and backend URL live in `primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it.
+The app ID and backend URL live in `primitive/config.json`, as a named Primitive environment — the one place they are typed. The `primitiveEnv()` Vite plugin fills `VITE_APP_ID`, `VITE_API_URL`, `VITE_WS_URL` and `VITE_APP_NAME` into the build from it. The plugin ships from `primitive-admin/vite` (`import { primitiveEnv } from "primitive-admin/vite"`); the scaffolded template's `vite.config.ts` already imports it from there and needs no edit.
 
 **A deploy errors if any of those keys appear in a `.env` file it would load, or in `process.env`.** There is no override flag: remove them.
 
@@ -70,7 +86,7 @@ Passthrough arguments that would take over what the deploy already decided — `
 
 ### Adding environments
 
-The two axes grow separately.
+Configure deployment environments and Primitive environments independently.
 
 **Another deploy environment:**
 
@@ -79,6 +95,21 @@ The two axes grow separately.
 3. `pnpm cf-deploy --deploy-env <name> --primitive-env <backend>`.
 
 **Another Primitive environment:** `primitive env add alpha --api-url ... --app-id ...`, then name it with `--primitive-env alpha`. Nothing in `wrangler.toml` or `.env.*` changes.
+
+### Preview a branch against a child app
+
+A [child app](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#child-apps) (`primitive apps children create feature-x`) is a copy of the parent app for one branch. `create` does not push the configuration tree: set the child's own var values with `config set vars`, then push the tree into it before uploading (the template's `pnpm child:up feature-x` does both). Upload a preview version of the worker under an alias instead of deploying, to run that branch's front end against it:
+
+```bash
+primitive config push --env feature-x --yes
+pnpm cf-deploy --deploy-env production --primitive-env feature-x --preview-alias feature-x
+```
+
+This uploads the version with the child's app ID, prints the preview URL (`https://feature-x-my-app-prod.your-subdomain.workers.dev`), and adds that origin to the child's preview origins, so its CORS and email sign-in checks accept it. The live worker is untouched; running the same command again after a change keeps the same alias URL. `--check` prints the upload and the registration without running them.
+
+- Against a committed environment, `--preview-alias` registers nothing — add the origin to `[cors].allowedOrigins` and `[auth].emailRedirectUris` in that environment's `app.toml` and push to sign in from it there.
+- If registering the preview origin fails, the upload still succeeds; the command prints the registration to run by hand.
+- A deploy to a child **without** `--preview-alias` prints a warning and proceeds anyway — it replaces the live worker of that deploy environment for everyone.
 
 ### Pinning a deploy environment to a Primitive environment
 
@@ -89,9 +120,9 @@ Opt-in, for apps whose `.env.<mode>` keys are only correct against one backend (
 VITE_EXPECTED_PRIMITIVE_ENV=prod
 ```
 
-Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too.
+Any run whose Primitive environment resolves to something else then fails at startup — `pnpm dev`, `pnpm build`, `pnpm test` (the headless harness suite included) and `pnpm cf-deploy` alike, because all of them resolve through the `primitiveEnv()` plugin. `cf-deploy` checks it before it builds or prints a plan, so a cross-wired `--check` fails too. A child app's machine-local environment pairs with the mode that declares its parent: under `VITE_EXPECTED_PRIMITIVE_ENV=prod`, a child of `prod` runs and a child of `dev` is refused.
 
-Rules: absent (the default) keeps the axes fully independent; a value in the base `.env` is the default for every mode and `.env.<mode>` overrides it; an empty value cancels the check for that mode; a non-empty `VITE_EXPECTED_PRIMITIVE_ENV` in the process environment wins over the files, which is how a deliberate cross-wired run states itself (`VITE_EXPECTED_PRIMITIVE_ENV=dev PRIMITIVE_ENV=dev pnpm test --mode alpha`). The pure-env CI hatch — a build supplying both `VITE_APP_ID` and `VITE_API_URL` — resolves nothing and so skips the check; overriding only one of them does not, because the other half still comes from the resolved environment. `cf-deploy` reads `.env*` from the project root, so under a custom Vite `envDir` its `--check` will not see the declaration (a real deploy still fails inside the build).
+Use `VITE_EXPECTED_PRIMITIVE_ENV` when a mode contains backend-specific settings. A mode’s `.env` file overrides the base value; an empty value disables the check for that mode. A process environment value overrides the files. Builds supplied with both `VITE_APP_ID` and `VITE_API_URL` resolve no Primitive environment; `cf-deploy` rejects those overrides.
 
 ```toml
 [env.test]

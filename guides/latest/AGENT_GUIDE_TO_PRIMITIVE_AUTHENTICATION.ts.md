@@ -1,6 +1,6 @@
 # Agent Guide to Primitive Authentication
 
-Implementing auth flows for Primitive apps. All methods live on `JsBaoClient` (package: `js-bao-wss-client`).
+Use the client’s authentication APIs to sign users in, restore sessions, and sign out. Starter templates provide the UI and session handling.
 
 ## Auth Methods
 
@@ -57,12 +57,12 @@ In the starter template this wiring is owned for you by the template's `userStor
   };
 ```
 
-Google registers a client **per platform**, so `getAuthConfig()` reports a client MAP keyed by client type (`web`, `ios`, `android`, `desktop`, `chrome-extension`) rather than a single availability flag — a single flag could only ever be right for one platform. Each entry carries `clientId`, `redirectUris` and `usable` (the server's shape verdict); no secret is ever published.
+`getAuthConfig()` returns enabled methods and configured Google clients. Each Google client entry includes `clientId`, `redirectUris`, and `usable`; secrets are excluded. It reads the public, unauthenticated `GET /app/{appId}/api/settings/sign-in`; code that doesn't use the client (a login page, a server) can read that route directly and gets the same fields.
 
 Availability is the provider being enabled **and** your platform's entry being usable, together.
 `checkOAuthAvailable()` computes exactly that against the `web` entry; `googleWebClientAvailable(config)` is the same predicate over a config you already have, so a button and its click handler can share one definition.
 
-`emailSignInEnabled` reports whether email sign-in is available at all — ONE flag, because one request sends one email carrying both a code and (when a link can be issued) a link. It defaults to `true` unless explicitly disabled. `magicLinkEnabled` and `otpEnabled` are still reported for already-published clients and always equal it; new code reads `emailSignInEnabled`.
+Use `emailSignInEnabled` to control email sign-in UI. It defaults to `true`.
 `hasPasskey` requires `passkeyEnabled` plus a non-empty `passkeyRpConfig` map.
 
 ### Passkey RP config (`passkeyRpConfig`)
@@ -78,15 +78,147 @@ Availability is the provider being enabled **and** your platform's entry being u
 
 `getAuthConfig()` returns the effective map. Configure passkeys via `passkeyRpConfig`.
 
+## Email Sign-In (One Email, One or Two Credentials)
+
+### Request + verify
+
+One request sends ONE email carrying a 6-digit code and — when a link can be
+issued — a sign-in link. Nothing chooses a method: the user types the code or
+opens the link, and consuming either one retires both.
+
+```typescript
+  // The link lands on the page's origin + /oauth/callback (or the client's
+  // oauthRedirectUri when set). When the app's `emailRedirectUris` is
+  // non-empty, that target must be on it, or the request is rejected 400
+  // `Invalid redirect URI`; with an empty list the email carries the code
+  // alone. Pass `{ redirectUri: "https://..." }` to name another target, or
+  // `{ redirectUri: null }` for an email that carries the code alone.
+  await client.emailSignInRequest(email);
+
+  // Finish by typing the code from the email...
+  const { user, isNewUser } = await client.otpVerify(email, code);
+
+  // ...or by clicking the link in the same email, which lands on the callback
+  // page with ?magic_token=... — see the magic-link callback example. Either
+  // one retires both: one email signs the user in once.
+```
+
+Link issuance is **fail-closed**. The email carries a link only when the request
+names a redirect target AND that target matches the app's non-empty
+`emailRedirectUris`. With no target, or an empty allow-list, the same
+`email-sign-in` template renders code-only; a target that misses a non-empty
+allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
+link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
+no endpoint renders any other sign-in template, so that removal holds.
+
+`emailSignInRequest(email, { redirectUri? })` picks the link's target in this order: the call's `redirectUri` (`null` asks for a code-only email), the client's `oauthRedirectUri`, the page's origin + `/oauth/callback`, and otherwise none (code only, e.g. in Node). `client.emailSignInLinkTarget(redirectUri?)` returns that target without sending anything.
+
+**Gotcha:** when `[auth].emailRedirectUris` is non-empty, the chosen target must be on it, or the request is rejected `Invalid redirect URI` and no email is sent; the client does not retry without it. With an empty allow-list the email carries the code alone. Add the target and `primitive config push`, or pass `redirectUri: null`.
+
+### Reading the token (callback page)
+
+The callback delivers the token as a `magic_token` value — **not** `token`, `magicToken`, or `code`:
+
+```typescript
+  const { user, isNewUser, promptAddPasskey } = await client.handleSignInCallback();
+  // Token is now stored on the client and WS auto-connects.
+  if (isNewUser) showOnboarding();
+  if (promptAddPasskey) offerPasskeyRegistration();
+  return user;
+```
+
+`handleSignInCallback(url?, { inviteToken? })` defaults to `window.location.href` and finishes both an emailed link (`magic_token`) and an OAuth redirect (`code` + `state`). It resolves with a `SignInCallbackResult`: `method`, `userId`, and for a link `user`, `isNewUser`, `promptAddPasskey`; `purpose` is `"login-add-passkey"` when the server suggests a passkey; `continueUrl` and `state` come from a base64 JSON `state` the app put on the link.
+
+It accepts a URL only when every rule holds:
+
+| # | Rule |
+|---|---|
+| 1 | A URL is given, or `window.location.href` exists |
+| 2 | It is an `http:` or `https:` URL |
+| 3 | Its origin is the page's origin or `oauthRedirectUri`'s |
+| 4 | Its path is `oauthRedirectUri`'s path when set, else `/oauth/callback` |
+| 5 | `magic_token`, `code` and `state` each appear at most once, and never empty |
+| 6 | Not both `magic_token` and `code` |
+| 7 | A `code` comes with a `state` |
+| 8 | It carries `magic_token`, or `code` with `state` |
+| 9 | A `state` decodes as base64 JSON to an object |
+
+Anything else rejects before any request with `AuthError` code `INVALID_TOKEN` and a message starting `Sign-in callback refused:` that names the rule. A link's `state.inviteToken` is accepted with the sign-in unless `inviteToken` is passed.
+
+To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
+
+```typescript
+  const { user, isNewUser } = await client.magicLinkVerify(magicToken, {
+    inviteToken: inviteTokenFromUrl,
+  });
+```
+
+---
+
+## Finishing With the Code
+
+The code half of the same email is verified with the OTP verify call, unchanged:
+
+`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
+
+### Error handling
+
+`AuthError` is thrown for non-2xx responses with a machine-readable code:
+
+```typescript
+  try {
+    await client.otpVerify(email, code);
+  } catch (err) {
+    if (err instanceof AuthError) {
+      switch (err.code) {
+        case AUTH_CODES.INVALID_TOKEN:          // bad/expired code
+        case AUTH_CODES.TOKEN_EXPIRED:          // token expired
+        case AUTH_CODES.INVITATION_REQUIRED:    // invite-only app, no invitation
+        case AUTH_CODES.DOMAIN_NOT_ALLOWED:     // domain-mode app, email not in allowed domains
+        case AUTH_CODES.ADDED_TO_WAITLIST:      // waitlist enabled, user added
+        case AUTH_CODES.WAITLIST_ENTRY_UPDATED: // existing waitlist entry updated
+        case AUTH_CODES.PASSKEY_NOT_ENABLED:    // passkey off in admin console
+        case AUTH_CODES.MAGIC_LINK_NOT_ENABLED: // magic link off in admin console
+        case AUTH_CODES.INVITE_TOKEN_INVALID:   // bad invite token
+        case AUTH_CODES.INVITE_TOKEN_EXPIRED:   // invite token expired
+        case AUTH_CODES.INVITE_ALREADY_ACCEPTED: // invite already used
+          showUserMessage(err.message);
+          return;
+      }
+      // Server-only codes — not in the client's AUTH_CODES constant, so check
+      // the string directly:
+      switch (err.code) {
+        case "RATE_LIMITED":             // too many requests; err may include retryAfter
+        case "OTP_MAX_ATTEMPTS":         // too many bad guesses; request new code
+        case "OTP_NOT_ENABLED":          // OTP off in admin console
+        case "RESERVED_EMAIL_FOR_ADMIN": // +primitivetest emails can't hold admin/owner roles
+          showUserMessage(err.message);
+          return;
+      }
+    }
+    throw err;
+  }
+```
+
+Handle `PASSKEY_USER_VERIFICATION_FAILED` by asking the user to retry and complete biometric or PIN verification. Branch on the returned code, not the app’s current verification policy.
+
+Gate email sign-in UI on `emailSignInEnabled` from `getAuthConfig()`.
+
+The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_RP_NOT_CONFIGURED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
+
+The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
+
+---
+
 ## Server App Settings ↔ Client Contract
 
-Server-side app settings must align with the origin the client app is served from. These settings live in `primitive/dev/app.toml` and are applied with `primitive config push` (or `config push --only app`) — that is the only CLI write path; no flag sets an app setting. Inspect the live values with `primitive apps get`; the relevant fields:
+Set authentication fields in the environment’s `app.toml`, then run `primitive config push --only app`. Inspect live values with `primitive apps get`.
 
 | Server field | Contract | Set via |
 |---|---|---|
 | `corsAllowedOrigins` | Must contain the exact serving origin (scheme+host+port). `corsMode` defaults to `universal`; in `custom` mode an empty list blocks every cross-origin request. | `[cors]` (`mode`, `allowedOrigins`, `allowCredentials`) in `app.toml` → `config push` |
 | `googleClients[<type>].redirectUris` | The Google callback is validated against the entries, and the matching one SELECTS the client used for the exchange — a URI listed by no entry returns 400 `Invalid redirect URI`, and a URI may appear in only one entry. | `[auth.google.clients.<type>].redirectUris` in `app.toml` → `config push` (non-localhost must be https) |
-| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://auth` covers `myapp://auth/magic-link` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
+| `emailRedirectUris` | The sign-in-link allow-list. **Fail-closed**: with an empty or missing list the sign-in email carries the code alone; a target that misses a non-empty list is rejected 400 `Invalid redirect URI`. New apps are seeded with the localhost dev callback. `http`/`https` match by origin; a custom scheme matches on scheme + authority, so `myapp://` covers `myapp://oauth/callback` but no other scheme or host. | `[auth].emailRedirectUris` in `app.toml` → `config push` |
 | `baseUrl` | Used for links in auth emails / redirects. | `[app].baseUrl` in `app.toml` → `config push` |
 | Provider toggles | What `getAuthConfig()` reports. | `[auth]` in `app.toml` (`googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled` + `[auth.passkeys]`) → `config push`. |
 
@@ -120,9 +252,9 @@ redirectUris = ["com.googleusercontent.apps.1234-ios:/oauth2redirect"]
 
 A literal `clientSecret` value is rejected with `GOOGLE_CLIENT_SECRET_MUST_BE_SECRET_REF`, and a reference naming a key that doesn't exist with `MISSING_GOOGLE_CLIENT_SECRET_REF`. **A redirect URI belongs to the client that redirects, and selects it at the callback** — so a URI may appear in only one entry, and an iOS custom scheme is not a valid redirect for the web client. Removing a client is how you stop using it: for `web` and `desktop` you cannot blank the secret and keep the entry, because the map would then be invalid.
 
-The server sends every stored `clientSecret` back verbatim — a whole `{{secrets.KEY}}` reference is a pointer, not a credential, so `apps get`, `config pull` and the API all show it. An entry that holds the secret itself rather than a reference still signs users in (the stored value IS the secret), but the entry cannot be saved back until you store the value as an app secret and re-point `clientSecret` at it. Other app-settings writes are unaffected.
+Configuration reads return secret references, not secret values.
 
-`GOOGLE_OAUTH_MISCONFIGURED` is the code for a stored value that can't be resolved to a client secret — a reference naming a secret that doesn't exist, or reference syntax that no `{{secrets.KEY}}` reference accounts for (`{{secrets.foo}}`, `{secrets.KEY}`, or an otherwise-valid reference carrying an invisible character such as a zero-width space): the **web** sign-in flow fails closed with it before the request reaches Google. Native (PKCE) sign-in is deliberately exempt from that guard — a PKCE exchange can prove possession of the auth code with the code verifier alone — but a confidential client whose secret doesn't resolve still fails at Google, as a generic `INVALID_TOKEN`.
+If web sign-in returns `GOOGLE_OAUTH_MISCONFIGURED`, check that the selected Google client references an existing app secret.
 
 ### Start the flow
 
@@ -196,145 +328,9 @@ const { token } = await client.handleOAuthCallback(code, state);
 
 ## One Account Across Providers
 
-Google and Apple identities are linked to an account, not stored as a single
-current provider. Consequences to code against:
+Google and Apple sign-ins with the same email use the same account. Linked provider identities remain attached to that account even if their email changes. Use `isNewUser` to decide whether onboarding is needed.
 
-- **Same email, second provider → same account.** A user who signed in with
-  Google and later signs in with Apple under the same email resolves to the
-  existing account. `isNewUser` is `false` on that second sign-in; documents,
-  memberships, and permissions carry over. Don't build "merge my accounts" UI.
-- **A linked identity survives an email change.** The identity is matched
-  before the email is, so a provider-side email change still resolves to the
-  original account rather than provisioning a new one.
-- **Links never move.** A provider identity already linked to one account is
-  never re-pointed at another by a later sign-in — the original owner keeps it.
-- **Only Google and Apple link this way.** Magic link and OTP resolve by the
-  submitted email; passkeys are registered against an already-signed-in
-  account.
-
-Practical effect on sign-in handling: treat `isNewUser` as "first time in this
-app", not "first time with this provider" — a first-ever Apple sign-in by an
-existing Google user reports `isNewUser == false`, so onboarding gated on it is
-correctly skipped.
-
----
-
-## Email Sign-In (One Email, One or Two Credentials)
-
-### Request + verify
-
-One request sends ONE email carrying a 6-digit code and — when a link can be
-issued — a sign-in link. Nothing chooses a method: the user types the code or
-opens the link, and consuming either one retires both.
-
-```typescript
-  // `redirectUri` is optional and defaults to the client's oauthRedirectUri.
-  // With no target at all the email carries the code alone, rendered from the
-  // same template. A target that IS sent must match the app's non-empty
-  // `emailRedirectUris`, or the request is rejected 400 `Invalid redirect
-  // URI` — nothing degrades to code-only on your behalf.
-  await client.emailSignInRequest(email, {
-    redirectUri: "https://app.example.com/auth/magic-callback",
-  });
-
-  // Finish by typing the code from the email...
-  const { user, isNewUser } = await client.otpVerify(email, code);
-
-  // ...or by clicking the link in the same email, which lands on the callback
-  // page with ?magic_token=... — see the magic-link callback example. Either
-  // one retires both: one email signs the user in once.
-```
-
-Link issuance is **fail-closed**. The email carries a link only when the request
-names a redirect target AND that target matches the app's non-empty
-`emailRedirectUris`. With no target, or an empty allow-list, the same
-`email-sign-in` template renders code-only; a target that misses a non-empty
-allow-list is rejected 400 `Invalid redirect URI`. An app that never wants a
-link deletes the `{{#if magicLink}}` block from its `email-sign-in` template —
-no endpoint renders any other sign-in template, so that removal holds.
-
-`emailSignInRequest` accepts an optional `redirectUri` (defaulting to the client's `oauthRedirectUri`); with neither set the request is still made and the email carries the code alone.
-
-### Reading the token (callback page)
-
-The callback delivers the token as a `magic_token` value — **not** `token`, `magicToken`, or `code`:
-
-```typescript
-  const magicToken = new URLSearchParams(window.location.search).get("magic_token");
-
-  if (magicToken) {
-    const { user, isNewUser, promptAddPasskey } = await client.magicLinkVerify(magicToken);
-    // Token is now stored on the client and WS auto-connects.
-    if (isNewUser) showOnboarding();
-    if (promptAddPasskey) offerPasskeyRegistration();
-    return user;
-  }
-```
-
-The callback URL may also carry `?purpose=login-add-passkey`. The server appends this when the link was sent for an existing user the platform thinks should add a passkey (e.g. they signed in via OTP/magic-link but have no passkey on file). The `magicLinkVerify` call itself is unchanged — apps that read `purpose` from the URL can use it as a hint to route the user to passkey registration after sign-in instead of straight to the home screen.
-
-To accept an invitation server-side at verify time (so the deferred grant resolves to the signing-in user even when emails differ), pass `inviteToken`:
-
-```typescript
-  const { user, isNewUser } = await client.magicLinkVerify(magicToken, {
-    inviteToken: inviteTokenFromUrl,
-  });
-```
-
----
-
-## Finishing With the Code
-
-The code half of the same email is verified with the OTP verify call, unchanged:
-
-`otpVerify(email, code)` also accepts an `{ inviteToken }` option to accept an invitation at verify time.
-
-### Error handling
-
-`AuthError` is thrown for non-2xx responses with a machine-readable code:
-
-```typescript
-  try {
-    await client.otpVerify(email, code);
-  } catch (err) {
-    if (err instanceof AuthError) {
-      switch (err.code) {
-        case AUTH_CODES.INVALID_TOKEN:          // bad/expired code
-        case AUTH_CODES.TOKEN_EXPIRED:          // token expired
-        case AUTH_CODES.INVITATION_REQUIRED:    // invite-only app, no invitation
-        case AUTH_CODES.DOMAIN_NOT_ALLOWED:     // domain-mode app, email not in allowed domains
-        case AUTH_CODES.ADDED_TO_WAITLIST:      // waitlist enabled, user added
-        case AUTH_CODES.WAITLIST_ENTRY_UPDATED: // existing waitlist entry updated
-        case AUTH_CODES.PASSKEY_NOT_ENABLED:    // passkey off in admin console
-        case AUTH_CODES.MAGIC_LINK_NOT_ENABLED: // magic link off in admin console
-        case AUTH_CODES.INVITE_TOKEN_INVALID:   // bad invite token
-        case AUTH_CODES.INVITE_TOKEN_EXPIRED:   // invite token expired
-        case AUTH_CODES.INVITE_ALREADY_ACCEPTED: // invite already used
-          showUserMessage(err.message);
-          return;
-      }
-      // Server-only codes — not in the client's AUTH_CODES constant, so check
-      // the string directly:
-      switch (err.code) {
-        case "RATE_LIMITED":             // too many requests; err may include retryAfter
-        case "OTP_MAX_ATTEMPTS":         // too many bad guesses; request new code
-        case "OTP_NOT_ENABLED":          // OTP off in admin console
-        case "RESERVED_EMAIL_FOR_ADMIN": // +primitivetest emails can't hold admin/owner roles
-          showUserMessage(err.message);
-          return;
-      }
-    }
-    throw err;
-  }
-```
-
-A passkey ceremony that fails because the provider did not verify the user returns `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering). It applies to any ceremony that was *started* while `passkeyUserVerification` was `"required"` — the policy is pinned when the options are issued, so an in-flight ceremony can still return this code after the app is switched to `"preferred"`. Handle it on the code, not on the app's current setting. Render it as "your passkey provider didn't verify you — try again and complete Face ID / your PIN": it is the one passkey failure the user can fix by retrying.
-
-> **Caveat on email sign-in disabled.** When email sign-in is off the request endpoints return a plain 400 with the message `"Email sign-in is not enabled for this app"` and **no `code` field**. Don't rely on a code to detect that case — gate the email UI on `getAuthConfig()`'s `emailSignInEnabled` up front instead.
-
-The exported `AUTH_CODES` constant covers: `ADDED_TO_WAITLIST`, `INVITATION_REQUIRED`, `DOMAIN_NOT_ALLOWED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `PASSKEY_NOT_ENABLED`, `PASSKEY_USER_VERIFICATION_FAILED`, `MAGIC_LINK_NOT_ENABLED`, `WAITLIST_ENTRY_UPDATED`, `INVITE_TOKEN_INVALID`. A bad invite token — invalid, expired, or already redeemed — always answers `INVITE_TOKEN_INVALID`. The server may also return `RATE_LIMITED`, `OTP_MAX_ATTEMPTS`, `RESERVED_EMAIL_FOR_ADMIN`, and `GOOGLE_OAUTH_MISCONFIGURED` (the selected Google client's `clientSecret` does not resolve to a stored app secret — an operator fix, not a user one; only the web flow returns it, since a PKCE sign-in is not failed closed on an unresolvable stored value — it still needs the same fix, it just fails at Google as `INVALID_TOKEN` instead) — compare those as string literals.
-
-The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the `passkey*` methods, and the OAuth code exchange — `handleOAuthCallback` and the static `exchangeOAuthCode` reject with `AuthError` too, so a Google sign-in that lands on the waitlist arrives as `err.code === AUTH_CODES.ADDED_TO_WAITLIST` rather than as message text.
+Email sign-in resolves by the submitted email. Passkeys belong to the account that registered them.
 
 ---
 
@@ -343,6 +339,8 @@ The same `AuthError` codes apply to `emailSignInRequest`/`magicLinkVerify`, the 
 WebAuthn passkeys for returning users, built on the browser's `@simplewebauthn/browser` helpers.
 
 `passkeyAuthStart` works without an existing session (used to sign in). `passkeyRegisterStart` and management methods require an authenticated client.
+
+Both start calls take an optional `{ rpId }`. Omit it in a browser — the server derives the relying party from the request's `Origin`: its host when that is a key of `passkeyRpConfig`, else the longest key the host is a subdomain of (on a label boundary, so `evilexample.com` never matches `example.com`), else the only key when there is just one. A named `rpId` must be a key of the app's `passkeyRpConfig`, or the call fails with `PASSKEY_RP_NOT_CONFIGURED`.
 
 ### Sign in
 
@@ -378,7 +376,7 @@ const result = await client.passkeyRegisterFinish(
 // }
 ```
 
-When `inviteToken` is supplied and the invitation resolves successfully, the `invitation` field reports how many deferred grants (group memberships + document permissions) were resolved to the new user — useful for a post-registration confirmation toast (e.g. "Joined 2 groups, 3 documents").
+When `inviteToken` is supplied and the invitation resolves successfully, the `invitation` field reports how many deferred grants were resolved to the new user — `groups` counts group memberships and `documents` counts database shares — useful for a post-registration confirmation toast (e.g. "Joined 2 groups and 3 projects").
 
 **Don't:**
 
@@ -444,6 +442,7 @@ These are the canonical events.
 ```
 
 A rejected token refresh reports a `reason` from a small, stable set. The launch-time refresh emits no failure event at all — a signed-out start is not an auth failure. A refresh triggered by a 401 on a request reports `reason: "refresh_failed"` (with no message). A refresh from any other trigger reports the trigger itself as the `reason` (the same cause vocabulary as the success event, e.g. `"networkMode:online"`, `"ws-challenge"`), with `"refresh_invalid"` as the fallback when no trigger is attached. Branch on `reason`, and treat unknown values as a generic failure — the set may grow.
+An access token the server refuses reports `reason: "access_token_rejected"` with the server's `code` (see [Headless Sign-In](#headless-sign-in-access-token)).
 
 **Don't:**
 
@@ -524,9 +523,50 @@ To read or manually set the token:
 // WRONG — there is no client.auth.setToken. It's client.setToken(...).
 client.auth.setToken(jwt);
 
-// WRONG — opening documents before auth is ready throws or fails silently.
-const doc = await client.openDocument(id);     // before await client.waitForAuthReady()
+// WRONG — subscribing to a database before auth is ready throws or fails silently.
+const sub = client.db3.subscribe(id);          // before await client.waitForAuthReady()
 ```
+
+---
+
+## Headless Sign-In (Access Token)
+
+A Node script, cron job or CI step signs in with an app access token (`prim_…`) passed as `token` — no browser, no password, no refresh cookie. Mint it for the user the job runs as with `primitive tokens create --name <name> --user <userId>` and keep it in a secret. `--ttl <duration>` (`m`/`h`/`d`/`w`/`mo`/`y`) sets an expiry; without it the token never expires. `primitive tokens list` and `primitive tokens revoke <token-id>` manage existing tokens.
+
+```typescript
+  let client;
+  try {
+    client = await initializeClient({
+      apiUrl: "https://primitiveapi.com",
+      wsUrl: "wss://primitiveapi.com",
+      appId: "YOUR_APP_ID",
+      token: accessToken, // "prim_…"
+    });
+  } catch (err) {
+    if (isJsBaoApiError(err) && err.status === 401) {
+      // Revoked, expired or unknown: mint a new token.
+      throw new Error(`access token refused (${err.code})`);
+    }
+    throw err; // the server could not be reached
+  }
+
+  // The client works as the token's user.
+  console.log("signed in as", client.getUserId());
+
+  // A token revoked or expired later is reported, never refreshed or dropped.
+  client.on("auth-failed", (event) => {
+    if (event.reason === "access_token_rejected") {
+      console.error("access token rejected:", event.code);
+    }
+  });
+```
+
+- `initializeClient` resolves once `GET /me` has confirmed the token; the client then works as that user (`getUserId()`, `me.get()`, local stores scoped to the user).
+- A refused token rejects `initializeClient` with a 401 `JsBaoApiError` (`code: "INVALID_TOKEN"`); an unreachable server rejects with a `JsBaoNetworkError`.
+- `setToken(accessToken)` signs in asynchronously: `getUserId()` is null until it resolves. Await `waitForUserId()` before doing work as the new user.
+- In Node.js the session lives in SQLite through `better-sqlite3` when it is installed and built, in memory when it is not installed; an installed but unbuilt `better-sqlite3` rejects `initializeClient` with `JsBaoError` `code: "STORAGE_UNAVAILABLE"` — run `pnpm rebuild better-sqlite3`, or pass `storageConfig: { type: "memory" }` for a run that needs no store.
+
+**Watch out when a token stops working:** the client never refreshes, persists or discards an access token. A revoked or expired token emits one `auth-failed { reason: "access_token_rejected", code }` (`INVALID_TOKEN` over HTTP, `TOKEN_REVOKED` on the socket) and the token stays set. Handle that event: mint a new token and `setToken` it, or exit.
 
 ---
 
@@ -587,7 +627,7 @@ const client = await initializeClient({
 ```typescript
 await client.logout({
   redirectTo: "/signed-out",
-  wipeLocal: true,         // delete all locally cached document data + KV cache
+  wipeLocal: true,         // delete all locally stored database copies + KV cache
   revokeOffline: true,     // also delete the persisted offline grant
   clearOfflineIdentity: true, // default true — drop in-memory offline identity
   waitForDisconnect: true, // wait for WS close before resolving
@@ -626,7 +666,7 @@ Components inside the gate **don't** need to null-check `currentUser` or watch `
 
 ### Onboarding hand-off (template)
 
-Every sign-in method in the template funnels through a shared `/onboarding` route (`PrimitiveOnboarding`): `PrimitiveLogin` (OTP verify and passkey conditional UI) and the OAuth/magic-link callback push to it with `continueURL`, `isNewUser`, and `promptAddPasskey` as query params (state survives a refresh), and the route handles profile completion and the passkey prompt before navigating to the continue URL. Configure the target with `onboardingRoute` or `onboardingUrl` on `PrimitiveLogin`/`PrimitiveOauthCallback`; omit both and sign-in navigates straight to the continue URL. Customize the step (name/avatar required or optional, passkey prompt) via the `PrimitiveOnboarding` props where the route is declared.
+Every sign-in method in the template funnels through a shared `/onboarding` route (`PrimitiveOnboarding`): `PrimitiveLogin` (OTP verify and passkey conditional UI) and `PrimitiveSignInCallback` (the emailed-link/OAuth callback page) push to it with `continueURL`, `isNewUser`, and `promptAddPasskey` as query params (state survives a refresh), and the route handles profile completion and the passkey prompt before navigating to the continue URL. `PrimitiveLogin` takes `onboardingRoute` or `onboardingUrl` to configure the target (omit both and sign-in navigates straight to the continue URL); `PrimitiveSignInCallback` always hands off to the route named `"onboarding"` — rename it in `src/router/routes.ts` if you rename the route. Customize the step (name/avatar required or optional, passkey prompt) in `PrimitiveOnboarding.vue` directly — it's template code, not a props contract.
 
 ### Reactive watchers (downstream stores)
 
@@ -646,20 +686,20 @@ watch(
 ### Initialization order
 
 1. Auth ready (`isAuthenticated` true, or `await client.waitForAuthReady()`)
-2. Open documents (`documents.open(...)`)
+2. Subscribe to databases (`db3.subscribe(...)`)
 3. Query data
 
-Don't open documents or hit data APIs before step 1.
+Don't subscribe to databases or hit data APIs before step 1.
 
 ---
 
 ## Deferred Grant Resolution at Signup
 
-Sign-in resolves any pending `DeferredDocumentPermission` and `DeferredGroupAdd` records for the user's email automatically inside `UserProvisioningService`.
+Sign-in resolves any pending database shares and group adds addressed to the user's email automatically.
 
 Implications:
 
-1. **Don't re-grant after signup.** If a doc was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
+1. **Don't re-grant after signup.** If a database was shared with the email pre-signup, the new user already has access — the deferred grant resolved automatically.
 2. **Domain-mode apps re-validate at resolution.** Deferred grants for emails outside allowed domains are silently dropped.
 3. **No WebSocket event announces the resolution.** Refresh the inviter's UI on their next read.
 
@@ -678,7 +718,7 @@ import {
   isPlausibleInviteToken,
   setPendingInviteToken,
   getPendingInviteToken,
-  clearPendingInviteToken,
+  settleInviteToken,
 } from "@/lib/inviteToken";
 
 // Stash on the accept page when user is signed out:
@@ -689,20 +729,23 @@ if (!user.isAuthenticated && isPlausibleInviteToken(rawToken)) {
 // Consume during auth (done automatically by userStore):
 const inviteToken = getPendingInviteToken() ?? undefined;
 await client.otpVerify(email, code, { inviteToken });
-if (inviteToken) clearPendingInviteToken();
+if (inviteToken) settleInviteToken(inviteToken); // pending → carried
 ```
 
-The token is saved to `sessionStorage` under the key `"primitive:pendingInviteToken"`. The template's `userStore` automatically reads and forwards it through every auth path — `login()` (OAuth), `verifyOtp()`, the magic-link callback, and `registerPasskey()`. For OAuth (which round-trips through Google), the token also rides in the OAuth `state` parameter so the callback page can recover it even if the OAuth response opens in a tab without the original `sessionStorage`.
+The token is saved to `sessionStorage` under the key `"primitive:pendingInviteToken"`. The template's `userStore` automatically reads and forwards it through every auth path — `login()` (OAuth), `verifyOtp()`, the magic-link callback, and `registerPasskey()`. For OAuth and emailed links, the token also rides in the `state` parameter so the callback page can recover it even when the link opens in a tab without the original `sessionStorage`.
+
+After a sign-in that sent it, the token moves to `"primitive:carriedInviteToken"`, which the accept page reads when the visitor returns and which is never sent to another sign-in.
 
 **`InviteAcceptPage` (template-provided):** The template ships a ready-made component at `src/pages/InviteAcceptPage.vue`, routed at `/invite/accept?inviteToken=...`. It handles:
 
+- **Preview** — reads `client.invitations.preview(token)` and shows what the invitation shares, to signed-in and signed-out visitors.
 - **Signed-in user** — prompts "Accept with this account or sign out and use a different one." Calls `client.invitations.accept(token)` on confirm.
-- **Signed-out user** — stashes the token in `sessionStorage` and redirects to login. After sign-in the pending token is consumed inside the auth method.
-- **Error states** — `INVITE_TOKEN_INVALID` (the one code for an invalid, expired, or already-redeemed token) and generic server errors.
+- **Signed-out user** — stashes the token in `sessionStorage` and redirects to login with `continueURL=/invite/accept`. The auth method sends the token, so the server accepts the invitation during sign-in, and the visitor lands back on the page, which shows the invitation accepted. A sign-in that sent no token (a passkey sign-in) leaves it pending, and the page accepts it on return without asking again.
+- **Error states** — unknown or revoked links, expired and already-accepted invitations, `INVITE_TOKEN_INVALID` from accept, and a retryable state when the preview can't be read after sign-in.
 
 If you're using the template, this route is already wired in `src/router/routes.ts`. Point your invitation emails at `${yourApp.baseUrl}/invite/accept?inviteToken=${token}`. You do **not** need to rebuild any of this.
 
-**When building on the raw API** (without the template): stash and restore the token manually, pass it to the auth method that completes sign-in, and clear it immediately afterward. The `isPlausibleInviteToken` helper (16–512 chars, URL-safe charset) guards against obviously invalid input before touching storage.
+**When building on the raw API** (without the template): stash and restore the token manually, pass it to the auth method that completes sign-in, and never send it to a later sign-in: a used token fails that sign-in with `INVITE_TOKEN_INVALID`. The `isPlausibleInviteToken` helper (16–512 chars, URL-safe charset) guards against obviously invalid input before touching storage.
 
 ---
 
@@ -730,13 +773,15 @@ Guardrails:
 - Only `+primitivetest<suffix>` derivatives are eligible. The bare base is never a test account.
 - First verify provisions the derived user through the standard signup path and returns the real `isNewUser`, so first-run/new-user flows are testable through the bypass. Signup-mode gates apply as 403s exactly like a normal signup: `INVITATION_REQUIRED` (invite-only, no invitation), `ADDED_TO_WAITLIST` (invite-only with waitlist — the address is added), `DOMAIN_NOT_ALLOWED` (domain mode); an `inviteToken` is honored and provisions with the invitation's role (member-role invitations only — see the reserved-email boundary below).
 - Issued tokens are short-lived (~30 minutes) and carry a `primitiveBypass: true` claim that gets re-checked on every request, so removing the base from the whitelist revokes sessions immediately.
-- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths (e.g. `client.notifications.send()`) need a real admin sign-in.
+- `+primitivetest*` accounts can sign in as ordinary members but are reserved at admin / owner / invitation boundaries — they cannot hold those roles. Admin-only paths need a real admin sign-in.
 
 The whitelist is `[app].testAccountBaseEmails` in `app.toml` (max 50 bases per app), applied with `primitive config push --only app`. The web-admin settings UI edits the same list.
 
+Every user listing marks these accounts with `testUser: true` and filters them with `testUsers=include|exclude|only`: `primitive users list --test-users exclude`, `ctx.users.list({ testUsers: "exclude" })`, and the users REST endpoint. The admin console's Users page hides them by default.
+
 **Invite-only apps: pre-create the member.** A fresh derived address on an invite-only app is gated at the email step (`INVITATION_REQUIRED` / `ADDED_TO_WAITLIST`) before any code is accepted. For CI, skip the invitation flow: `primitive users create <base>+primitivetest-<x>@<domain>` adds the membership directly (no invitation email), and the OTP sign-in with `"000000"` then proceeds as an existing member (the response's `isNewUser` is `false` — pre-created members can't exercise new-user flows).
 
-**Entitlement-gated features: grant via an admin metadata write.** When features key off resource metadata (subscription tier, feature flags), an app-level owner/admin can set the test user's state directly — `primitive metadata set user <userId> <category> --data '{...}'` — because owners/admins bypass category write rules (see the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md)). The full CI sequence: whitelist the base once, `users create` the derived address, sign in with `"000000"`, grant metadata — a headless session gets a fresh, entitled member with zero human interaction.
+**Entitlement-gated features: grant via a property write.** When features key off a [user property](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) (subscription tier, feature flags), an app owner or admin sets the test user's state directly — `primitive users set-properties <userId> --data '{...}'`.
 
 **Don't use this in production user flows.**
 
@@ -748,15 +793,14 @@ The `email-sign-in` email is one of the transactional types Primitive sends; ove
 
 ---
 
-## Implementation Checklist
+## Gotchas {#implementation-checklist}
 
-1. Call `getAuthConfig()` to discover enabled methods before rendering UI.
-2. Implement at least one primary method (OAuth or Magic Link).
-3. Handle the OAuth callback (`code` + `state`) and the Magic Link `magic_token`.
-4. Listen to `auth-failed` and `auth:onlineAuthRequired` (minimum) to prompt re-login.
-5. Catch `AuthError` and switch on `err.code` (use `AUTH_CODES` constants).
-6. Gate your app layout on `isAuthenticated` so child components can assume `currentUser`.
-7. Watch `isAuthenticated` reactively in downstream stores (it changes both directions).
-8. Sequence: auth ready → open documents → query data.
-9. The template's `/onboarding` route owns the post-sign-in passkey prompt and profile completion for every method; a hand-rolled auth UI should offer passkey registration when `promptAddPasskey` is true after verify.
-10. Customize email templates via CLI if you need branded auth emails.
+- **Check method availability before rendering sign-in controls.** Use `getAuthConfig()` so disabled providers are not offered.
+- **Wait for authentication before loading app data.** Initialize auth, subscribe to databases, then run queries. React to later sign-out as well as sign-in.
+- **Preserve invitation tokens through redirects.** Pass the token into sign-in verification; use explicit acceptance for an already signed-in user.
+- **Keep email code entry available.** A sign-in link may be opened on a device without the app.
+- **Use error codes for recovery.** Show your own message and retain a generic fallback for unknown errors.
+
+- **A network interruption is not proof of sign-out.** Use `auth-failed` and `auth:onlineAuthRequired` to decide when to request sign-in again.
+- **A headless job must handle `access_token_rejected`.** The client keeps a refused access token; set a new token or stop the job.
+- **Offer passkey registration after sign-in.** The template’s onboarding route handles this; custom UI should check `promptAddPasskey`.

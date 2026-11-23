@@ -1,10 +1,10 @@
 # Users, Groups, and Access Control in Primitive
 
-Guidelines for modeling user relationships and managing access control with Primitive's built-in user system and groups.
+Primitive manages user identity and profiles. Use groups to model teams, roles, and relationships, then check membership in a function's `authorize`, a rule set, or a metadata rule.
 
 ## Core operations
 
-The key client calls, compiled against the real clients as part of the docs build. The dense reference below adds the result shapes, result-status branching, and CEL access-control detail.
+Start with these client operations.
 
 ### Look up users
 
@@ -16,13 +16,13 @@ Per-user lookups use `client.users.getBasic(id)`, `client.users.getProfiles([ids
 
 {{ example: users-and-groups/group-membership }}
 
-### Grant document access to a group
+### Share a database with a group
 
-{{ example: users-and-groups/grant-group-document }}
+{{ example: users-and-groups/grant-group-database }}
 
 ## Core Concept: Built-in User Model
 
-Primitive provides a built-in user model that every app should leverage. **Do not reinvent user identity.** The platform manages user accounts, authentication, and basic profile information — your app builds on top of this.
+Use the platform user as the source of truth for identity. Store app-specific fields separately and reference `userId`.
 
 ### What the platform provides
 
@@ -49,9 +49,35 @@ Its fields: `refreshNetwork` and `refreshIfOlderThan` (both refresh *behind* the
 
 ### Supplementing user data — not replacing it
 
-For app-specific user data (preferences, settings, profile fields beyond name/email/avatar), extend the platform user rather than creating a parallel user model:
+For app-specific user data (preferences, settings, profile fields beyond name/email/avatar), extend the platform user rather than creating a parallel user model. For a handful of typed fields, declare them as [user properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) — `user-properties.toml`, pushed with `primitive config push`, read with `ctx.users.get`/`client.me.get` and written with `ctx.users.setProperties`/`client.me.update`. Reach for a per-user database (below) only for data too large or unstructured to be a property.
 
-**Do this:**
+**Do this (a per-user database, for larger personal data):**
+
+Declare the `profile` type the example creates, and push it with `primitive config push` before the first create:
+
+```toml
+# primitive/dev/db3-types/profile.toml
+[type]
+name = "profile"
+
+[models.appUsers]
+class_name = "AppUser"
+
+[models.appUsers.fields.id]
+type = "id"
+auto_assign = true
+indexed = true
+required = true
+
+[models.appUsers.fields.email]
+type = "string"
+indexed = true
+unique = true
+required = true
+
+[models.appUsers.fields.name]
+type = "string"
+```
 
 {{ example: users-and-groups/supplement-user-data }}
 
@@ -80,9 +106,12 @@ user.id = generateNewId()         // Use platform userId instead
 
 | Storage | Use case |
 |---------|----------|
-| **Root document** | Personal settings, preferences (auto-created per user, never shared) |
-| **User's document** | App-specific profile data that follows document sharing rules |
-| **Database** | User metadata visible to other users (e.g., public profile, reputation score), read and written through a server function |
+| **A [user property](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md)** | A handful of typed fields on the user — a plan, a preference, a unique external id — optionally exposed to clients |
+| **A per-user database** (`getOrCreateWithAlias` with `scope: "user"`) | Larger or unstructured personal data — documents, history — private to the user |
+| **A shared database** (a team's or project's) | Profile data the people sharing that database see |
+| **A sync-off database read through a server function** | User data others see only in part (e.g., a public profile, a reputation score), each caller getting what the function returns |
+
+See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#partitioning-patterns).
 
 ### Looking up users
 
@@ -102,6 +131,12 @@ primitive users list
 # name search (backed by a global search index on User.name).
 primitive users list --search "ali"
 
+# Real users only (`only`: just the +primitivetest test users; default
+# `include`). Every row carries `testUser`. A filtered page also reports
+# `scanned` and can be empty with `hasMore: true`: keep following the cursor.
+# The REST endpoint takes the same `testUsers=include|exclude|only`.
+primitive users list --test-users exclude
+
 # Block a user from signing in to this app, and restore them. Disabling signs
 # them out of this app (sessions deleted, API tokens revoked, open connections
 # dropped) and is reversible: memberships and ownership are untouched, and
@@ -109,9 +144,27 @@ primitive users list --search "ali"
 # only owner cannot be disabled.
 primitive users disable <user-id> [-y]
 primitive users enable <user-id>
+
+# Set a user's display name and avatar, at creation or afterwards. Each
+# set-profile flag changes only its field; the user can still change their own
+# profile afterwards.
+primitive users create user@example.com --name "Ada Lovelace" --avatar-url https://example.com/ada.png
+primitive users set-profile <user-id> [--name <name>] [--avatar-url <url> | --clear-avatar]
 ```
 
-Console admin accounts have their own pair, `primitive admins disable <admin-id>` / `primitive admins enable <admin-id>` — super-admin only, like every `primitive admins` verb.
+An app owner or admin sets the same profile over REST with `PATCH /app/{appId}/api/users/{userId}/profile` and a body of `{ name?, avatarUrl? }` (`avatarUrl` is an `http:` or `https:` URL; `null` clears it); a server function calls `ctx.api.users.setProfile({ userId, body: { name } })`. An invalid value answers 400 with code `INVALID_PROFILE`.
+
+`--search` only matches an id, an email or a name substring (both `list` and `lookup`/`getBasic` read the live user records, so they never lag). For a records-style filter, sort, count or aggregate over the app's users — on `role`, `status`, `addedAt`, or a [declared property](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md) (`properties.<name>`) — use `primitive users query`, `count` and `aggregate` {{ status: cli:users query, cli:users count, cli:users aggregate }} instead:
+
+```bash
+primitive users query --filter '{"role":"admin"}' --sort '{"addedAt":-1}' --limit 50
+primitive users count --filter '{"status":"disabled"}'
+primitive users aggregate --op count --group-by role
+```
+
+These three read a per-app user index that follows a write within seconds, not the live user records, so a user just created, changed or deleted may take a moment to appear. `--filter`/`--sort` take the same grammar as a `db3` records query. `query --json`'s `meta.scans` names a field whose filter or sort scanned every row instead of using an index (unindexed base fields are `avatarUrl` and `disabledAt`; a property only if not declared `indexed`). `primitive users index status|rebuild|reconcile|limits` (also beta) inspects and operates that index: generation, shards with bounds and counts, the apply queue, last apply/reconcile slice (with its repair counts: `stamped`, `reprojected`, `deleted`, `applied`, `misplaced`, and the per-user claim check's `swept`/`claimed`/`claimConflicts`), the revalidation state (`oldestVerifiedAt`, `replicaCursor`, `sourceCursor`, `lastSlice`, `recentlyRead`), and shard limits.
+
+**Watch out when a record looks stale:** the index corrects any record within 24 hours even if a write never reached it, but a record `query`/`count`/`aggregate` just returned is re-checked and corrected sooner — within about a minute (the read hint) — rather than waiting its turn in that 24-hour sweep; this holds even for an app with no other traffic. `primitive users index reconcile` forces one revalidation slice on demand, and `reconcile --wait` repeats it until every record and member is checked, which is faster than waiting for the schedule.
 
 For in-app user pickers, call the REST endpoint directly:
 
@@ -127,73 +180,82 @@ It returns `{ items, nextCursor }`, where each row is `{ userId, email, name, av
 Every user has one of three built-in roles: `"owner"`, `"admin"`, or `"member"` (default). **Prefer groups over app roles** for application-level role modeling — groups are multi-tenant by context (a user can be `editor` in one project, `viewer` in another) while app roles are global per-app.
 
 Behavior:
-- **`owner`** and **`admin`** users **bypass all rule-set evaluation** for groups, collections, and database type rules. Do not try to restrict them via rules.
+- **`owner`** and **`admin`** users **bypass the roles** of every group and collection, and can read and write every database in the app. Do not try to restrict them with roles.
 - **`member`** is the default — access is determined by direct permissions and group memberships.
-- In CEL rule contexts the field is `user.role` (NOT `user.appRole`). See the [Access Control guide's identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere).
+- In CEL rule contexts the field is `user.role` (NOT `user.appRole`). See the [Access Control guide's identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context).
 
 ## Current User: `client.me`
 
-The current authenticated user has its own namespace. Use it for "me"-scoped reads and writes — profile, avatar, the user's owned and shared documents, and pending document invitations.
+The current authenticated user has its own namespace. Use it for "me"-scoped reads and writes — profile and avatar.
 
 ### Profile
 
 {{ example: users-and-groups/me-profile }}
 
-`get()` is cache-backed; `update()` and `uploadAvatar()` clear that cache automatically. `get()` returns `{ userId, email, name, appRole, appId, avatarUrl? }` (null when signed out).
+`update()` accepts only an `http:` or `https:` avatar URL; any other scheme answers 400. `get()` is cache-backed; `update()` and `uploadAvatar()` clear that cache automatically. `get()` returns `{ userId, email, name, appRole, appId, avatarUrl? }` (null when signed out).
 
-### Documents view
+### Databases the user can open
 
-{{ example: users-and-groups/me-documents }}
-
-{{#lang ts}}
-- `ownedDocuments()` is cache-backed and offline-aware. Pass `returnPage: true` to get a paginated `DocumentListPage`; the root document is excluded by default (`includeRoot: false`).
-{{/lang}}
-{{#lang swift}}
-- `ownedDocuments()` is cache-backed and offline-aware and returns `[DocumentInfo]`. Use `ownedDocumentsPage(...)` when you need a paginated `DocumentListPage`; the root document is excluded by default (`includeRoot: false`).
-{{/lang}}
-- `sharedDocuments()` returns the unified `{ items, nextCursor, hasMore }` envelope (raw-JSON `nextCursor`, NOT base64url — pass it back as the `cursor` option). Group- and collection-scoped shares do NOT appear here — those are accessed via the group or collection. Each `SharedDocument` extends `DocumentInfo`, so rows carry the base document fields plus the share extras (`permission`, `source`, `grantedBy`).
-
-Together, `me.ownedDocuments()` + `me.sharedDocuments()` give the two halves of "documents the user has direct access to." For group- or collection-scoped access, iterate `groups.listUserMemberships(...)` / `client.collections.list()` and call `groups.listDocuments` / `collections.listDocuments`.
+`client.db3.listMine()` lists the databases the signed-in user can open. See the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access).
 
 ## Core Concept: Groups
 
-Groups organize users and control access to documents and databases. Instead of granting permissions to individual users, grant access to a group and all members inherit it.
+Groups organize users and control access to databases and collections. Instead of granting permissions to individual users, grant access to a group and all members inherit it.
 
-Groups are identified by a `(groupType, groupId)` pair, allowing multiple taxonomies:
-- `team/engineering` — team membership
-- `department/sales` — organizational unit
-- `role/reviewer` — functional role
-- `class/math-101` — context-specific grouping
-- `parent-of/student-123` — relationship modeling
+Groups are identified by `groupId` alone, unique across the app — no type, no per-app-type taxonomy. The server assigns the id, a ULID, when the group is created and returns it: store it with what the group belongs to (the project's record, the student's row) and look it up from there — see [Common Patterns](#common-patterns).
 
 ### Quick start
 
-1. Create a group with `client.groups.create({ groupType, groupId, name })` — `groupId` is optional; omit it (or pass `null`) and the server assigns a ULID, returned in the response.
-2. Add members with `client.groups.addMember(...)` (by `userId` or `email`).
-3. Grant group access to a document with `client.documents.grantGroupPermission(...)`.
-4. Check membership where database data is read: in a server function's `access` gate (`isMemberOf('team', 'engineering')`) or, when the group depends on the input, in its code.
+1. Create a group from a server function (`ctx.api.groups.create({ body: { name } })`) or the admin API (`primitive groups create`), and keep the `groupId` it returns; a client session's create is refused. See [Creating Groups](#creating-groups).
+2. Add members with `client.groups.addMember(groupId, ...)` (by `userId` or `email`), each a `manager` or `member` (the default).
+3. Share a database with the group with `client.db3.permissions(db3Id).grantGroup({ groupId, permission })`.
+4. For a sync-off database read through a server function, check membership in the function's `authorize` method: `requireMember(() => '<groupId>')` with the id the create returned, or `requireMember((input) => input.groupId)` when the group depends on the input.
 
-The full create/list/get/update/delete surface is in [Managing Groups](#managing-groups); membership in [Managing Members](#managing-members).
+The full list/get/update/delete surface is in [Managing Groups](#managing-groups); membership in [Managing Members](#managing-members); roles, custody and transfer in [Group Roles](#group-roles).
+
+## Creating Groups
+
+A group is created only by a server function (`ctx.api.groups.create`) or through the admin API — the CLI's `primitive groups create`, or `POST /admin/api/apps/{appId}/groups`. A client session's `client.groups.create()` is refused with `403 FUNCTION_ROUTE_FUNCTION_ONLY`.
+
+```bash
+primitive groups create --name "Engineering" --owner <user-id>   # that user holds the owner row; the app holds it without --owner
+```
+
+```ts
+import { defineFunction, requireSignedIn } from "primitive-functions";
+
+export default defineFunction({
+  input: [],
+  authorize: requireSignedIn(),
+  handler: async (input, ctx) => {
+    return ctx.api.groups.create({
+      body: {
+        name: "Engineering",
+        custodian: `user:${ctx.user!.userId}`,   // defaults to the calling user; "app" for the app
+        initialMembers: [{ userId: "user-456", role: "manager" }],
+      },
+    });
+  },
+});
+```
+
+The server assigns the group's id, a ULID, and returns it as `groupId` in the response — the same way databases and collections get their ids. A create names no id: a body that sends `groupId` (any value, `null` included) is refused with `400 GROUP_ID_NOT_ACCEPTED`. The creator does not become a member unless the create names them (directly, or via `custodian`/`initialMembers`) — there is no `autoAddCreator`.
 
 ## Managing Groups
 
-### Create / List / Get / Update / Delete
+### List / Get / Update / Delete
 
 {{ example: users-and-groups/group-crud }}
 
-If the group type has `autoAddCreator: true` (default), the creator is automatically added as a member.
+`groups.list()` returns a paginated `{ items: GroupInfo[], nextCursor?, hasMore? }`. `ListGroupsOptions` supports `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups (e.g. `_col-reader`/`_col-writer` backing collection sharing) — filtered out by default; only set it for admin tooling. Its `type` filter is deprecated and matched against the group's hidden stored type, not a live taxonomy.
 
-`groupId` on create is optional — a supplied id keeps its existing validation (`#` banned, no `_`-prefixed reserved type, `409` on a duplicate); a non-string supplied value is rejected with `400 "groupId must be a string"`, an empty string with `400 "groupId cannot be empty"`. Omit it (or send `null`) to have the server assign a ULID, returned as `groupId` in the response — the same pattern documents, databases, and collections use for server-assigned ids.
-
-`groups.list()` returns a paginated `{ items: GroupInfo[], nextCursor?, hasMore? }`. `ListGroupsOptions` supports `type`, `limit`, `cursor`, and `includeSystem: true` to include platform-managed internal groups whose `groupType` is prefixed with `_` (e.g. `_col-reader`/`_col-writer` backing collection sharing). These are filtered out by default — only set `includeSystem` for admin tooling.
-
-`groups.get()` returns `{ appId, groupType, groupId, name, description?, memberCount, createdAt, createdBy, modifiedAt }`. `update()` takes optional `name` and/or `description`. `delete()` cascade-deletes all memberships and group permissions.
+`groups.get()` returns `{ appId, groupId, name, description?, memberCount, custodian, settings, createdAt, createdBy, modifiedAt }` (`custodian` is `"user:<userId>"` or `"app"`, `null` on a group from before custody). `update()` takes optional `name`, `description` and/or `settings`. `delete()` cascade-deletes all memberships and group permissions.
 
 ## Managing Members
 
 ### Add members
 
-Add a member by `userId` (always direct) or by `email` (direct if the email maps to an app user, deferred otherwise). Pass **either** `userId` or `email`, never both — the server rejects requests carrying both.
+Add a member by `userId` (always direct) or by `email` (direct if the email maps to an app user, deferred otherwise). Pass **either** `userId` or `email`, never both — the server rejects requests carrying both. `role` is `manager` or `member` (the default); `owner` is the custodian's row and only a server function or the admin API writes it.
 {{#lang ts}}
 `AddGroupMemberParams` is a discriminated union and the types enforce the either/or at compile time.
 {{/lang}}
@@ -203,11 +265,17 @@ Add a member by `userId` (always direct) or by `email` (direct if the email maps
 {{ example: users-and-groups/add-member-branch }}
 
 Status meanings:
-- `"added"` — new membership created. `{ userId, userName?, userEmail?, addedAt, addedBy }`.
-- `"already_member"` — idempotent no-op. `addedAt`/`addedBy` reflect the pre-existing row.
-- `"pending_signup"` — email not yet an app user. Server created an `AppInvitation` + `DeferredGroupAdd`: `{ email, appInvitationCreated, deferredId, expiresAt, groupType, groupId, invitationId, inviteToken }`. Use `inviteToken` to build your own accept URL; the platform's default email is sent unless the underlying invitation was created with `sendEmail: false`.
+- `"added"` — new membership created. `{ userId, role, userName?, userEmail?, addedAt, addedBy }`.
+- `"already_member"` — idempotent no-op. `role`/`addedAt`/`addedBy` reflect the pre-existing row.
+- `"pending_signup"` — email not yet an app user. Server created an `AppInvitation` + `DeferredGroupAdd`: `{ email, appInvitationCreated, deferredId, expiresAt, role, invitationId, inviteToken }`. No email is sent: build the accept URL from `inviteToken` and deliver it yourself (see [Invitations](AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.md)).
 
 Until a deferred add resolves, `isMemberOf` returns false for that email's user — do not assume membership before sign-up/accept.
+
+From the CLI (the admin API), name the member by user ID or by an existing app user's email:
+
+```bash
+primitive groups members add <group-id> <user-id|email> --role manager
+```
 
 **Don't do this:**
 
@@ -231,272 +299,199 @@ Pass `include: .profiles` to join each member's profile in the same call. Withou
 
 {{ example: users-and-groups/remove-member }}
 
-The email form is the right call when you don't know — and don't want to branch on — whether the target has signed up yet. If a direct membership exists, it's removed; otherwise the pending `DeferredGroupAdd` for that email is canceled. Revoke the whole `AppInvitation` only when you want to cancel **every** grant attached to it (group add, document share, app-join right) at once.
+The email form is the right call when you don't know — and don't want to branch on — whether the target has signed up yet. If a direct membership exists, it's removed; otherwise the pending `DeferredGroupAdd` for that email is canceled. Revoke the whole `AppInvitation` only when you want to cancel **every** grant attached to it (group add, database share, app-join right) at once.
 
 ### List pending invitations for a group
 
 {{ example: users-and-groups/group-pending-invitations }}
 
-Use this to render the "pending members" section of a group sharing UI without having to filter the lower-level `client.invitations.listDeferredGrants()` surface.
+Use this to render the "pending members" section of a group sharing UI.
 
-Authorization is the same gate as `listMembers`: the group's `member.list` rule, with app admins/owners always allowed and direct members of the group allowed as a fallback even under a stricter custom rule. A cross-group manager whose rules let them list a group's members can therefore also see its pending invitations — being a member of the group is not required.
-Each entry carries a `deferredId` — cancel that invitation by revoking the deferred grant{{#lang ts}}: `client.invitations.revokeDeferredGrant(deferredId, "group")`{{/lang}}{{#lang swift}}: `client.invitations.revokeDeferredGrant(deferredId: entry.deferredId, type: .group)`{{/lang}}. Cancelling an invitation another caller created is allowed for app admins/owners, the invitation's creator, or a caller who passes the group's `member.delete` rule (evaluated with `target.email` set to the invitee's email, so email-scoped rules work on the pending path).
+Pending invitations are visible to whoever can list members — the owner and managers always, other members when `settings.memberList` is `"members"` (the default) — plus app admins and owners.
+
+Cancel one with {{#lang ts}}`client.groups.revokePendingInvitation(groupId, entry.invitationId)`{{/lang}}{{#lang swift}}`client.groups.revokePendingInvitation(groupId: groupId, invitationId: entry.invitationId)`{{/lang}}: it removes the invitation's pending add to this group only. Cancellation requires app-admin authority, being the one who created the invitation, or the owner/manager role on the group.
 
 ### List a user's memberships
 
 {{ example: users-and-groups/user-memberships }}
 
-## Group Type Configuration
+## Group Roles
 
-Group types are configured via TOML config files and the `primitive config` command (version-controlled alongside your code).
+Every group has the same fixed roles, enforced by the platform — no types, no rule sets, no per-type configuration:
 
-**File:** `primitive/dev/group-type-configs/team.toml`
+| Role | Can |
+|---|---|
+| `owner` | Everything a manager can, plus delete the group and transfer ownership. One per group: the custodian. |
+| `manager` | Add, remove and re-role members up to manager; edit name, description and settings. |
+| `member` | Read the group; list members when `settings.memberList` is `"members"` (the default). |
 
-```toml
-[groupTypeConfig]
-groupType = "team"
-ruleSetName = "team-rules"     # optional — name of an attached rule set
-autoAddCreator = true          # auto-add creator as member when the config exists (default: true)
+The owner is the user named by `custodian`, or nobody while `custodian` is `"app"`. `POST /groups/{groupId}/transfer` with `{ to: "user:<userId>" | "app" }` moves the custodian and the owner row together (the previous owner becomes a manager); a session may move a group only between users, and a server function or the admin API also to and from the app. While a transfer is in progress, another transfer and any owner-row change answer `409 TRANSFER_PENDING`. A server function lists one custodian's groups with `ctx.api.groups.listByCustodian({ custodian, cursor })`. Removing a user from the app passes each group they hold to the app when anyone else is a member, and deletes it otherwise. `group-type-configs/` is no longer part of a config tree: `primitive config push` refuses a tree holding a file there, before any request, naming each file and the replacement:
 
-[metadata.self]
-categories = ["config"]        # optional — self-reads like md.self.config.* are
-                                # inferred from the rule set; declare here only to
-                                # load a category no rule names directly
-```
+- A rule the roles do not express → a server function whose `authorize` uses `requireMember(groupIdOf, role)` (see the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md)).
+- A group metadata manifest (`[metadata.self]`, `[metadata.paths.*]`, `secrets`) → a metadata category config.
 
-A group type config reads `md.self.<category>.<key>` in its rule set with **no declaration** — a category a rule names is inferred and loaded automatically — plus a reserved, schema-less `attrs` category (`groupType`, `groupId`, `name`, `createdBy`). An explicit metadata manifest (`[metadata.self]`/`[metadata.paths.*]`/top-level `secrets`) is also supported and unions with the inferred set — declare a category no rule names, a traversal path, or a secret. Collection type configs take the identical `[metadata]` block. See the [Resource Metadata guide](AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.md).
+## Groups and databases
 
-Push to the server:
+Share a synced database with a group, and every member gets the permission; access follows membership as members join and leave. The grant call is shown in [Share a database with a group](#share-a-database-with-a-group) above (permission is `"reader"` or `"read-write"` — NOT `"write"` or `"view"`). A server function grants the same way with `ctx.api.db3.grantGroupPermission({ db3Id, body: { groupId, permission } })`.
 
-```bash
-primitive config push
-```
+**Permission resolution:** A user's effective permission on a database is the **highest** across their direct grant and all their groups' grants. If a user has `reader` directly but their team has `read-write`, they get `read-write`.
 
-**Defaults & gotchas:**
-- `autoAddCreator` defaults to `true` **only when a group type config exists** for the type. With **no config at all**, no auto-add happens.
-- A group type with **no config** falls back to built-in default rules. Per-op fallback also applies: when a configured rule set leaves a `(category, op)` pair undefined, that op resolves against the defaults too. The defaults: `group.create = "true"` (any signed-in member); `group.edit/delete` and `member.create/edit/delete` are creator-only (`user.userId == group.createdBy`); `group.get` and `member.list` allow the creator OR any direct group member (`isMemberOf(group.groupType, group.groupId)`).
-- A group type config with no `ruleSetName` (`ruleSetId: null`) is an **explicit opt-out** and denies everything except admin/owner; it does NOT fall through to defaults. To re-enable defaults, delete the config entirely — remove `group-type-configs/<group-type>.toml` and run `primitive config push --prune`, or call `client.groupTypeConfigs.delete(groupType)`.
+A sync-off database can't be shared, with a group or anyone: members reach its records through **server functions**, so group membership gates the data in two places — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#sync-off):
 
-See the [Configuration guide](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#the-sync-loop) for the full sync loop (`init`, `pull`, `diff`, `push`).
+- **The function's `authorize`** — checks the caller's identity with helpers (`requireRole`, `requireMember`) or the `auth` context directly (`auth.hasRole`, `auth.isMemberOf`, `auth.memberGroups`, `auth.hasGroupRole` — the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context)). `authorize` also sees the function's input, so a group that depends on it can be checked here directly — and gives owners and admins no implicit bypass.
+- **The function's code** — for a check `authorize`'s helpers don't express, read the caller's memberships in the handler and refuse before touching the records.
 
-## Groups and Documents
-
-Grant a group access to a document. All members inherit the permission.
-
-The grant call is shown in [Grant document access to a group](#grant-document-access-to-a-group) above (permission is `"read-write"` or `"reader"` — NOT `"write"` or `"view"`). To inspect what a group reaches and to manage a document's group grants:
-
-{{ example: users-and-groups/group-resources }}
-
-**Permission resolution:** A user's effective permission on a document is the **highest** across their direct permission and all group memberships. If a user has `reader` direct access but their team has `read-write`, they get `read-write`.
-
-## Groups and Databases
-
-A database can carry a group grant that records every member of the group as a `manager` — an administrative permission record (the only level a group can hold), not a way into the data: the database routes refuse a non-admin caller, so the grant gives members nothing directly. App admins manage it, and a function reads it with `ctx.api.databases.listGroupPermissions` to make its own decisions. A function makes it, declaring `capabilities = ["databases:grantGroupPermission"]`:
+**Authorize patterns:**
 
 ```ts
-await ctx.api.databases.grantGroupPermission({
-  databaseId: input.databaseId,
-  body: { groupType: "team", groupId: "ops", permission: "manager" },
-});
-```
-
-End users reach database records through **server functions**, so group membership gates data in two places — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access):
-
-- **The function's `access` gate** — CEL over the caller's identity: `user.userId`, `user.role`, `isMemberOf`, `memberGroups`, `hasRole` (the shared identity context, documented in the [Access Control guide](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere)). The gate does not see the function's input, so it checks fixed groups and roles. App owners and admins bypass it.
-- **The function's code** — for a group that depends on the input (the team that owns `input.databaseId`, the student in `input.studentId`), read the caller's memberships and refuse before touching the rows.
-
-**Gate patterns:**
-
-```
-// Any member of one fixed group
-access = "isMemberOf('staff', 'all')"
+// Any member of one fixed group (the groupId its create returned)
+authorize: requireMember(() => "01JD7E8V3K9Q2N6R4T5W0X1Y2Z"),
 
 // Either of two fixed groups
-access = "isMemberOf('staff', 'all') || isMemberOf('support', 'tier-2')"
+authorize: async (input, auth) =>
+  auth.isMemberOf("01JD7E8V3K9Q2N6R4T5W0X1Y2Z") || auth.isMemberOf("01JD7E9A4M2P8S6V3B7C1D5F9G")
+    ? allow()
+    : deny("FORBIDDEN"),
 ```
 
 **Code pattern — membership that depends on the input:**
 
 ```ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { databaseId: string }, ctx) => {
-  // A bare array of { groupType, groupId, name, … }.
-  const teams = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "team" });
-  if (!teams.some((m: { groupId: string }) => m.groupId === input.databaseId)) {
-    throw new Error("Not a member of this team");
-  }
-  return await ctx.db(input.databaseId, "team").model("tasks").query({});
+export default defineFunction({
+  input: ["db3Id", "teamId"],
+  authorize: requireSignedIn(),
+  handler: async (input: { db3Id: string; teamId: string }, ctx) => {
+    // A bare array of { groupId, name, role, … }.
+    const teams = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId });
+    if (!teams.some((m: { groupId: string }) => m.groupId === input.teamId)) {
+      throw new Error("Not a member of this team");
+    }
+    return (await ctx.db3(input.db3Id, "team").model("tasks").query({})).items;
+  },
 });
 ```
 
-**Don't do this — common CEL footguns:**
+**Don't do this — common CEL footguns**, in a rule set or metadata rule:
 
 ```
 // BAD — `user.appRole` does not exist in CEL. Use `user.role` or hasRole().
-access = "user.appRole == 'admin'"
+read = "user.appRole == 'admin'"
 
 // GOOD — checks the caller's app role.
-access = "hasRole('admin')"
+read = "hasRole('admin')"
 
 // BAD — isMemberOf returns bool, not the group. `==` is meaningless.
-access = "isMemberOf('team') == 'engineering'"
+read = "isMemberOf('01JD7E8V3K9Q2N6R4T5W0X1Y2Z') == '01JD7E8V3K9Q2N6R4T5W0X1Y2Z'"
 
 // GOOD
-access = "isMemberOf('team', 'engineering')"
+read = "isMemberOf('01JD7E8V3K9Q2N6R4T5W0X1Y2Z')"
 
 // BAD — memberGroups returns an array, can't compare with ==.
-access = "memberGroups('team') == 'engineering'"
+read = "memberGroups() == '01JD7E8V3K9Q2N6R4T5W0X1Y2Z'"
 
 // GOOD — use `in` for containment.
-access = "'engineering' in memberGroups('team')"
+read = "'01JD7E8V3K9Q2N6R4T5W0X1Y2Z' in memberGroups()"
 
 // BAD — referencing fields not in the context (silently denies; runtime
 // errors are caught and turned into "deny").
-access = "user.email == 'admin@example.com'"   // user.email is not in context
+read = "user.email == 'admin@example.com'"   // user.email is not in context
 ```
-
-## Rule Sets for Groups
-
-Group management operations (create/edit/delete, member add/remove) are gated by **rule sets** — a named bundle of CEL rules per `(category, operation)` pair, defined in `primitive/dev/rule-sets/*.toml` and bound to a group type (`ruleSetName` in the type config — see [Group Type Configuration](#group-type-configuration) above for the binding and per-op fallback rule). The mechanism itself — defining and binding a rule set, `memberGroupsOf` for subject-form membership, owner/admin bypass, `test()`/`debug()` — is documented once in the [Access Control guide's rule sets section](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#rule-sets-management-operations); read that first. This section covers only what's specific to groups: which operations exist, the CEL context each adds, and the built-in defaults. Collections use the same rule-set mechanism under a separate `collection.*` namespace — see [Collection Rule Sets](AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.md#collection-rule-sets) in the Documents guide.
-
-**Resource type:** `group`. **Categories and operations:**
-- `category: "group"` — `create`, `edit`, `delete`, `get` (the read op; use `get` in TOML configs — there is no `read`/`update`).
-- `category: "member"` — `create`, `edit`, `delete`, `list` (there is no `add` — use `create` for "add member").
-
-**Default rule set** — applies to any group type with no group type config:
-
-| Op | Default | Meaning |
-|----|---------|---------|
-| `group.create` | `"true"` | Any signed-in member |
-| `group.edit` | `user.userId == group.createdBy` | Creator only |
-| `group.delete` | `user.userId == group.createdBy` | Creator only |
-| `group.get` | `user.userId == group.createdBy \|\| isMemberOf(group.groupType, group.groupId)` | Creator or direct member |
-| `member.create` | `user.userId == group.createdBy` | Creator only |
-| `member.edit` | `user.userId == group.createdBy` | Creator only |
-| `member.delete` | `user.userId == group.createdBy` | Creator only |
-| `member.list` | `user.userId == group.createdBy \|\| isMemberOf(group.groupType, group.groupId)` | Creator or direct member |
-
-**CEL context**, beyond the [identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context-available-everywhere):
-
-| Variable | Always present? | Description |
-|----------|-----------------|-------------|
-| `group.groupType` | yes | Target group's type |
-| `group.groupId` | yes | Target group's ID (also present at `create` time — server passes the requested ID) |
-| `group.name` | yes | Target group's display name |
-| `group.createdBy` | yes (after create) | userId of the group creator |
-| `target.userId` | only `category: "member"`, ops `create`/`edit`/`delete` | Target user being added/removed. Absent for `member.list`. |
-
-`group.description` is **NOT** in the rule context — don't reference it.
-
-{{ example: users-and-groups/rule-sets-test }}
 
 ## Common Patterns
 
-For full app architecture examples showing how groups fit alongside documents and databases, see the [Data Modeling guide](AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.md#worked-architectures).
+For full app architectures showing how groups fit alongside databases, see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#partitioning-patterns).
 
 ### Team-based workspace access
 
-Users create teams. Team members get access to team documents and databases.
+A function creates a team and gives the creator its owner row; the team's database is shared with the team's group, so every member reaches it.
 
-**Setup** (via CLI config):
+```ts
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-**File:** `primitive/dev/group-type-configs/team.toml`
-
-```toml
-[groupTypeConfig]
-groupType = "team"
-autoAddCreator = true
+export default defineFunction({
+  input: ["name"],
+  authorize: requireSignedIn(),
+  handler: async (input: { name: string }, ctx) => {
+    return ctx.api.groups.create({ body: { name: input.name } });   // custodian defaults to ctx.user, who gets the owner row
+  },
+});
 ```
 
-**Runtime** (in app code):
+**Runtime** (in app code, once the team's `groupId` is known):
 
 {{ example: users-and-groups/team-workspace }}
 
-When each team has its own database (the database id reused as the team's group id), the function that reads it checks the caller's `team` membership against `input.databaseId` in code — see [Groups and Databases](#groups-and-databases).
+When the team's database has sync off, the function that reads it checks the caller's membership in the team in code — see [Groups and databases](#groups-and-databases).
 
 ### Role-based access (reviewer, editor, viewer)
 
-Use group types as roles within a context.
+Use one group per role per context: the function that creates a project creates its editors and viewers groups and stores their `groupId`s on the project (its record, or its metadata).
 
 {{ example: users-and-groups/role-groups }}
 
-The project comes from the input, so the function checks role membership in code: a write function requires an `editor` membership whose `groupId` is `input.projectId`; a read function accepts `viewer` or `editor`.
+The project comes from the input, so the function checks role membership in code: a write function reads the project's editors `groupId` from where it was stored and requires a membership in it; a read function accepts either role's group.
 
 ### Relationship modeling (parent-child, mentor-mentee)
 
-Use groups to model relationships between users.
+Use one group per relationship, its `groupId` stored on the relationship's subject (the student's record carries `parentsGroupId`).
 
 **Server side** — the function that reads a student's grades checks the relationship before it reads:
 
 ```ts
-import { defineFunction } from "primitive-functions";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-export default defineFunction(async (input: { databaseId: string; studentId: string }, ctx) => {
-  const children = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId, type: "parent-of" });
-  if (!children.some((m: { groupId: string }) => m.groupId === input.studentId)) {
-    throw new Error("Not this student's parent");
-  }
-  return await ctx.db(input.databaseId, "classroom").model("grades").query({
-    filter: { studentId: input.studentId },
-    options: { sort: { date: -1 } },
-  });
+export default defineFunction({
+  input: ["db3Id", "studentId"],
+  authorize: requireSignedIn(),
+  handler: async (input: { db3Id: string; studentId: string }, ctx) => {
+    const classroom = ctx.db3(input.db3Id, "classroom");
+    const student = await classroom.model("students").get(input.studentId);
+    const children = await ctx.api.groups.listUserMemberships({ userId: ctx.user!.userId });
+    if (!student || !children.some((m: { groupId: string }) => m.groupId === student.parentsGroupId)) {
+      throw new Error("Not this student's parent");
+    }
+    const grades = classroom.model("grades");
+    return (await grades.query({ filter: { studentId: input.studentId }, sort: { date: -1 } })).items;
+  },
 });
 ```
 
 The membership check is what ensures parents can only view their own children's grades; the caller never supplies whose relationship is checked.
 
-**Runtime** (in app code):
+**Runtime** (in app code, once the group is created by a server function):
 
 {{ example: users-and-groups/relationship-groups }}
 
 ### Organization hierarchy
 
-Model nested organizational structure with multiple group types.
+Model nested organizational structure as distinct groups — an org, its departments, their teams — each `groupId` stored on the record of the unit it stands for.
 
 {{ example: users-and-groups/org-hierarchy }}
 
-A function can check any level: a fixed one in its `access` gate (`isMemberOf('org', 'acme')`), and one named by the input in its code, with `listUserMemberships({ userId, type: "dept" })`.
+A function can check any level: a fixed one in its `authorize` (`requireMember(() => "<org groupId>")`), and one named by the input in its code, reading that unit's `groupId` and checking it against `listUserMemberships({ userId })`.
 
-## Best Practices
+## Gotchas
 
-### Users
+- Keep each group's `groupId` where the app looks it up (the record or metadata of what the group stands for): the server assigns it, so it cannot be derived from a name.
+- Do not duplicate platform identity fields in an app model.
+- Check `addMember.status`: an email may create a pending invitation rather than an immediate membership.
+- `primitive groups members add <group-id> <email>` adds an existing app user only and creates no pending add: an email with no app user is refused. Use `addMember` with `email` to add someone who hasn't signed up.
+- App owners and admins bypass CEL rules — rule sets, metadata rules. A function's `authorize` gives them no such pass. Test denials as a regular member.
 
-- **Always use the platform user model** for identity. Reference `userId` from the platform, don't generate your own user IDs.
-- **Use `client.users.getBasic()`** to display user info (name, avatar, email). It caches results automatically.
-- **Store supplemental user data** in the root document (personal settings) or in a database (public profile data, read through a server function).
-- **Don't duplicate platform fields.** Name, email, and avatar are managed by the platform — read them from there.
-
-### Groups
-
-- **Choose meaningful group types.** Use types that map to your domain: `team`, `class`, `department`, `parent-of`. The `groupType` is the taxonomy, the `groupId` is the instance.
-- **Use `autoAddCreator: true`** (default) for groups where the creator should be a member (teams, clubs). Set to `false` for groups managed by admins (classes, departments).
-- **Prefer groups over per-user grants** for document access. Easier to manage and audit.
-- **Check group membership in the function** that reads a database, rather than granting database permissions to individual users.
-
-### Access control
-
-- **App owners and admins bypass all group/collection rule-set evaluation.** Design rules for regular members — don't try to restrict owners/admins there.
-- **A function's `access` gate is bypassed by app owners and admins too.** A check in the function's code is not — write it to let them through if they should be.
-- **Check sensitive relationships in code** (parent-child, manager-report): read the caller's memberships and compare against the input.
-- **Keep rule sets simple.** Complex nested CEL expressions are hard to debug. Prefer several focused functions over one function with complex gate logic.
-- **Test rules** with `client.ruleSets.test()` before deploying, and use `client.ruleSets.debug()` to trace evaluation for real users.
-
-## Common Errors
+## Error handling
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 {{#lang ts}}
-| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMember({ email })` or `invitations.revokeDeferredGrant(deferredId, "group")`. |
+| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMember(groupId, { email })` or `groups.revokePendingInvitation(groupId, invitationId)`. |
 {{/lang}}
 {{#lang swift}}
-| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMemberByEmail(groupType:groupId:email:)` or `invitations.revokeDeferredGrant(deferredId:type: .group)`. |
+| `addMember` returns `status: "pending_signup"` | Email isn't an app user yet | Expected. Membership resolves when they sign up or accept via `inviteToken`. Render a pending-members UI; cancel via `removeMemberByEmail(groupId:email:)` or `groups.revokePendingInvitation(groupId:invitationId:)`. |
 {{/lang}}
 | `addMember` returns `status: "already_member"` | User already in the group | Idempotent — no error. |
-| 409 on `groups.create` | A group with that `(groupType, groupId)` already exists | Use a different `groupId` or call `groups.get` first. |
-| 403 on `groups.create` (member role) | The group type has a config with no rule set attached (explicit opt-out), OR a configured `group.create` rule denied the caller | Either delete the group type config to fall back to the permissive default (`group.create = "true"`), attach a rule set with a permissive `group.create`, or call as an owner/admin. |
-| 403 on `groups.create` with `groupType` starting with `_` | Reserved system group type | Pick a different prefix. |
-| Group permission not taking effect on document | User hasn't reopened the document | Close and reopen the document to pick up new group permissions. |
-| CEL `isMemberOf` returns false unexpectedly | Wrong `groupType`/`groupId` casing, user not yet added (deferred), or membership cache stale | Verify with `listUserMemberships(userId)`; remember email-based adds defer until sign-up. |
-| Rule evaluation always denies, no obvious reason | Expression references a field not in the context (e.g. `user.appRole`, `group.description`) — runtime errors are silently turned into deny | Run `client.ruleSets.debug({...})` and inspect `trace`/`expression`/`context`. |
-| Can't restrict admin/owner access via rules | By design — app owner/admin bypass all rule evaluation | Use group memberships for fine-grained access; don't try to gate admins. |
+| 400 `GROUP_ID_NOT_ACCEPTED` on `groups.create` | The body sent `groupId` | Omit it; read `groupId` from the response. |
+| 403 `FUNCTION_ROUTE_FUNCTION_ONLY` on `groups.create` | A client session called it | Create from a server function (`ctx.api.groups.create`) or the admin API / CLI instead. |
+| CEL `isMemberOf` returns false unexpectedly | Wrong `groupId`, user not yet added (deferred), or membership cache stale | Verify with `listUserMemberships(userId)`; remember email-based adds defer until sign-up. |
+| Can't restrict admin/owner access via rules | By design — app owner/admin bypass all rule evaluation | Use group memberships and roles for fine-grained access; don't try to gate admins. |

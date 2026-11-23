@@ -1,92 +1,278 @@
 # Agent Guide to Primitive Configuration
 
-Guidelines for AI agents configuring Primitive services. Everything Primitive does for an app — auth settings, server functions (with their webhook and cron triggers), prompts, integrations, database types, blob buckets, email templates, rule sets — is server-side configuration with two equivalent interfaces: the web Admin Console (interactive) and **TOML files synced via the CLI** (configuration as code). Agents should use the TOML + CLI path.
-
-## TOML is the only write path
-
-Server-side configuration is authored in TOML and applied with `primitive config push`. The CLI has **no** `create`/`update`/`delete` commands and no configuration-setting flags for these types — if a field belongs to a config object, the file is how you set it. Authoring commands, all local except the push:
-
-```bash
-primitive config fields <type>                   # keys, types, required, defaults for a type (--json for tooling)
-primitive config create <type> <key>             # scaffold <dir>/<key>.toml from the type's defaults
-primitive config set <object> <path>=<value>...  # set scalars in place, comments and key order preserved
-primitive config push --only <selector>[,...]    # apply just these objects
-```
-
-- `<type>` is one of `function`, `integration`, `blob-bucket`, `prompt`, `database-type-config`, `rule-set`, `group-type-config`, `collection-type-config`, `metadata-category-config`, `email-template`, `app`, `var`.
-- `<object>` on `set` is `<type>/<key>`, `app`, or `vars`; `--only` selectors are `<type>/<key>`, `app`, or `var/<key>`.
-- `set` writes scalars only — edit a table or an array in the file. `true`/`false` and numerics are written with those types; double-quote a value to force a string.
-- `fields`, `create` and `set` make no API call. Nothing reaches the server until a push.
-
-The scripted form of a one-field change is two commands, no here-document:
-
-```bash
-primitive config set function/order-intake function.description="Order intake"
-primitive config push --only function/order-intake
-```
-
-Deleting a config object = delete its file + `primitive config push --prune`. Every type, no exceptions — there is no per-type delete verb. (`primitive <noun> archive` is not that: it retires the object and keeps the row and its key.)
-
-Not configuration, so still direct commands: secrets (`primitive secrets set`), resource creation that mints an id (`apps create`, `databases create`, `collections create`, `groups create`), data operations, and every read/test command.
-
-Availability is runtime state, not configuration. (`users` and `admins` also carry `disable`/`enable` but no `archive` — they are people, not configuration objects; `admins` and `feature-flags enable|disable` are super-admin only.) `<noun> disable`/`enable` — for `functions`, `integrations` and `prompts` alike — are its only writers, along with the matching web-admin action and the delete flow, which writes the third value `archived` (a retired object, kept so its history still resolves; `enable` refuses it). The delete flow has a CLI spelling on those same three nouns: `primitive <noun> archive <id>` (confirms first, `--yes`/`-y` skips it, `--json` prints the server envelope). It is a SOFT delete — the row keeps its key — so it is not how you free a key; deleting the file and running a confirmed `primitive config push --prune` is. There is no un-archive: recover with `primitive config pull` (drops the archived row's pulled file but keeps its key in sync state), a confirmed `primitive config push --prune` to reclaim the key, then re-add the file and push it as new. `status` is server-owned and is deliberately not a TOML key: `config pull` does not emit it, a file that still carries the line fails `config push` with guidance naming the verb, and `config diff` reports "inactive; configuration unchanged" rather than drift. Anything created or pushed is active; there is no `draft` state on any object. Read the current value back with `<noun> get` or `<noun> list`. Per-VERSION status is a different key and stays in TOML: `[[configs]] status = "archived"` retires one named config, and says nothing about whether the object is serving. For a prompt's `[[configs]]`, pull writes that line only for a config that IS retired — an omitted one means active, so an ordinary pulled prompt file carries no `status` at all.
+Manage service configuration in `primitive/<env>/` as TOML, then apply it with
+the CLI. Use the Admin Console for inspection and interactive testing.
 
 ## The sync loop
 
 ```bash
-primitive config init  # create directory structure
-primitive config pull  # download server config as TOML
-primitive config diff  # preview changes
-primitive config push  # apply local TOML to the server
+primitive config init
+primitive config pull
+# Edit the configuration files.
+primitive config diff
+primitive config push
 ```
 
-The config directory is `primitive/<env>/` — one isolated slot per environment, so a `pull --env staging` never touches production state. There is exactly one way to reach it: the environment named by `primitive/config.json`. No flag relocates it, and no flag points a read or write in it at an app other than the environment's. The resolution walks up from the working directory to the nearest project config, so in an app with several clients the config lives once at the repository root and every client directory resolves it — see the `multi-client` guide for that layout.
+Confirm the target with `primitive env show`. Each environment binds an API URL
+and app ID in `primitive/config.json`. Select it with `--env <name>` or
+`PRIMITIVE_ENV`; `primitive env use <name>` saves a machine-local selection.
 
-Structured values — a function's or prompt's `inputSchema`/`outputSchema`, a prompt's `providerConfig`, a database type's `autoPopulatedFields`, a metadata category's `schema` — are written as nested TOML tables. The same fields also accept single-line JSON text, which the server treats identically, and `config pull` keeps whichever form a file already uses. Author new files in table form.
+## Child apps
 
-## Pull snapshots and revert
+A child app is a copy of the current environment's app — its `mode`, settings
+and (unless `--no-secrets`) secrets — owned by whoever creates it and deleted
+automatically once idle (7–30 days, 30 by default; it's warned by email
+first). It runs your branch's configuration in isolation, so a push to it
+reaches nobody else.
 
-Every `config pull` snapshots the config directory before writing anything; if the snapshot can't be written, the pull aborts with no files changed. Snapshots older than 28 days are pruned automatically. They live at `<projectRoot>/.primitive/backups/<env>/<appId>/` — gitignored machine-local state, partitioned by app so an environment rebound to a different app cannot restore the former one's snapshot.
+### When to create one
+
+Recommend a child app whenever a change needs `config push` to be tested and
+the environment you'd otherwise push to is used by anyone else: other
+developers, live users, or you yourself from another agent or git worktree.
+A push lands immediately, so pushing an unfinished branch to a shared
+environment changes the app for everyone on it and gets overwritten by the
+next push from another branch.
+
+Pick the shape that matches how the work is done:
+
+- **One developer, one line of work at a time:** one child per developer,
+  used as that developer's own integration environment and re-pointed at each
+  branch.
+- **Parallel work in several worktrees or agents:** one child per worktree,
+  each tracking that worktree's branch. Every git worktree keeps its own
+  environment selection, so the children never cross. A linked worktree uses
+  the main checkout's login, so it needs no `primitive login` (git 2.31 or
+  newer); `primitive logout` in any worktree signs them all out.
+
+Push to the shared environment directly only when the change is already
+merged, or when nobody else uses that environment.
+
+### The workflow
+
+In an app made from the Vue or Swift template, [the template
+scripts](#one-command-per-worktree-the-template-scripts) run steps 1–3 and
+the delete in one command each. The steps by hand:
+
+1. **Create the child from the branch's checkout.** Confirm the header names
+   the parent environment first (`primitive env show`).
+
+   ```bash
+   primitive env use dev
+   primitive apps children create feature-x
+   ```
+
+   `create` copies the parent's settings and secrets, registers the child as
+   this checkout's machine-local environment `feature-x`, and selects it. It
+   pushes nothing: its last line names the push to run once the child is set
+   up (step 3). `--branch` defaults to the current git branch. Exit code 2
+   means the child was created but isn't registered on this machine: run
+   `primitive env use feature-x` to attach it, and don't create it again.
+   Exit code 1 means no child was created.
+
+2. **Set up what isn't copied.** Users, databases, blobs and other app data
+   are not copied: the child starts empty. An
+   `invite-only` parent's `mode` carries over, so the child admits nobody —
+   even a whitelisted `testAccountBaseEmails` address is stopped at the
+   email step (waitlisted or rejected, exactly like a normal signup) until
+   it's added directly with `primitive users create`; see [Test User
+   Sign-In](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#test-user-sign-in-per-app-whitelist).
+   Otherwise, sign in to the child to create your user, then seed the data
+   the change needs to be tested against: create and seed the databases it
+   needs (`primitive db3 create`, `primitive db3 records save`). A database
+   created on the child has its own id, so any var that names a parent
+   database's id needs the child's id instead. Every admin of the parent can already
+   administer the child. Secrets the branch adds are set on the child with
+   `primitive secrets set`. Config vars whose value belongs to the child —
+   its database ids, URLs containing its app id, its origins — go in its
+   override file (see Reference), set before the first push:
+
+   ```bash
+   primitive --env feature-x config set vars DB_ID=01M4VFW6B2WANJXA58FG810HDX
+   ```
+
+3. **Push the tree into the child**, with the command `create` printed:
+
+   ```bash
+   primitive --env feature-x config push --yes
+   ```
+
+4. **Iterate.** With the child selected, `config push`, `config diff` and
+   `config pull` act on the child, and the app template's dev, test and
+   codegen scripts resolve to it with no other setup. Edit the TOML, push, test,
+   repeat. Before declaring the work done, merge the base branch in and push
+   once more so the child is tested against the parent's current
+   configuration.
+
+5. **Merge, then apply to the parent.** After the branch merges, switch back
+   and push the merged tree to the parent. Set any secret the branch added on
+   the parent first, so the pushed configuration never references a secret
+   the parent lacks.
+
+   ```bash
+   primitive env use dev
+   primitive secrets set NEW_KEY --value <value>   # only secrets the branch added
+   primitive config diff
+   primitive config push
+   ```
+
+6. **Delete the child** once the parent has the change, or when the work is
+   abandoned. Deleting removes its data and this checkout's registration.
+   An `internal` app is deleted with `write`, so `apps children delete`
+   needs no step-up: every child app is `internal`.
+
+   ```bash
+   primitive apps children delete feature-x --yes
+   ```
+
+A teammate, or another of your worktrees, attaches an existing child with
+`primitive env use feature-x`.
+
+### One command per worktree: the template scripts
+
+Apps made from the Vue and Swift templates bring a child up for a branch, and
+tear it down, with one command each. Run them with the parent environment
+selected (or a sibling child, whose parent is then used):
 
 ```bash
-primitive config revert --list           # enumerate snapshots, newest first
-primitive config revert                  # restore the most recent
-primitive config revert --snapshot <id>  # timestamp dirname, or a unique >=8-char prefix
-primitive config revert -y               # skip the confirmation prompt
+pnpm child:up feature-x --port 5174   # Vue; --port defaults to 5173
+pnpm child:down feature-x
+scripts/child-app.sh up feature-x     # Swift
+scripts/child-app.sh down feature-x
 ```
 
-`revert` replaces the entire config directory with the snapshot, including `.sync-state.json` (the committed sync-state baseline). It warns when the config directory has uncommitted git changes (the restore overwrites them), and refuses to restore a partial/corrupted snapshot. After reverting, run `primitive config diff` to inspect the restored state versus the server.
+`up` creates the child, or attaches or resumes one that exists, checks that
+`--env feature-x` resolves to that child, runs the app's
+`scripts/child-app-init`, pushes the tree, allows the Vue dev server's
+`http://localhost:<port>` origin, and selects the child. Every step is safe
+to repeat, so rerunning `up` resumes an interrupted run. A Swift app is then
+rebuilt so `primitive.json` names the child. `down` checks the child's
+environment the same way, runs `scripts/child-app-teardown`, then deletes the
+child and its local state; when the child was selected, `down` selects its
+parent, so the next command targets the parent app.
 
-## Pull pruning (deleting local files)
+The two hooks are the app's own code; the templates ship neither. Add one as
+an executable file when the app needs it:
 
-After writing the current server entities, `config pull` reconciles deletions: it removes a local file **iff** its key was managed by a prior pull (present in `.sync-state.json` sync state) **and** absent from this pull's server entities. This keeps the sync tree a faithful mirror — because a `config push` without `--prune` treats every local TOML as create-or-update, a stale file for a server-deleted entity would re-create it on the next push. (To reconcile deletions the other direction — delete a server entity when its local file is gone — see [Push pruning](#push-pruning-deleting-server-entities).) Presence is read from the **server listing**, never from what this pull just wrote (several types legitimately skip writing a present entity). Pruning is **on by default**; the pull summary reports a `Pruned` count. Removed files are recoverable — the pre-pull snapshot is taken first, so `config revert` restores anything pruned in error.
+- **`scripts/child-app-init`** seeds what a fresh child needs: users,
+  databases, the child's own config vars (`primitive config set vars
+  KEY=value`). It runs before the first push because a function caches the
+  config vars it reads, and on every `up`, so it must be safe to repeat.
+  Seeding that needs a schema pushes it first: a typed `primitive db3 create
+  --type <type>` needs the type, and `primitive users create
+  --initial-properties` needs the user-properties schema. Push them from the
+  hook before seeding:
+  `primitive --env "$PRIMITIVE_ENV" config push --only user-properties,db3-type/<type> --yes`.
+- **`scripts/child-app-teardown`** revokes or deletes anything the child
+  created outside the platform — third-party connections, webhooks, external
+  buckets. That cleanup is the app's responsibility: deleting the child
+  doesn't reach those services. `down --skip-teardown` deletes the child
+  without running the hook and leaves them behind.
 
-A file is pruned only when it clears every safety rule; otherwise it stays and keeps its managed marker (its prior state entry is carried forward, so the discriminator survives to the next pull):
+Each hook runs from the app root with `PRIMITIVE_ENV` (the child's local
+environment name), `CHILD_APP_ID`, `CHILD_APP_SLUG` and `PARENT_ENV` set.
+The Vue `up` also passes the init hook `CHILD_APP_PORT`, its `--port` value
+(default 5173), for anything that needs the child's dev origin before the
+push. Address the child through `PRIMITIVE_ENV` or `--env`, never through the
+selected environment: a hook may change the selection, and the scripts don't
+rely on it afterwards. A hook that exits non-zero stops the script before the
+push (`up`) or the delete (`down`); a hook that exists but isn't executable
+is an error.
 
-- **`--no-prune`** — the operator opted out; no file is removed this pull.
-- **Never-pulled file** — a key absent from prior sync state was hand-authored; it is left alone and `config diff` reports it as *new*.
-- **Uncommitted git edits** — a file with uncommitted changes (tracked edits; untracked files do not count) is kept and reported, not deleted — the operator may be mid-edit. Remove it yourself or re-create the entity on the server.
-- **Failed listing/detail fetch** — a type whose listing or per-entity fetch failed is skipped whole with a warning; an error that reads as an empty list must never delete every local file of a type.
-- **Incomplete listing** — a type whose server listing is not paginated (so an entity missing from it may still be live) is skipped; the omitted files are reported so you can delete them yourself if the entity is really gone.
-- **Unsafe filename** — a sync-state key that does not map to a safe filename is skipped with a warning.
+**Gotchas**
 
-When a prompt is pruned, its sidecar `<key>.tests/` directory and the block's test-case state are removed with it.
+- A child's slug must not be the name of a committed environment in
+  `primitive/config.json`: `up` refuses it before anything runs.
+- `down` refuses a child that isn't registered on this machine, since its
+  teardown hook couldn't act on it; attach it with `primitive env use <slug>`
+  first, or pass `--skip-teardown`.
+- An exported `PRIMITIVE_ENV` outranks the selection `up` writes; `up` says
+  so when it's set.
 
-## Push pruning (deleting server entities)
+### Reference
 
-`config push` creates and updates only — by default it never deletes, so removing a local TOML leaves its server entity in place. Pass **`--prune`** to reconcile deletions the other direction: after the create/update pass, push deletes managed entities whose local declaration is gone. A candidate is an entity whose key was recorded in `.sync-state.json` by a prior pull **and** which no local file in its directory still declares — keys are read from each file's declared identity (the in-file key or, for keyless types, the basename), mirroring how push derives them, so a file renamed away from `<key>.toml` but still declaring the key keeps its entity out of the prune set. A key never in sync state was authored server-side and is never a prune candidate. A push **without** `--prune` deletes nothing and makes no extra server calls.
+```bash
+primitive apps children create feature-x   # create, register and select it
+primitive apps children list                # this app's children
+primitive apps children get feature-x       # one child, and its local status
+primitive apps children delete feature-x --yes
+```
 
-Prune is fail-closed on every candidate:
+`create` takes `--branch <name>` (default: the checkout's current git
+branch), `--idle-days <n>` (7–30), `--no-secrets`, `--no-use` and `--json`.
+It fails closed: a create that errors on the server leaves no child behind.
+`--json` prints one document whose `nextStep` is the command to run next.
 
-- **Point read + drift check** — each candidate is confirmed by a detail fetch by id/key (immune to listing truncation), and deleted only when the live `modifiedAt` matches the value recorded at last sync. A mismatch (edited out-of-band) is skipped as *drift*; **`--force`** deletes regardless.
-- **404** — the entity is already gone server-side; its stale sync-state entry is dropped and nothing is deleted.
-- **Any other fetch failure** — presence could not be confirmed, so the entity and its state are left untouched.
-- **Still referenced (409)** — the delete is blocked and reported, its state kept, and the remaining deletes proceed (partial success — remove the referrer and re-run).
-- **Orphaned metadata values** — deleting a **metadata-category-config** deletes the definition only; stored metadata values are NOT deleted and become unreachable (no query path from a category to its rows). The prune plan states this caveat under the delete line, in `--dry-run` too. Delete the values first (`primitive metadata delete`) if you need them gone.
+A child's own var values live in `primitive/<env>/vars.<slug>.override.toml`,
+a flat `KEY = "value"` table beside `vars.toml`:
 
-One batch confirmation gates the destructive deletes (`Delete N remote entity(ies)? This cannot be undone.`); **`-y`/`--yes`** skips it for CI. **`--dry-run`** reports the full plan — will delete / already absent / skipped, with the skip reason — and mutates nothing. When a pruned prompt is deleted, its sidecar `<key>.tests/` directory and test-case state are cleaned up with it.
+```toml
+# primitive/dev/vars.feature-x.override.toml
+REFERENCE_DB_ID = "01M4VFW6B2WANJXA58FG810HDX"
+WEB_ORIGIN = "https://feature-x.example.com"
+```
 
-A prune always hard-deletes. Every type that carries `archived` is soft-archived by a plain API `DELETE` (or the console's Archive action) and **hard-deleted** by `config push --prune`, so its `key` is freed. That is deliberate: an archiving prune would keep the key with no way to reclaim it from `config`. It is also irreversible, and the object's history (function runs, prompt executions) stops resolving what it points at, so archive first if that history still matters.
+With the child selected, `config push` sends `vars.toml` with the override's
+keys replacing or adding to it, `config diff` compares against those values,
+`config pull` writes differing server values into the override (never into
+`vars.toml`), and `config set vars KEY=value` edits the override. The parent
+and other children never read it. It is git-ignored
+(`primitive/*/*.override.toml`), and `apps children delete` removes it.
+
+**Gotchas**
+
+- The override cannot remove a var: every `vars.toml` key reaches the child.
+- A running function version caches the config vars it reads. Adding an
+  override to a child whose functions are already pushed can leave them
+  reading the old values until each one is pushed as a new version (any
+  change to its code or TOML) or its running instance is recycled on its
+  own; `config push` prints a note when a changed var left a function's
+  version unchanged. Set the child's vars with `config set vars` before its
+  first push to avoid it.
+
+A child shares its parent's `primitive/<env>/` tree but keeps its own
+sync-state baseline and snapshot backups — `config pull`, `push`, and `diff`
+on a child never touch the parent's committed state. With a child selected,
+those three commands act on the child itself, but every `apps children`
+command acts on its **parent**, so running `create` again makes a sibling,
+not a grandchild. A pull on a child never writes `[app].name`, so a branch
+merged back into the parent's tree keeps the parent's name.
+
+`primitive env use <name>` selects a committed environment or an existing
+local entry as usual; otherwise it looks the name up as a child slug of the
+current environment's app, and if found, registers it and selects it in one
+step. It refuses an unknown slug, and refuses a known one only when that
+child's app id is already registered here under a different name.
+
+A child uses its server's login and step-up, which reach it through the
+parent's pin; it has none of its own. `login` or `logout` in any environment
+on that server signs in or out all of them, and names them.
+
+`primitive apps list` shows parent apps only; `--all` includes children.
+Deleting a parent with children is refused, naming them;
+`primitive apps delete <app-id> --with-children` deletes each child, then the
+parent, stopping before the parent on the first child it can't delete. A
+plain login deletes the children; the parent needs an `admin` step-up unless
+it is `internal`.
+
+See the deploying guide's [Preview a branch against a child app](AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.md#preview-a-branch-against-a-child-app)
+for previewing a child's front end.
+
+## Authoring
+
+```bash
+primitive config fields function
+primitive config create function order-intake
+primitive config set function/order-intake function.description="Order intake"
+primitive config push --only function/order-intake
+```
+
+`fields` lists accepted keys, types, and defaults. `create` scaffolds a file;
+`set` changes scalars locally. Edit arrays and tables directly. Use native
+TOML tables for schemas and other structured values.
+
+`--only` accepts `<type>/<key>`, `app`, or `var/<key>`. Secrets and resource
+creation use their own commands; service configuration uses files and push.
 
 ## Directory map
 
@@ -94,6 +280,7 @@ A prune always hard-deletes. Every type that carries `archived` is soft-archived
 primitive/<env>/
   app.toml                        # App settings
   vars.toml                       # Config vars for this environment
+  vars.<child>.override.toml      # A child app's own var values (git-ignored)
   prompts/*.toml                  # Managed prompts
   prompts/{key}.tests/*.toml      # Prompt test cases
   integrations/*.toml             # External API integrations
@@ -103,229 +290,352 @@ primitive/<env>/
   functions/*.d.ts                # Generated by config push (see Functions directory below)
   functions/generated/*.generated.ts # Generated: typed client invokers, one per function
   functions/tsconfig.json         # Scaffolded once: wires sources + declarations together
-  database-type-configs/*.toml    # Database types: [models.*] schema, rule set, triggers, [metadata]
+  db3-types/*.toml                # Database types: [type], [models.*], [triggers.*]; pushing one updates every database of it
+  schemas/*.toml                  # Shared shapes: [defs.<Name>] tables, JSON Schema or a field table, referenced as schemas:<file>#/$defs/<Name> or ref = "schemas.<file>.<Name>"
   blob-buckets/*.toml             # Blob bucket configs
   email-templates/*.toml          # Email template overrides
   rule-sets/*.toml                # Access rule sets
-  group-type-configs/*.toml       # Group type configs
-  collection-type-configs/*.toml  # Collection type configs
   metadata-category-configs/*.toml # Resource metadata category configs (schema + readRule/writeRule)
 ```
 
 ### Functions directory
 
-`functions/<key>.toml` and the TypeScript its `entry` names are yours. Everything else under `functions/` is written by `config push` (and by `primitive functions codegen`, which writes the same files without pushing; `--check` exits non-zero when they are stale — the CI form):
+`functions/<key>.toml` and the TypeScript its `entry` names are yours. Everything else under `functions/` is written by `config push` (and by `primitive functions codegen`, which writes the same files without pushing; `--check` exits non-zero when they are stale — the CI form; both refuse a schema push would refuse, with push's message):
 
-- `primitive-db-types.d.ts` — the app's database types from `database-type-configs/*.toml`; types `ctx.db(databaseId, "<type>").model("<Model>")`.
+- `primitive.d.ts` — every generated type, one namespace per family: `Schemas.<Def>` for each `schemas/*.toml` def, `Functions.<Key>Input` / `Functions.<Key>Output`, `Prompts.<Key>PromptOutput` and the agent types, `Db3.<Model>` (and `Db3.<Model>Row` / `Db3.<Model>Declared` for a projection a schema refs), and `UserProperties`. A ref is a reference to its target's one declaration. Import with `import type { Functions, Schemas } from "./primitive"`. It types `defineFunction`, `ctx.prompts.run`, `ctx.db3` and `ctx.users`.
 - `primitive-functions.d.ts` — the `primitive-functions` module's own types.
-- `primitive-function-types.d.ts` — `<Key>Input` / `<Key>Output` from each function's `inputSchema` / `outputSchema`.
-- `primitive-document-types.d.ts` — document models from `models/models.toml`; types `ctx.doc(documentId).model("<Model>")`.
-- `primitive-prompt-types.d.ts` — `<Key>PromptOutput` for each prompt with a `[prompt.outputSchema]`; types `ctx.prompts.run("<key>")`.
-- `primitive-document-schema.generated.toml` — a copy of `models/models.toml` carried in each function version.
-- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`); `primitive functions codegen -o <dir>` writes them elsewhere, `--lang swift` emits Swift.
+- `generated/<key>.generated.ts` — typed client invokers (both `invoke` and `start`), each exporting a `<Type><Field>Values` list per enum it types; `primitive functions codegen -o <dir>` writes them elsewhere. A field that is exactly a shared `schemas/` enum is typed `<Name>`, imported from `generated/shared-enums.generated.ts` (written only when an invoker uses one; it exports `<Name>` and `<Name>Values`, and the per-use list is a deprecated alias of `<Name>Values`). A function keyed `shared-enums` is refused while that file is written. `--lang swift` emits Swift, plus `Primitive.generated.swift`: each `schemas/` def, prompt output type and referenced db3 row, declared once and referenced by name from the per-key files.
+- `generated/schema-defs.generated.ts` — the type and compiled schema of each `schemas/` object def a db3 JSON field refs, written only when one does; the web models generated with `js-bao-codegen-v2 --schema-defs-import <specifier>` import it (see [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md)).
 - `tsconfig.json` — scaffolded once, then yours; wires the sources and declarations into one program.
 
-Generated on every push, and none of it is sent to the server; see [Server Functions — Codegen](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#the-typed-handle) for the rewrite rule, the tsconfig repair, and `codegen --check`.
+Generated on every push, and none of it is sent to the server; see [Server Functions — Pushing](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#pushing) for the rewrite rule, the tsconfig repair, and `codegen --check`.
 
-The `[function]` table says nothing about HOW the function runs: the caller picks the runtime per call (`invoke` = inside the request, `start` = a task). Beyond `key`, `description`, `entry`, `access`, `[function.limits]` and the schemas (`primitive config fields function` for the full list), it carries:
+See [Server Functions](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md) for
+function declarations and trigger configuration.
 
-- `[function.triggers.webhook]` (one table) and `[[function.triggers.cron]]` (at most ten entries, each with a `name`) — the platform creates what each needs; nothing appears as a standalone object, and `primitive functions get` shows them. Every cron fire starts a task run; a webhook delivery runs in the request runtime.
-- `capabilities` — what the function configures, never what data it reaches (function code acts as the system; `access` is the authorization). Exactly three kinds — `integration:<integrationKey>`, `secret:<NAME>`, and the eleven high-blast strings — no wildcards, each key component `[A-Za-z0-9_-]+`. What each unlocks: [Server Functions — Capabilities](AGENT_GUIDE_TO_PRIMITIVE_SERVER_FUNCTIONS.md#capabilities).
+A pushed function or prompt keeps the shapes it inlined until it is pushed
+again: `schemas/` defs, db3 models, and for a prompt, other prompts' and
+functions' schemas. `config diff` names each one that has since changed on the
+server, as `pinned to schemas/<file>.toml#<Name> (older)`,
+`pinned to db3-types/<type>.toml#<model>/<projection> (older)`,
+`pinned to prompts/<key>.toml#<target> (older)` or
+`pinned to functions/<key>.toml#<input|output> (older)`, `(removed)` when the
+file no longer declares the def or model, or `(deleted)` when it was deleted;
+`--json` lists them as the row's `pins`, each with its `family` (`schemas`,
+`db3`, `prompt` or `fn`). Push the function or prompt again to pick up the
+current shape.
 
-Push refuses a malformed string, an `integration:` naming no active integration, and any string outside the three kinds. Prompts, database records, config vars, channels, sends, email and analytics need no line. Integrations are applied before functions, so adding an integration and a function that declares it lands in one push.
+`config diff` also previews each schema a push changes, under its function,
+prompt or `schemas/` row: `<slot>: <class> — <changes>`, `<slot> refs: …` (a
+db3 ref with its projection) and `types: <Namespace>.<Name> +n/−n lines` for each
+declaration of `primitive.d.ts` that changes. Each schema's changes are classified as `additive`, `tightening` or `breaking`:
+`breaking` is a narrower `type`, `enum`, `required`, `properties`, `items`,
+`format` or ref, any edit inside `oneOf`, `anyOf` or `allOf`, or a schema the
+push clears; `tightening` is a narrower bound or flag (`minimum`, `pattern`,
+`nullable` removed). A target row (a `schemas/` file, db3 type, function or
+prompt) prints `dependants:`, the objects pinned to it, server-only ones
+marked. `--json` carries these as `schemas` (`slot`, `class`, `changes`,
+`refs`, `declaration`) and `dependants` (`type`, `key`, `slot`, `state`,
+`inTree`). A reffed member is a reference (`price: Schemas.Money`), so a def
+change shows on the `schemas/` row's `Schemas.<Def>` declaration, not as a
+changed line of the declarations using it. The preview never blocks a push.
 
-**A test case's file name is its identity.** The basename of a
-`<key>.tests/<case>.toml` file is the case's key on the server, unique per block
-and case-insensitive. That is what lets a case authored by hand — which has no
-`.sync-state.json` entry until its first push or pull — reconcile the committed
-tree instead of creating a duplicate of every case. `config pull` writes a case back
-under that same name (never the slug of its `[test] name`), and renaming the file
-renames the case on the next push, updating the same test case rather than
-creating a second one. Keep the name path-safe: no `/` or `\`, no leading or
-trailing spaces, no trailing dot, 200 characters at most. A case created outside
-the CLI (the console, the raw API) has no key until a `config push` stamps one;
-where a push cannot tell which server case an unkeyed file belongs to, it says
-so and creates nothing — run `config pull` first, or push once from the machine
-that has the sync state.
+`config push` pushes db3 types first, then `schemas/` files, and each prompt after the
+`schemas/` files, prompts and functions its schemas ref, even when that puts a
+chat prompt after the functions leg. `--only prompt/<key>` also pushes the
+prompts and `schemas/` files the selection refs; a function it refs must be
+selected or already on the server.
 
-### A case file is local until a push registers it
+## App settings
 
-Writing or editing a `.tests/<case>.toml` file only changes the local file.
-`primitive <noun> tests run-all` / `tests list` (the prompts and
-integrations test runners) act on the **registered** set on the server, not
-the sync tree — a new case is silently absent from `run-all` results, and an
-edit to a registered case's file is not what runs, until `config push` sends
-it. `primitive config diff` names exactly this gap, per case, with four
-counters:
+Edit `app.toml` and use `primitive config push --only app`. Its sections are
+`[app]`, `[auth]`, `[cors]`, `[invitations]` and `[clients.<platform>]`.
+`[app].name` and `[app].mode` are required. See the authentication guide for
+sign-in settings.
 
-- **Test Cases (local only)** — file exists, no registered case yet; `run-all` will not run it until a push.
-- **Test Cases (remote only)** — a registered case whose file is gone (deleted, renamed away, or never pulled); it keeps running until `config push --prune` removes it — deleting the file alone does not stop it.
-- **Test Cases (modified)** — both exist but differ; `run-all` still executes the last-pushed version, not what's on disk.
-- **Test Cases (synced)** — file and registered case match; the only state where "authored" and "running" are the same thing.
-- **Test Cases (push would refuse)** — a case file that fails validation, printed only when there is one. This status is *separate* from "local only", not a subset of it: a malformed new case counts here and nowhere else, so "local only: 0" does **not** mean every case file made it to the server. Fix the file and push again.
+`[app].protection` is the app's protection level, one of
+`default`, `protected` and `internal`: `protected` for an app with real users,
+`internal` for a throwaway app (every child app is `internal`). Only the app's
+console owner changes it; a push from anyone else
+that would change it fails with `PROTECTION_OWNER_ONLY`, and a child's level
+cannot change (`PROTECTION_FIXED_ON_CHILD`). A file without the line pushes
+`default`. The deprecated `protected = true` reads as
+`protection = "protected"` until the first breaking release after 2026-12-15;
+`primitive config pull --only app` rewrites it. On a `protected` app a login's
+writes need a step-up; see
+[Admin access](#admin-access-scopes-step-ups-and-ci-sessions).
 
-## App settings (`app.toml`)
+`[app].signedOutAccess = true` lets callers who are not signed in invoke the
+app's functions that declare `public = true`, or `public` as a table of
+options such as `{ cacheSeconds = 60, cors = "*" }` (see the server functions
+guide's "Callers who are not signed in"). Off by default; a file without the
+line pushes `false`.
+`[app].signedOutCeiling` caps those calls per hour across the app, 0 to
+10,000,000 (0 refuses all); a file without the line clears it, back to the
+provisional default of 10,000.
+`[app].turnstileSiteKey` is the public Turnstile site key a page renders the
+widget with, for functions whose `public` table sets `turnstile = true`; 1–100
+characters of `A-Z a-z 0-9 _ -`. Pulled only when set; a file without the line
+clears it.
+`[app].iconUrl` (an absolute `https:` URL, at most 2,048 characters, no
+username or password) and `[app].brandColor` (`#` and six hex digits, stored
+lowercase) brand the app: `GET settings/sign-in` and `getAuthConfig()` return
+them, and the invitation preview returns the icon as `appIconUrl`. A bad value is refused (`INVALID_ICON_URL`,
+`INVALID_BRAND_COLOR`); pulled only when set; a file without the line clears it.
 
-App-level settings sync from `app.toml`. Edit the TOML and apply it with `primitive config push` (or `config push --only app` for the settings alone); `primitive config pull --only app` writes current server settings into it, `primitive config diff --only app` shows per-field differences, and `primitive apps get` renders the server-effective settings without touching any file. There is no command that writes a setting — `app.toml` plus a push is the only way to change one. TOML-syncable settings:
+`[app].allowFieldRemoval = true` lets `config push --allow-field-removal`
+push database type changes that would make stored records unreadable (see the
+databases guide's "Changing a type"). The flag reads the setting as stored
+before the push, so enable it in one push and use it in the next. Pulled only
+when set; a file without the line clears it.
 
-- `[app]` — `name`, `mode`, `baseUrl`, `waitlistEnabled`, `waitlistNotifyAdmins`, `allowedDomains` (string array), `testAccountBaseEmails` (string array), `largeDocumentWindowDays` (1–14, default 7)
-- `[auth]` — `googleOAuthEnabled`, `emailSignInEnabled`, `passkeyEnabled`, `appleSignInEnabled`, `appleAudiences` (string array), `emailRedirectUris` (string array — the sign-in-link allow-list, see below), `passkeyUserVerification` (`"preferred"` | `"required"`, see below), `[auth.google.clients.<type>]` Google client entries (see below), `[auth.passkeys]` relying-party config
-- `[cors]` — `mode`, `allowedOrigins`, `allowCredentials`, `allowedMethods`, `allowedHeaders`, `exposedHeaders`, `maxAge` (the `[cors]` table is always emitted, in every mode)
-- `[invitations]` — `enabled`, `limit` (whether role `member` users may send invitations, and the per-member cap; `0` = unlimited)
+`[app].untypedDb3Create = "admins"` keeps creating databases with no type to
+app admins and owners; a member is refused `DB3_CREATE_ROLE_REQUIRED` (see the
+databases guide's "Who creates a type"). `"members"` or no line is every member; pulled only when
+set, and a file without the line clears it.
 
-`app.toml` is the **whole truth**, the same source-of-truth rule every other configuration file follows (see [Owned scalar fields](#owned-scalar-fields-clear-on-absence)): push sends a value for every setting listed above, not just the keys present, so a deleted line **clears** the setting or **resets it to its declared default** — `emailSignInEnabled` / `waitlistNotifyAdmins` to `true`, `[cors] mode` to `"universal"`, `[invitations] limit` to `5`, the remaining booleans to `false`, everything else cleared. `[app].name` and `[app].mode` are **required** (no default to reset to, and `mode` decides who can sign up), so their absence is a validation error from `config push` and `config diff` alike. `config pull` still omits a setting the server does not hold, so a pull → push round trip is a no-op. An explicit `false` is forwarded and `appleAudiences = []` clears the audiences. An unrecognized key — including the ones under [Rejected keys](#rejected-keys) — is rejected by name before anything is applied, never ignored.
+`[clients.<platform>]` declares which versions of the app are current on a
+platform. Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`,
+`enforce`, and `[[clients.<platform>.backendOverrides]]` tables. See
+[Client Versions](AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.md) for the grammar,
+`enforce`, the confirmations a push asks for, and overrides.
 
-### Google sign-in and email sign-in redirect URIs
+Removing a managed setting clears it or restores its default. Keep explicit
+values when a feature must stay disabled, especially
+`emailSignInEnabled = false`.
 
-`[auth.google.clients.<type>]` (one entry per platform) and `[auth].emailRedirectUris` follow the same TOML rules as every other setting above — see [Google Client Configuration](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#google-client-configuration) and [Email Sign-In](AGENT_GUIDE_TO_PRIMITIVE_AUTHENTICATION.md#email-sign-in-one-email-one-or-two-credentials) in the authentication guide for the per-type `clientSecret` rules and error codes, the redirect-URI selection and matching semantics, and the `emailSignInEnabled` switch.
+## Gotchas
 
-### Passkey user verification
+### Push failures
 
-`passkeyUserVerification` is the policy BOTH halves of a passkey ceremony state
-— the options ask the authenticator for it, and the server enforces exactly that
-when verifying. Flat in `[auth]`, beside the `[auth.passkeys]` relying-party map:
+Preflight validates files before changes are applied. A `function` check
+includes entry, capabilities, and trigger settings. Any local validation
+failure aborts the push.
 
-```toml
-[auth]
-passkeyEnabled          = true
-passkeyUserVerification = "required"   # default: "preferred"
+Pushing a function or a `schemas/` file needs `primitive-admin` 1.3.0 or
+newer, the first CLI whose generated handler types carry a function's `input`
+list. The server refuses an older CLI's push with `CLI_VERSION_TOO_OLD`, or
+`COMPILED_PAYLOAD_REQUIRED` when it carries no compiled schemas; run
+`npm install -g primitive-admin@latest` and push again.
+
+Apply is incremental: missing secrets, app limits, or conflicts can fail after
+other changes succeed. There is no rollback. Resolve the reported problem and
+push again; applying successful changes again is safe.
+
+A warning starting `platform transition <name>:` means a pushed `schemas/` file
+or function uses a form the platform is replacing. The push succeeded; the line
+names the call site and its replacement. Make that change and push again.
+
+### Drift and conflicts
+
+Server-only edits are reported as drift; edits on both sides produce conflicts.
+Pull takes the server’s values. Use `--force` only to deliberately overwrite
+remote changes. `diff --json` is available for automation.
+
+Keep `.sync-state.json` committed with configuration. If an external deletion
+leaves an entry pointing to a missing object, remove that object’s state entry
+before pushing to recreate it. Pull also reconciles state and rewrites every
+file that differs from the server; preserve local edits first. A file `diff`
+reports as in sync keeps its bytes, comments and key order included.
+
+### Deletion and availability
+
+- Remove a managed field to clear it or restore its default on push.
+- Remove a file and push with `--prune` to permanently delete its managed
+  server object. Ordinary push leaves it in place.
+- Pull removes previously managed files whose objects were deleted remotely.
+  It preserves uncommitted changes; `--no-prune` preserves all local files.
+- Use `disable` and `enable` for availability. Do not put object `status` in
+  TOML. A prompt configuration’s `[[configs]] status` remains TOML-owned.
+- Archive preserves a function, integration, or prompt and its key. To reuse
+  the key, pull, prune the archived object, then add it again.
+- Pruning a function, integration, or prompt needs `admin`. Run
+  `primitive login --step-up --scope write,admin` first; without it the push
+  stops before applying anything.
+- Deleting a metadata category leaves its values unreachable. Delete values
+  first if they must be removed.
+
+Review prune output before confirming. Prune skips objects edited on the
+server or still referenced; any other refused delete fails the push. `--yes`
+skips confirmation for an already-reviewed automated operation.
+
+### Restore a pull
+
+Pull saves a local snapshot retained for 28 days. Revert replaces the config
+directory, so inspect local edits first:
+
+```bash
+primitive config revert --list
+primitive config revert --snapshot <id>
+primitive config diff
 ```
 
-- `"preferred"` (the default, and what an app that omits the key gets) — the
-  authenticator MAY skip Face ID / a PIN, and the server accepts the credential
-  it returns. iOS legitimately skips it; so do password managers counting a
-  vault unlock, and PIN-less security keys.
-- `"required"` — the authenticator must verify the user before returning
-  anything, and a credential it did not verify is rejected with
-  `PASSKEY_USER_VERIFICATION_FAILED` (401 signing in, 400 registering).
+### Test cases
 
-Only `"preferred"`, `"required"` and no key at all are accepted; any other value
-is a 400 naming the field.
+A `<key>.tests/<case>.toml` filename identifies the case. Reference the
+configuration and judge prompt by name — `configName`, `evaluatorPromptKey`,
+`evaluatorConfigName` — so the file works unchanged in every app. Push changes
+before running tests: runners use registered server cases, not local files.
+Delete a case file and push with `--prune` to remove it. A prompt's default
+judge is `[prompt] defaultEvaluatorPromptKey`, a prompt key the app has or the
+same push creates; `""` clears it and an absent key leaves it unchanged.
 
-### Which relying party a ceremony runs against
+## Secrets and email
 
-`[auth.passkeys]` (`passkeyRpConfig`) is the set of relying parties an app HAS;
-each ceremony still has to select one of them. A browser is matched by its
-`Origin` header. A native request carries none, so it names the relying party
-itself — `AuthConfig(passkeyRpId:)` at client construction, or a per-call
-`rpId:` — and an app that names one that is not a key of `passkeyRpConfig` is
-rejected with `PASSKEY_RP_NOT_CONFIGURED` rather than served another.
+Store credentials with `primitive secrets set` and reference
+`{{secrets.KEY}}` in TOML. See the App Secrets guide.
 
-A Swift app built on `PrimitiveAppState` needs no code for this: `initialize()`
-names the host of the selected environment's `webUrl`, which is the relying
-party a browser at that origin would be matched to — so keep that host among
-the `[auth.passkeys]` keys. Override `passkeyRpId(for:)` on the app state to
-name a different one (return `nil` to leave the choice to the server), or pass
-`rpId:` to `PrimitiveAuthManager.signInWithPasskey` / `enrollPasskey` for a
-single ceremony. An IP-literal `webUrl` host derives nothing, since an IP
-address is never a valid relying-party id.
+Email overrides live in `email-templates/<emailType>.toml`. A `[template]`
+requires `emailType` and `subject`; `htmlBody` and `textBody` are optional.
+`htmlBody` HTML-escapes each `{{variable}}`; `textBody` inserts it as written.
+Use `email-sign-in` for sign-in email, retaining its code and expiry variables.
+Delete an override and prune it to restore the built-in template.
+`primitive email-templates preview <type> [--vars '<json>']` renders the
+server's saved template with the type's sample values, `--vars` overriding
+them, without sending. It does not render a local file: push first.
 
-### Rejected keys
+## Admin access: scopes, step-ups and CI sessions
 
-`app.toml` rejects these keys by name, and the error names the key that holds the setting:
+Every CLI login and token is an admin session with a scope, optionally pinned
+to some apps. A plain `primitive login` holds the default scope:
+`read`, `write`, `data:read` and `data:write`. In a project it is pinned to the
+project's apps: the app of every environment in `primitive/config.json` on that
+server, and their child apps. The project stores one login per server, which
+every environment on that server uses; an environment on another server needs
+`primitive -e <env> login`. `primitive login --app all` asks for every app the
+user is an admin of; outside a project a login needs `--app all` or
+`--app <ids>`. `primitive whoami` shows the user, server and app a command run
+from the current directory uses, and the session's kind, scope and pins;
+outside a project the server is `PRIMITIVE_SERVER_URL` or the default and there
+is no app. Outside a project `apps list`, `apps delete` and the `usage` reads
+given an app id (`usage get <app-id>`, `--app`) run against that server with
+its login; every other command needs a project. Every login, step-up and CI session is
+granted only when the user presses Approve on a console page naming its apps
+and access, so an agent cannot complete one alone; ask the user to approve it.
 
-| rejected key | where the setting lives |
+The scopes are `read`, `write`, `admin`, `data:read` and `data:write`:
+
+| Scope | Allows |
 |---|---|
-| `googleClientId` | `[auth.google.clients.<type>].clientId` |
-| `googleClientSecret` | `[auth.google.clients.<type>].clientSecret` |
-| `redirectUris` | `[auth.google.clients.<type>].redirectUris` for Google callbacks; `emailRedirectUris` for sign-in links — a `redirectUris` list may mix the two, so split it |
-| `passkeyRpId` / `passkeyRpName` | `[auth.passkeys]` (`passkeyRpConfig`) |
-| `magicLinkEnabled` / `otpEnabled` | `emailSignInEnabled` — one email flow, one setting |
+| `read` | Listing and reading configuration |
+| `write` | Changing configuration, setting and deleting secrets, raising the protection level, deleting an `internal` app, deploying and activating functions and prompts |
+| `data:read` | Reading database records (admin API, app API, WebSocket) |
+| `data:write` | Changing database records |
+| `admin` | Deleting `default` and `protected` apps and users, removing collaborators, changing roles, hard deletes, lowering the protection level from `protected` |
 
-## Owned scalar fields (clear on absence)
+None implies another; a command needs every scope its route declares. The
+data scopes guard direct access only: a token holding `write` can deploy and
+activate code, and that code reads and writes the app's data whatever the
+token's data scopes are.
 
-For a set of **TOML-owned scalar fields** on synced entities, the local file is the source of truth: `config push` always sends these fields as value-or-`null`, so removing a field's line from the TOML clears it on the server rather than leaving the prior value in place. This is field-level and separate from removing a whole TOML file — a default push never deletes an entity (whole-file reconciliation is [Pull pruning](#pull-pruning-deleting-local-files), or opt-in [Push pruning](#push-pruning-deleting-server-entities)). Owned fields by entity type:
+**Protected apps.** On an app whose level is `protected`, anything beyond
+`read` and `data:read` needs a step-up pinned to that app, even from a login
+pinned to it; a pinned CI session needs none. Only the app's own level counts:
+a `default` or `internal` app, including the `internal` child of a protected
+app, never needs a step-up. Lowering the level from `protected` also needs
+`admin`. An `internal` app is deleted with `write`, with no step-up.
 
-- **database-type-configs** — `ruleSetName` (wire `ruleSetId`), `triggers`, `autoPopulatedFields`, `timestamps`, and the `[metadata]`/`secrets` manifest. The `[models.*]` schema is owned too but tracked separately — removing every `[models.*]` block forwards `schema: null` and clears the schema. `push` prints `Cleared <field> on <type>` on a genuine non-null → null transition.
-- **group-type-configs** — `ruleSetName` (wire `ruleSetId`).
-- **integrations, blob-buckets** — `description`.
-- **prompts** — `description`, `inputSchema`, and each `[[configs]]` block's `description`.
-- **functions** — the whole authored file; a push that changes a function creates a new version from it, so a removed line (a trigger, a capability, a limit) is absent from the version that runs. `status` is not part of it: availability is server-owned.
+A pin also reaches the pinned app's child apps: a login pinned to an app
+creates its children (with no step-up, even under a `protected` parent) and
+lists them with it. A pin on a child app does not reach its parent.
 
-Enum and defaulted fields (`status`, `timeoutMs`, `state`, …) are **not** cleared this way — `null` is not a valid value for them, so omitting the line leaves the current server value unchanged. To change one, set it explicitly in the TOML.
-
-## Install, login, and apps
-
-Install the CLI globally with one package manager — `pnpm add -g primitive-admin` or `npm install -g primitive-admin`, not both. `primitive login` stores its tokens in the project's `.primitive/credentials.json`, one slot per environment. Each login is a session on the server: `primitive logout` revokes it there (and keeps the local tokens, exiting non-zero, if the server can't be reached), `primitive auth sessions list` shows your sessions, and `primitive auth sessions revoke <session-id>` ends one — its refresh fails from then on, while an access token it already issued lasts until it expires (at most an hour).
-
-`primitive apps list` lists the apps you can reach, and `primitive apps create "Name"` creates one and prints its App ID. Both run inside a project, and creating an app binds no environment to it — add one with `primitive env add <name> --api-url <url> --app-id <id>`.
-
-## Environment resolution
-
-Each environment in `primitive/config.json` binds exactly one `apiUrl` and one `appId`; `appId` is required (`primitive env add` refuses without `--app-id`). There is no "current app" anywhere else: the app a command targets is the resolved environment's `appId`. To point an environment at a different app, edit its `appId` in `primitive/config.json` — no command rebinds it.
-
-Every command resolves its target Primitive environment in order: `--env <name>` flag → `PRIMITIVE_ENV` env var → this machine's selection in `.primitive/local.json` → `defaultEnvironment` in `primitive/config.json` → the only defined environment → error. Manage environments with `primitive env add|list|show|use|remove`. `primitive env list` marks this machine's selection in a CURRENT column and the committed `defaultEnvironment` in a separate TEAM DEFAULT column; `primitive whoami` and `primitive env show` report what the next command will target.
-
-The target comes only from `primitive/config.json` plus `--env` / `PRIMITIVE_ENV`. The CLI reads no `.env` file, so `PRIMITIVE_API_URL`, `VITE_APP_ID` and the like have no effect on it.
-
-Every command except `login`, `logout`, `token`, `init` and `skill`, and any `--version` or `--json` run, prints a banner to stderr — `CLI Version: <v> | Env: <env> | App: <name> (<id>) | Server: <url>`. Read it before any command that changes server state.
-
-`primitive env use <name>` writes the selection to `.primitive/local.json`, NOT to the committed config: which backend this machine is pointed at is per-machine state, so switching backends never modifies a tracked file. `defaultEnvironment` stays the committed team default a fresh clone resolves. Tokens (`.primitive/credentials.json`) and the selection (`.primitive/local.json`) are gitignored; `primitive/config.json` is committed and is the single place a backend URL and app ID are typed — app templates read it rather than repeating those values in their own config. A corrupt or dangling selection is reported by `env list`/`env show` rather than silently falling back.
-
-A web app resolves the same way through the `primitiveEnv()` Vite plugin, and its Vite mode (`--mode`, i.e. which `.env.<mode>` supplies app-behavior keys) is a SEPARATE axis — `PRIMITIVE_ENV=dev pnpm build --mode alpha` is a legitimate combination. When a mode's keys are only correct against one backend, pin the pair by declaring `VITE_EXPECTED_PRIMITIVE_ENV=<name>` in that mode's `.env` file: every entry point that resolves an environment (dev server, build, deploy, headless vitest run) then fails at startup on a mismatch. Opt-in — absent, the axes stay independent. Details in the deploying guide.
-
-`primitive env add` adds an environment to an existing project (`primitive init` creates one; outside a project `env add` fails like every other app-scoped command). It writes only the environment entry into `primitive/config.json` — it seeds no credentials, and project mode never borrows credentials from `~/.primitive/credentials.json`. A freshly-added environment therefore starts logged-out: commands report "not logged in" for it until you run `primitive login` for that environment, even when another environment in the same project is signed in. (The `dev` environment scaffolded by `primitive init` is the exception — init seeds it with the session it authenticated during setup.) Agents and CI can log in without a browser by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` (see [Headless auth](#headless-auth-ci)).
-
-## Previewing a push
-
-`primitive config diff` lists entities that would be created, changed, or removed; `primitive config push --dry-run` reports the full push without applying it. A local file with no matching server entity is reported in one of two buckets, counted separately in the summary: **Local only (new)** — a file no prior pull managed, hand-authored, which push will create — and **Local only (absent from export)** — a file a prior pull wrote whose entity is now absent from the server (deleted server-side); push would RE-create it unless you remove the file, and a default `config pull` would prune it (see [Pull pruning](#pull-pruning-deleting-local-files)). The discriminator is the same prior-sync-state check the pull-side prune uses. A server entity with **no** local file is reported under **Remote only**, split by the same check: **Remote only (managed)** — a prior pull recorded it, so `push --prune` deletes it (see [Push pruning](#push-pruning-deleting-server-entities)) — and **Remote only (unmanaged)** — never synced, authored server-side, left alone. **`diff` covers every resource type `config push` handles** — the config types (database types, rule sets, group- and collection-type configs, metadata-category configs), email templates, functions, prompts, integrations, blob buckets, test-case sidecars and the app settings in `app.toml` (compared per field) are all compared for CONTENT, not just presence, so an edit to any of them is reported as **Modified** rather than silently reading as in-sync until push applies it. A **Modified** row names the field it differs in ahead of the `config pull` remedy — for a database type, the model field inside the `[models.*]` schema — so a difference you cannot see in the file is diagnosable from the row itself. Any type whose current server state `diff` could not fetch is listed under an explicit **not compared** line instead of being omitted, so the summary is never mistaken for exhaustive. Both run the **same local preflight** a real push runs — the identical checks, producing the identical messages — and both add the server comparisons `diff` performs. What neither can report is what only the apply stage reaches: a function's build, and a server refusal. See [Push failures](#push-failures) for the two stages and where the line falls. Both commands decide from the same comparison against live server state, for every type push handles and with no per-type exception list: a comment-only or formatting-only edit is a change to neither, and a difference `diff` reports is one `push` acts on — it applies the edit, or reports it as server drift (**DRIFT**, not overwritten) or a conflict (**CONFLICT**, cleared by `config pull` or `--force`), or names an immutable-field difference with its remedy. A file `push` would refuse — an unrecognized or retired key, or a value whose spelling is not its declared type — is reported by `diff` with the identical message under **Invalid**, never as in-sync. When a type's live state cannot be read, that type degrades to the last-sync content hash with a named warning, and fails closed when there is no stored hash to gate on: nothing is written, and the run tells you to `config pull` or `--force`. One prompt difference push cannot apply is named instead of being reported as a clean update: push updates and creates the `[[configs]]` entries the file lists, but deletes none and clears no activation, so a file omitting an entry the server holds — or naming no `active` configuration — is reported as still differing after the push (`Prompt <key> still differs from the server after this push`), which `config diff` will keep reporting until you `config pull` or remove the configuration server-side. A previewed or blocked entity records no content hash in sync state, so it stays pending on the next `config diff` rather than reading "in sync" — a server-rejected change cannot silently disappear from the diff. `primitive config diff --json` emits machine-readable output on stdout.
-
-## Push failures
-
-**The preflight is the only all-or-nothing stage.** `config push` runs a local pass over the tree before the first mutating call, and any error in it aborts the run with nothing applied (`Aborting push: N TOML validation error(s) — no changes were applied.`). The two stages are a fixed classification, not a description: every cross-field rule and every field's own validation is declared `preflight` or `apply`. `preflight` means decidable from the authored files alone AND enforced before the first mutating call — the CLI runs the server's own check, not a local imitation, so a preflight refusal is the same sentence the server would have produced. `apply` means the rule needs the app's persisted state, or has path semantics only the server can decide. Preflight covers unrecognized keys and declared types on every config type, and, on the `function` type, a function's `entry`, capability grammar, trigger block shapes, webhook signing-secret requirement and `{{secrets.KEY}}` reference shape, and cron expression and timezone. Cross-field constraints inside one object are decidable from the file alone because the state a push writes is file-derived: a function's version carries the whole authored TOML.
-
-**The apply stage is incremental and convergent, and there is no rollback.** Once the preflight passes, entities are applied in order. A rejection may stop the remaining work — a rule set's or an integration's non-conflict server error ends the run — while a refused FUNCTION is recorded and the loop continues, so the rest of the tree still lands. Whatever was already applied stays applied; the exit status is non-zero; re-running converges, because every applied change is idempotent.
-
-**What the preflight cannot decide, and why.** Whether a referenced secret exists, whether a webhook scheme's `config` is valid under this environment's JWKS policy, per-app caps, key-namespace collisions, archived tombstones: each needs the app's state, so each is `apply`, surfacing at apply time rather than in preflight or preview. Nothing decidable from the file alone is on that list — a local guess at any of these would be a preflight that gives a false all-clear. Which stage a refusal came from says whether re-running could ever help without touching the file: an `apply` refusal may depend on the app's state, so fixing that state — creating the missing secret, freeing the cap — and re-running can turn it into a success; a `preflight` refusal cannot, because it is decided by the tree in front of you and nothing server-side changes the answer. A function whose webhook trigger names `{{secrets.MISSING}}`, for instance, is well formed: the push starts, that one function fails naming the secret, and its siblings land. When validation passes but the server rejects an entity, the error names the entity and file. A blob bucket, rule set, integration, or prompt that already exists on the server but is missing from local sync state is adopted by key and updated in place rather than failing the create (a 409 or a "must be unique" conflict) — re-running a failed push converges. For the types push reconciles against live server state (rule sets, prompts, and the group-, collection- and metadata-type configs) the adoption happens one step earlier, in the reconcile read: an out-of-manifest entity the server already holds is compared rather than overwritten, so one that MATCHES the file is simply recorded in sync state, and one that differs is reported as a conflict — with no recorded baseline nothing says which side moved, so the remedy is `config pull` (take the server's version) or `push --force` (make the local file win). Database types converge the same way through their own conflict recovery, as do group- and collection-type configs — a config created out-of-band (whose "already exists" 409 would otherwise fail every later push) is adopted by its type-name key and updated in place. Adoption matches only on the entity's key, and a few immutability guards fail the adopt loudly rather than letting sync state diverge: a blob bucket whose local `ttlTier` differs from the server's fails the adopt with both values named (`ttlTier` is immutable — reconcile the local file to the server's tier, or recreate the bucket); a rule set whose local `resourceType` differs from the server's is rejected the same way (`resourceType` is immutable — align the TOML, or rename/recreate the rule set). Prompt adoption covers only the create itself: post-create config work (extra prompt configs, activation) runs outside the adopt path, so a duplicate-config conflict surfaces as the real error instead of being mis-adopted, and sync state is stamped only after all create work succeeds. Diagnostics go to stderr; `--json` data goes to stdout (pipes stay clean).
-
-## Out-of-band changes and stale sync state
-
-Push decides create-vs-update per entity from the server id stored in `.sync-state.json` (`entities.<entityType>.<entityKey>.id`, at the root of the config directory; database types and the group/collection/metadata type-config families track the entry without an id — the decision there is on the entry's presence). The types push reconciles against live server state (rule sets, prompts, and the group-, collection- and metadata-type configs) decide it from that read instead, and fall back to the stored id only when the server could not be read. Changes made outside the sync loop — console edits — leave that state out of date, and the two directions behave differently:
-
-- **Created out-of-band** (a console edit) — converges for database types, blob buckets, rule sets, integrations, prompts, and group- and collection-type configs: push adopts the existing entity by key and updates it in place instead of failing the create (see [Push failures](#push-failures)).
-- **Deleted out-of-band** — does not self-heal, except for the live-reconciled types above: their reconcile read finds no entity, so the next push creates it fresh. For the rest the stored id goes stale, and the next push of a changed TOML for that entity issues an update against the missing entity, failing the push with a "not found" error for that entity.
-
-Symptom → fix: `config push` fails with `Failed to update <entity> <key>: … not found` ⇒ the entity was deleted on the server while its sync-state entry survived. Delete `entities.<entityType>.<entityKey>` from `.sync-state.json` and push again — the entity is created fresh (or adopted, for the kinds listed above). A full `config pull` also rebuilds sync state from the server, but it overwrites every server-backed file with server state — hand-removing the stale entry is the fix that preserves local TOML edits.
-
-Keep everything in the sync tree — including test, probe, and dev functions. An entity created in the console shows as "Remote only" in `config diff` until a `config pull` folds it (and its sync-state entry) into the tree; from then on it's subject to the staleness above if anything deletes it server-side. Retire an entity by deleting its TOML file and running `config push --prune`, which drops its `.sync-state.json` entry with it.
-
-## Secrets
-
-App-level secrets are server-side values referenced from integration TOML and a function's webhook trigger as `{{secrets.KEY}}`, and read in function code through `ctx.secret` — never inline credentials in TOML:
+**Step-up.** A step-up is a 15-minute session holding exactly the scopes the
+command needs, pinned to the environment's app (`--app <id>` pins another).
+Ask the user to run the command a refusal prints:
 
 ```bash
-primitive secrets set OPENAI_API_KEY --value sk-...
-primitive secrets list
-primitive secrets delete OPENAI_API_KEY
+primitive login --step-up --scope write --app <app-id>
+primitive login --step-up --scope admin
 ```
 
-## Email templates
+Deleting a `default` or `protected` app, removing a
+collaborator, changing a user's role and lowering the protection level need
+`admin`; a step-up holds it only when asked for. The console asks for Approve, and Google re-prompts for `admin`. A
+command refused for lacking `admin`, or by a protected app, retries once with
+the stored step-up; `primitive logout` ends both.
 
-Primitive sends transactional email on the app's behalf; each type has a built-in default you can override, and you can register custom types. Built-in types: `email-sign-in`, `document-share`, `document-share-deferred`, `collection-share`, `collection-share-deferred`, `waitlist-invite`, `waitlist-signup-notification`, `admin-invite`, `app-invite`, `access-request-created`, `access-request-resolved`. Custom types are any kebab-case name, registered by pushing an override and sent from a server function with `ctx.api.email.send`. Each type exposes template variables (`{{code}}`, `{{expiryMinutes}}`, the optional `{{magicLink}}`, …) substituted at send time. `magic-link` and `otp` are not sign-in types — sign-in renders only `email-sign-in` (`{{code}}` and `{{expiryMinutes}}` in the code block, `{{{magicLink}}}` inside `{{#if magicLink}}`). An override stored under either name is listed as retired and never rendered; create, update, preview and test on it are refused with a message naming the `email-sign-in` block its content belongs in, and deletion is the one write it accepts.
-
-An override is `email-templates/<emailType>.toml` — `[template]` with `emailType` and `subject` required, `htmlBody` and `textBody` optional:
+**A narrower token** for a script or an agent, at most 1 hour:
 
 ```bash
-primitive config create email-template email-sign-in   # scaffold the file
-primitive config push --only email-template/email-sign-in
-
-primitive email-templates list                     # all types + override status
-primitive email-templates get email-sign-in        # current subject + body + variables
-primitive email-templates variables email-sign-in  # available {{vars}}
-primitive email-templates test email-sign-in       # send a test email
+primitive token --scope read --app <app-id> --ttl 15m
 ```
 
-Revert to the built-in default by deleting the file and running `primitive config push --prune`.
+It prints with no browser when it is no wider than the login, and opens the
+approval page otherwise. `primitive token --step-up --scope <list>` prints a
+step-up, always after approval.
 
-## Headless auth (CI)
-
-Browser-based `primitive login` doesn't work in CI. Either log in non-interactively by piping a refresh token — `primitive token --refresh | primitive -e <env> login --token-stdin` — or create a long-lived API token and target an environment explicitly:
+**CI sessions.** Create one from your own login, then run the CLI with the
+printed token in `PRIMITIVE_TOKEN`; no credentials file is needed:
 
 ```bash
-primitive tokens create --name "CI deploys" --ttl 90d    # m/h/d/w/mo/y units; omit for non-expiring
-PRIMITIVE_ENV=prod primitive config push
+primitive auth sessions create --name deploys --scope read,write --app <app-id>
+PRIMITIVE_TOKEN=<token> primitive config push
 ```
 
-`login` resolves its server from the active environment's `apiUrl` (inside a project) or the default server (outside one). Set `PRIMITIVE_SERVER_URL` to point an outside-a-project `login` at a custom server (`PRIMITIVE_SERVER_URL=http://localhost:8787 primitive login`). Outside a project, `login`, `logout`, `init` and `bootstrap` work, and so do `guides`, `skill`, `help` and `--version` (outside a project `primitive guides` serves the guides for the default server); everything else stops with an error naming the missing `primitive/config.json`. `--env` outside a project fails the same way, and neither `--app` nor an environment variable creates a fallback. An unresolvable environment — multiple environments with no `-e <env>`, no `primitive env use` selection and no `defaultEnvironment` — fails loudly rather than defaulting to production.
+A session from `primitive auth sessions create` lasts 90 days, at most 1 year.
+It is always pinned, never holds `admin`, and cannot be refreshed or derive
+tokens. To log in as yourself without a browser, pipe a refresh token on stdin:
 
-`primitive token` (singular) prints the current access token, auto-refreshing it — usable for `curl -H "Authorization: Bearer $(primitive token)"`.
+```bash
+primitive token --refresh | primitive -e <env> login --token-stdin
+```
+
+`primitive token --refresh` hands off a separate login and prints its refresh
+token, which works once. A login's refresh token is replaced on every refresh;
+presenting a replaced one ends the login.
+
+**Sessions.** Every login, step-up and CI session is listed and revocable:
+
+```bash
+primitive auth sessions list
+primitive auth sessions revoke <session-id>
+```
+
+**Display name.** `PATCH /admin/api/me` with body `{ "name": "<name>" }`
+changes the caller's own console display name and answers as
+`GET /admin/api/me`. The name is trimmed, 1 to 200 characters; any other body
+field (`email`, `role`, …) is refused 400 `INVALID_PROFILE` and nothing is
+written. It needs `write` and an unpinned login (`primitive login --app all`):
+a pinned token gets `APP_NOT_PINNED`, one without `write` gets
+`INSUFFICIENT_SCOPE`.
+
+**Refusals.** A refused command answers 403 with a `code` and, for a missing
+scope or pin, prints the `primitive login …` command that grants it. A login
+that can no longer be refreshed answers 401 instead:
+
+| `code` | Means | Do |
+|---|---|---|
+| `INSUFFICIENT_SCOPE` | The login lacks a scope the route declares (`details.missing`) | Ask the user to run the printed `primitive login …` command |
+| `APP_NOT_PINNED` | The login's pins do not reach the app or route named | Confirm the command targets the intended app (`primitive whoami` shows the pins), then ask the user to run the `primitive -e <env> login` the error names, or the printed command |
+| `PROTECTED_APP_STEP_UP_REQUIRED` | The app is protected; the login is neither a step-up pinned to it nor a CI session | Ask the user to run the printed `primitive login --step-up …` command, then retry |
+| `PROTECTION_OWNER_ONLY` | Only the app's console owner changes the protection level | `primitive config pull --only app` if `app.toml` is stale; otherwise the owner |
+| `PROTECTION_FIXED_ON_CHILD` | A child app's level is always `internal` | Change the level on the parent |
+| `SESSION_UNSCOPED` | A 401 on refresh: the login predates scoped sessions | Ask the user to run `primitive login` |
+| `SESSION_REVOKED` | A 401 on refresh: the login was revoked; `details.reason` is `refresh_token_reuse`, `parent_revoked` or `handoff_contested` when the server ended it | Ask the user to run `primitive login` (for `handoff_contested`, rerun `primitive token --refresh`) and check `primitive auth sessions list` |
+
+### Gotchas
+
+- **`write` deploys code that reaches data.** A `read,write` CI session cannot
+  read data itself but can deploy a function that does. Grant `write` only
+  where deploying is intended.
+- **A parent pin reaches its child apps.** A token pinned to an app can create
+  that app's children and change them with the scopes it holds.
+- **A printed `--app` does not mean the app is protected.** `APP_NOT_PINNED`
+  and `INSUFFICIENT_SCOPE` print it too; act on the `code`.
+- **A pushing CI session needs `read` too.** `config push` reads the app's
+  settings before it writes them; give a pushing session `read,write`.
+- **Never copy a credentials file, or store a printed refresh token.** A
+  replaced refresh token ends the login when presented, and a token from
+  `primitive token --refresh` works once. Move a login with the
+  `token --refresh | login --token-stdin` pipe; give a pipeline a CI session.
+- **Keep every CLI sharing a login current.** An older CLI running a
+  long-lived command, or its `token --refresh`, on a login a newer CLI made can
+  end that login.
+- While `PRIMITIVE_TOKEN` is set it takes precedence over the stored login,
+  and `primitive auth sessions create` is refused. Unset it to create sessions.
+- **A server older than the CLI cannot pin a login.** The CLI stores nothing
+  and names the apps it asked for; there, ask the user for
+  `primitive login --app all`.
+
+Target the environment explicitly in automated pushes. Keep tokens out of
+configuration files and logs.

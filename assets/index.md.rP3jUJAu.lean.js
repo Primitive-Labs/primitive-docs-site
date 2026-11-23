@@ -1,1 +1,0 @@
-import{_ as a,c as t,o as r,aj as i}from"./chunks/framework.BlveriQe.js";const p=JSON.parse('{"title":"Primitive","description":"","frontmatter":{},"headers":[],"relativePath":"index.md","filePath":"index.md"}'),o={name:"index.md"};function s(n,e,d,l,c,h){return r(),t("div",null,[...e[0]||(e[0]=[i("",38)])])}const g=a(o,[["render",s]]);export{p as __pageData,g as default};

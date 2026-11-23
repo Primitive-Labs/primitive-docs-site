@@ -1,25 +1,6 @@
 # Agent Guide to Primitive Multi-Client Apps
 
-Guidelines for AI agents working in a Primitive app that has more than one client — a web client and a native client against the same backend. Such a product is ONE Primitive app: one app ID, one set of environments, one server-config export, one model schema. `primitive init` produces that repository, and this guide describes what it produces and which parts are shared.
-
-## The layout
-
-```
-<repo>/
-  primitive/config.json           # the environments: apiUrl + appId per environment
-  primitive/<env>/                # exported server config (functions, database types, app settings)
-  models/models.toml              # the model schema — one copy
-  AGENTS.md                       # app-wide: this layout
-  web/                            # Vue client: its own package.json, .env, AGENTS.md
-  ios/                            # SwiftUI client: its own Package.swift, primitive.json, AGENTS.md
-```
-
-Properties that hold, and that a change must not break:
-
-- **One git repository, at the root.** No `.git` inside a client.
-- **One `.primitive/`, at the root.** A client never has its own project config, credentials, or sync tree.
-- **No root `package.json` and no workspace file.** The clients are independent projects sitting side by side, not a monorepo — each installs, builds, tests and deploys on its own.
-- **No symlinks.** Every shared file is read in place by path.
+Web and native clients share one Primitive app: an app ID, environments, server configuration, and database schemas. Each client builds and deploys independently.
 
 ## Scaffolding it
 
@@ -28,7 +9,25 @@ primitive init my-app --platform web,ios   # one app, both clients, one reposito
 primitive init my-app --platform web       # one client: the flat standalone layout
 ```
 
-`primitive init my-app` downloads the template for each platform, creates the app on the server, writes `primitive/config.json` with a `dev` environment bound to it, and installs dependencies (`pnpm install` for web, `swift package resolve` for Apple) unless you pass `--skip-install`. `--platform` takes one platform or a comma-separated list; the interactive prompt is a multi-select. A multi-platform run creates the app once, downloads and validates every template before creating anything, puts each client in a platform-named directory, and makes one initial commit at the root.
+The command creates one app and repository. Selecting both platforms creates `web/` and `ios/` directories; selecting one creates the client at the repository root. Pass `--skip-install` to defer dependency installation.
+
+## The layout
+
+```
+<repo>/
+  primitive/config.json           # the environments: apiUrl + appId per environment
+  primitive/<env>/                # exported server config (functions, db3-types/, app settings)
+  AGENTS.md                       # app-wide: this layout
+  web/                            # Vue client: its own package.json, .env, AGENTS.md
+  ios/                            # SwiftUI client: its own Package.swift, primitive.json, AGENTS.md
+```
+
+### Gotchas
+
+- **One git repository, at the root.** No `.git` inside a client.
+- **One `primitive/`, at the root.** The project config (`config.json`) and each environment's exported server config live there, shared by every client. `.primitive/` holds machine-local CLI state (credentials, the selected environment) and is gitignored. A client owns neither.
+- **No root `package.json` and no workspace file.** The clients are independent projects sitting side by side, not a monorepo — each installs, builds, tests and deploys on its own.
+- **No symlinks.** Every shared file is read in place by path.
 
 ## Adding a client to an app that already exists
 
@@ -39,16 +38,13 @@ cd my-app
 primitive init ios --platform ios     # or just `primitive init --platform ios`
 ```
 
-Init finds the nearest ancestor `primitive/config.json`, and adds the client to THAT app: the app ID and backend URL come from the selected environment, the client is wired to the repo's `models/models.toml`, and the run writes no nested `.primitive/`, no nested `.git/` and no commit — the new files are left for you to review with `git status` and commit in the outer repository. It never creates a second app.
-
-Adding a client to a repository whose single client sits at the root (the flat layout above) moves the schema to `<repo>/models/models.toml` and rewires the existing client to it, with your confirmation. Nothing else about the existing client moves: its `package.json`, its sources and its build config stay exactly where they are.
+Init uses the app and selected environment from the nearest `primitive/config.json` and leaves new files uncommitted for review. Point the new client's codegen at the existing `db3-types/` files (below).
 
 Non-interactive (CI, scripted setup) — `.primitive-init.toml`:
 
 ```toml
 action = "add-client"     # the app comes from the project config; name none here
 platform = "ios"
-promote_schema = true     # consent to move a flat repo's schema to the root
 ```
 
 ## Per app vs per client
@@ -57,34 +53,32 @@ promote_schema = true     # consent to move a flat repo's schema to the root
 |---|---|
 | `primitive/config.json` (environments, app ID) | Generated code (models, function invokers) |
 | `primitive/<env>/` server config | Runtime connection settings (`.env`, `primitive.json`) |
-| `models/models.toml` | Dependencies, build and test config |
+| `primitive/<env>/db3-types/*.toml` (database schemas) | Dependencies, build and test config |
 | App secrets and config vars | Deploy configuration |
 | The app-wide `AGENTS.md` | The client's own `AGENTS.md` |
 
-Server function and database type **definitions** are per app — they live in the sync tree, and so do the database-type declarations functions compile against (`config push` writes them into the tree's `functions/` directory). The **client code** generated from the definitions is per client: run `primitive functions codegen --lang ts -o …` in the web client and `primitive functions codegen --lang swift -o …` in the native one, from each client's own directory, to write each client's typed invokers into its own source tree.
+Server function and database type **definitions** are per app — they live in the sync tree, and so do the type declarations functions compile against (`config push` writes `functions/primitive.d.ts` into the tree). The **client code** generated from the definitions is per client: run `primitive functions codegen --lang ts -o …` in the web client and `primitive functions codegen --lang swift -o …` in the native one, from each client's own directory, to write each client's typed invokers into its own source tree.
 
-## The model schema
+## The database schemas
 
-`models/models.toml` is the app's one schema and is never copied. Its TOML keys are the wire field names, so a second copy that drifts orphans the other one's records — a client reading a stale copy writes fields nothing else can read.
+A database's models are declared once, in `primitive/<env>/db3-types/<name>.toml`. Every client's codegen and `ctx.db3(id, "<name>")` in server functions read those same files, so model and field names never diverge.
 
-Each client points at it by path:
+Each client points at the type files by path; the `db3-types/` directory covers every kind of database the app opens:
 
-- **Web** — the codegen input (`js-bao-codegen-v2 -i ../models/models.toml -o src/models`). The generated barrel imports the same file, so codegen and the runtime schema load can never disagree.
+- **Web** — the template's `pnpm codegen` reads every type file in the selected environment's `db3-types/` and generates one `src/models/<type>/` per type, plus a `src/models/index.ts` whose `allModels` holds them all. A `bao-codegen.json` beside the web client's `package.json` narrows that to the types it names, `{ "types": ["notes"] }` (type names, not paths, resolved in whichever environment is generated; each must exist in every environment the client builds for, and a type that names a model through `[type] models` needs the declaring type selected too). Outside the template, `js-bao-codegen-v2 -i ../primitive/dev/db3-types -o src/models` generates the whole directory in one run.
 - **Swift** — `bao-codegen.json` at the root of the target's source directory:
 
   ```json
-  { "input": "../../../models/models.toml" }
+  { "inputs": ["../../../primitive/dev/db3-types"] }
   ```
 
-  The path resolves against the target directory. When the file is present it replaces the plugin's scan of the target's own sources, and the Xcode pre-build script reads the same key.
+  Paths resolve against the target directory. `inputs` takes type files or directories and generates them all with one `GeneratedModels` barrel; `{ "input": "<type file>" }` names one. The Swift template's `scripts/codegen.sh` and the SwiftPM codegen plugin read the same file. Elsewhere run `swift-bao-codegen --input <type file or directory> --output <dir>` (`--input` repeatable).
 
-Adding a client adds the models its template's own code reads, if the schema does not declare them yet, and reports them; models already in the schema keep their definitions. A client that cannot be pointed at the shared schema stops the run instead of keeping a copy of its own.
-
-To add or change a model: edit `models/models.toml`, then run each client's codegen (`pnpm codegen` in the web client, `bash scripts/codegen.sh` in the Swift one). Never edit generated model files.
+To add or change a model: edit the type file, `primitive config push`, then run each client's codegen (`pnpm codegen` in the web client, `bash scripts/codegen.sh` in the Swift one). Never edit generated model files. See the databases guide (`primitive guides get databases`) for the type file and codegen setup.
 
 ## Running CLI commands
 
-Every `primitive` command walks up from the working directory to the nearest `primitive/config.json`, the way git finds `.git`. So a command run in `web/`, in `ios/`, or at the root resolves the same project, the same environment and the same config directory — there is no path flag at all. A path flag is how the tree and the environment drift apart; the walk-up is why one is never needed.
+Run CLI commands from the root or either client directory. The CLI finds the nearest `primitive/config.json` and uses its selected environment.
 
 ## Environments
 
@@ -96,8 +90,8 @@ primitive env use staging   # this machine's selection (gitignored local state)
 primitive -e prod config diff
 ```
 
-Each client also carries its own runtime connection settings — the web client's Vite plugin and the Swift client's `primitive.json` both resolve from that same project config, and both find it by the same walk-up. Keep any client-specific overrides naming the same backend/app pairs as the environments; two answers to "which backend" is the problem this layout removes.
+Both clients resolve runtime connection settings from the shared project configuration. Keep any client-specific overrides consistent with that environment.
 
 ## AGENTS.md ownership
 
-The root `AGENTS.md` describes the app: the layout, what is shared, and where the schema is. Each client's `AGENTS.md` describes that client's stack and conventions and ships with its template — it is refreshed by template upgrades, so app-wide facts do not belong in it. When working inside a client directory, read both: the client's file for its stack, the root file for what it shares.
+The root `AGENTS.md` describes the app: the layout, what is shared, and where the database schemas are. Each client's `AGENTS.md` describes that client's stack and conventions and ships with its template — it is refreshed by template upgrades, so app-wide facts do not belong in it. When working inside a client directory, read both: the client's file for its stack, the root file for what it shares.

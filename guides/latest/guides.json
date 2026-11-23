@@ -15,13 +15,13 @@
     }
   },
   "builtAgainst": {
-    "stampedAt": "2026-09-30",
+    "stampedAt": "2026-11-23",
     "channel": "production",
     "packages": {
-      "js-bao-wss-client": "3.4.0",
-      "js-bao": "0.11.0",
-      "primitive-admin": "1.0.62",
-      "primitive-app": "3.1.0"
+      "js-bao-wss-client": "3.5.0",
+      "js-bao": "0.12.0",
+      "primitive-admin": "1.3.0",
+      "primitive-app": "3.2.0"
     }
   },
   "guides": [
@@ -63,7 +63,7 @@
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents"
+        "databases"
       ],
       "variants": [
         {
@@ -118,13 +118,13 @@
         "blobBuckets.bucket",
         "bucket.upload",
         "bucket.signedUrl",
-        "accessPolicy",
+        "preset",
         "ttlTier",
         "BlobBucket"
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents",
+        "databases",
         "server-functions"
       ],
       "variants": [
@@ -135,53 +135,6 @@
         {
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOBS.swift.md"
-        }
-      ]
-    },
-    {
-      "topic": "data-modeling",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md",
-      "description": "Choosing between documents and databases, and designing your app's data architecture",
-      "keywords": [
-        "data modeling",
-        "storage",
-        "architecture",
-        "documents vs databases",
-        "when to use",
-        "design patterns",
-        "data architecture"
-      ],
-      "useCases": [
-        "Deciding between documents and databases for a feature",
-        "Designing data architecture for a new app",
-        "Splitting data across documents and databases",
-        "Choosing access control patterns",
-        "Planning for scale and performance"
-      ],
-      "concepts": [
-        "documents",
-        "databases",
-        "local-first",
-        "server-side storage",
-        "access control",
-        "CEL",
-        "sharing",
-        "collaboration"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "documents",
-        "databases",
-        "users-and-groups"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DATA_MODELING.swift.md"
         }
       ]
     },
@@ -234,11 +187,9 @@
       "prerequisites": [],
       "relatedGuides": [
         "databases",
-        "documents",
-        "data-modeling",
         "authentication",
         "invitations",
-        "resource-metadata"
+        "user-properties"
       ],
       "variants": [
         {
@@ -252,84 +203,137 @@
       ]
     },
     {
+      "topic": "user-properties",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.ts.md",
+      "description": "Typed, app-declared fields on the platform user: schema, client access, writes, unique lookup",
+      "keywords": [
+        "user properties",
+        "user-properties.toml",
+        "properties",
+        "client access",
+        "setProperties",
+        "addToSet",
+        "removeFromSet",
+        "getBy",
+        "unique constraint",
+        "initialProperties",
+        "ctx.users",
+        "auth.userProperties"
+      ],
+      "useCases": [
+        "Declaring typed fields on the platform user",
+        "Reading and writing a user's properties from a server function",
+        "Exposing a property to a client session",
+        "Looking up a user by a unique property value",
+        "Giving an invitee properties at signup",
+        "Querying users by a declared property"
+      ],
+      "concepts": [
+        "ctx.users.get",
+        "ctx.users.getBy",
+        "ctx.users.setProperties",
+        "ctx.users.addToSet",
+        "ctx.users.removeFromSet",
+        "ctx.users.query",
+        "ctx.invitations.getBy",
+        "auth.userProperties",
+        "client.me.update",
+        "UserProperties",
+        "ClientUserProperties"
+      ],
+      "prerequisites": [
+        "users-and-groups"
+      ],
+      "relatedGuides": [
+        "users-and-groups",
+        "access-control",
+        "server-functions",
+        "invitations"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.swift.md"
+        }
+      ]
+    },
+    {
       "topic": "databases",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_DATABASES.ts.md",
-      "description": "Server-side databases — types, schemas, triggers; records via ctx.db in server functions",
+      "description": "Databases (db3): types, codegen, records, synced copies, sharing, sync-off access, partitioning",
       "keywords": [
         "databases",
         "database",
-        "server-side",
-        "database type",
+        "db3",
+        "data",
+        "storage",
+        "data modeling",
         "schema",
+        "db3-types",
+        "types",
         "models",
-        "triggers",
-        "autoPopulatedFields",
-        "timestamps",
-        "ctx.db",
+        "codegen",
+        "js-bao-codegen-v2",
         "query",
         "filter",
-        "save",
-        "patch",
-        "batch",
         "aggregate",
-        "compare-and-swap",
-        "defineQuery",
-        "registered queries",
-        "$caller",
-        "channels",
+        "includes",
+        "upsert",
+        "condition",
+        "increment",
+        "stringset",
+        "batch",
+        "indexes",
+        "sync",
+        "offline",
+        "local-first",
+        "subscribe",
+        "real-time",
+        "sharing",
         "permissions",
-        "managers",
-        "grantGroupPermission",
-        "rule sets",
-        "primitive databases",
-        "import",
-        "indexes"
+        "app access",
+        "custodian",
+        "sync off",
+        "partitioning",
+        "primitive db3"
       ],
       "useCases": [
-        "Configuring a database type with a schema and triggers",
-        "Creating and managing databases from a server function",
-        "Reading and writing records from a function with ctx.db",
-        "Filtering, sorting, and paging record queries",
-        "Conditional writes, batch writes, and atomic increments",
-        "Aggregating records (count, sum, avg, min, max)",
-        "Scoping reads to the caller in function code or with a $caller registered query",
-        "Pushing realtime updates for database data over channels",
-        "Managing owners, managers, and group grants on a database",
-        "Inspecting and editing records with the primitive databases CLI",
-        "Splitting data into one database per team or tenant"
+        "Deciding how to store and partition an app's data",
+        "Declaring a database type and generating models for web, iOS and functions",
+        "Creating a database, or one per user with an alias",
+        "Reading and writing records on a device and in a server function",
+        "Aggregates, includes, upserts, conditional writes, counters and batches",
+        "Subscribing to a synced database, offline writes and live UI updates",
+        "Handling write refusals",
+        "Sharing a database with users, groups, a link or the whole app",
+        "App-held databases, transfer and custody",
+        "Turning sync off and serving data through functions with per-caller access",
+        "Registering indexes"
       ],
       "concepts": [
-        "database",
+        "db3",
         "database type",
-        "schema",
-        "triggers",
-        "timestamps",
-        "ctx.db",
-        "query options",
-        "filter operators",
-        "writes",
-        "conditional writes",
-        "batch writes",
-        "atomic increments",
-        "aggregation",
-        "access gate",
-        "registered queries",
-        "$caller",
-        "channels",
-        "database type config",
-        "rule set config",
-        "group type config",
-        "managing databases",
-        "owner and manager",
-        "reserved field names"
+        "db3-types",
+        "synced database",
+        "sync off",
+        "client.db3",
+        "ctx.db3",
+        "BaseModel",
+        "Db3State",
+        "app access",
+        "custodian",
+        "partitioning"
       ],
       "prerequisites": [],
       "relatedGuides": [
-        "documents",
-        "data-modeling",
-        "users-and-groups",
         "server-functions",
-        "resource-metadata"
+        "access-control",
+        "users-and-groups",
+        "blobs"
       ],
       "variants": [
         {
@@ -343,131 +347,9 @@
       ]
     },
     {
-      "topic": "documents",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md",
-      "description": "Local-first collaborative documents — models, CRUD, sharing, collections, access requests",
-      "keywords": [
-        "documents",
-        "models",
-        "schema",
-        "query",
-        "save",
-        "CRUD",
-        "sharing",
-        "permissions",
-        "js-bao",
-        "data modeling",
-        "local-first",
-        "collaboration",
-        "share",
-        "collections",
-        "access request",
-        "members",
-        "pending invitations"
-      ],
-      "useCases": [
-        "Creating and defining data models",
-        "Querying and filtering data",
-        "Saving and updating records",
-        "Sharing documents with other users",
-        "Understanding document permissions",
-        "Using useJsBaoDataLoader for reactive data",
-        "Sharing a document with a user, email, or group",
-        "Building a members + pending sharing UI",
-        "Handling document access requests",
-        "Bundling documents into collections"
-      ],
-      "concepts": [
-        "BaseModel",
-        "models.toml",
-        "js-bao-codegen-v2",
-        "query",
-        "save",
-        "documents.open",
-        "me.ownedDocuments",
-        "me.sharedDocuments",
-        "useJsBaoDataLoader",
-        "documentReady",
-        "initialDataLoaded",
-        "upsertByUnique",
-        "aliases"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "server-functions",
-        "devtools",
-        "databases",
-        "data-modeling"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DOCUMENTS.swift.md"
-        }
-      ]
-    },
-    {
-      "topic": "notifications",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.ts.md",
-      "description": "Multi-channel notifications (in-app inbox, push) — client SDK, server-function sends, dedupe",
-      "keywords": [
-        "notifications",
-        "push notifications",
-        "in-app inbox",
-        "APNs",
-        "FCM",
-        "device token",
-        "ctx.api.notifications.send",
-        "idempotency",
-        "rate limit",
-        "unreadCount",
-        "registerDevice"
-      ],
-      "useCases": [
-        "Sending an in-app notification to a user",
-        "Reading and marking a user's notification inbox",
-        "Registering a device for push notifications",
-        "Sending a notification from a server function",
-        "Listening for live notification events over the WebSocket",
-        "Making a notification send safe to retry with idempotencyKey",
-        "Handling notification rate limits"
-      ],
-      "concepts": [
-        "notification",
-        "in-app inbox",
-        "push channel",
-        "client.notifications.send",
-        "client.notifications.list",
-        "registerDevice",
-        "tokenSuffix",
-        "ctx.api.notifications.send",
-        "idempotencyKey",
-        "deduplicatedChannels",
-        "NotificationRateLimitError"
-      ],
-      "prerequisites": [],
-      "relatedGuides": [
-        "server-functions"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_NOTIFICATIONS.swift.md"
-        }
-      ]
-    },
-    {
       "topic": "locks",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_LOCKS.ts.md",
-      "description": "Named locks: mutual exclusion by key from client, CLI, and server functions; leases",
+      "description": "Named locks: mutual exclusion by key, taken in a server function; leases; CLI force-release",
       "keywords": [
         "lock",
         "named lock",
@@ -478,17 +360,21 @@
         "release",
         "renew",
         "status",
-        "LockTimeoutError",
+        "LOCK_TIMEOUT",
+        "ctx.locks.withLock",
         "ctx.api.locks.tryAcquire",
+        "FUNCTION_ROUTE_FUNCTION_ONLY",
+        "locks force-release",
         "serialize",
         "concurrency"
       ],
       "useCases": [
         "Serializing an operation so it never runs twice at once for the same key",
+        "Taking a lock in a server function with ctx.locks.withLock and invoking it from the app",
+        "Deciding who may lock which key in the function's authorize",
         "Acquiring a lock with a timeout and handling contention",
         "Releasing or renewing a held lock by handle",
-        "Checking who holds a key without acquiring it",
-        "Taking a lock from a server function with ctx.api.locks.tryAcquire",
+        "Checking who holds a key, or freeing a stuck key, from the CLI",
         "Re-taking a task run's own lease on a later slice (owner: ctx.runId)",
         "Sizing a lock lease so it covers the work"
       ],
@@ -496,14 +382,14 @@
         "named lock",
         "lease",
         "ttlMs",
-        "LockHandle",
-        "client.locks.acquire",
-        "client.locks.tryAcquire",
+        "ctx.locks.withLock",
+        "ctx.locks.acquire",
         "ctx.api.locks.tryAcquire",
         "re-taking your own lease",
-        "LockTimeoutError",
-        "lock rate limit",
-        "lock rule set"
+        "LOCK_TIMEOUT",
+        "FUNCTION_ROUTE_FUNCTION_ONLY",
+        "locks force-release",
+        "lock rate limit"
       ],
       "prerequisites": [],
       "relatedGuides": [
@@ -635,7 +521,8 @@
         "prompts",
         "app-secrets",
         "analytics",
-        "access-control"
+        "access-control",
+        "user-properties"
       ],
       "variants": [
         {
@@ -688,6 +575,65 @@
       "prerequisites": [],
       "relatedGuides": [
         "server-functions"
+      ]
+    },
+    {
+      "topic": "agents",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.ts.md",
+      "description": "Agent sessions: typed tools, approvals, turn context and events, with web and Swift clients",
+      "keywords": [
+        "agent",
+        "agents",
+        "session",
+        "tool",
+        "tools",
+        "approval",
+        "turn context",
+        "event",
+        "ctx.agents",
+        "ctx.tool",
+        "client tool",
+        "task tool"
+      ],
+      "useCases": [
+        "Declaring an agent prompt with server and client tools",
+        "Creating an agent session from a server function",
+        "Checking a tool call's caller rights before acting",
+        "Approving or denying a client tool call",
+        "Sending a message and reading a live session view",
+        "Recording an event the agent reads on its next turn",
+        "Listing or deleting agent sessions as an app owner or admin"
+      ],
+      "concepts": [
+        "kind = \"agent\"",
+        "prompt.agent",
+        "ctx.agents.createSession",
+        "ctx.tool",
+        "ctx.tool.attachArtifact",
+        "turnContext",
+        "answeredBy",
+        "client.agents.sessions.open",
+        "AgentSessionView",
+        "AGENT_SESSION_ORIGIN_REFUSED"
+      ],
+      "prerequisites": [
+        "prompts",
+        "server-functions"
+      ],
+      "relatedGuides": [
+        "prompts",
+        "server-functions",
+        "databases"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_AGENTS.swift.md"
+        }
       ]
     },
     {
@@ -818,7 +764,8 @@
       "relatedGuides": [
         "server-functions",
         "integrations",
-        "blobs"
+        "blobs",
+        "client-versions"
       ],
       "variants": [
         {
@@ -832,59 +779,108 @@
       ]
     },
     {
+      "topic": "usage",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.ts.md",
+      "description": "Usage and estimated cost by meter, day and user — read with primitive usage or the admin API",
+      "keywords": [
+        "usage",
+        "cost",
+        "estimated cost",
+        "meters",
+        "billing",
+        "top users",
+        "system usage",
+        "byte-days",
+        "usage.dropped"
+      ],
+      "useCases": [
+        "Reading an app's usage and estimated cost for a month",
+        "Finding the users who drive the most usage or cost",
+        "Reading one user's usage and the bytes they own",
+        "Tracing system usage to the trigger or function that ran it",
+        "Reading a parent app's usage with each child app"
+      ],
+      "concepts": [
+        "primitive usage get",
+        "primitive usage top-users",
+        "primitive usage user",
+        "primitive usage system",
+        "estCostMicros",
+        "billedTo",
+        "sys"
+      ],
+      "prerequisites": [],
+      "relatedGuides": [
+        "analytics",
+        "server-functions",
+        "configuration",
+        "client-versions"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_USAGE.swift.md"
+        }
+      ]
+    },
+    {
       "topic": "performance",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_PERFORMANCE.ts.md",
-      "description": "Patterns and anti-patterns for cutting cold-load time and round-trip count in Primitive apps",
+      "description": "Where time goes in a Primitive app: work locally, few requests, tasks vs requests, lean functions",
       "keywords": [
         "performance",
         "perf",
         "slow",
         "latency",
+        "local-first",
+        "synced database",
+        "local query",
         "round trips",
         "N+1",
-        "bulk query",
-        "Promise.all",
+        "request vs task",
+        "task startup",
+        "platform calls",
+        "batch",
+        "batchRead",
+        "$in",
         "pMap",
-        "cold path",
+        "step.do",
+        "database triggers",
+        "locks",
+        "indexes",
+        "cost.rowsRead",
+        "cold start",
         "first paint",
-        "functions.invoke",
-        "integrations",
         "scheduled function",
-        "cron",
-        "cache",
-        "stale-while-revalidate",
         "channels",
-        "cache invalidation",
-        "defineQuery",
         "measure"
       ],
       "useCases": [
-        "Diagnosing why a page is slow on cold load",
-        "Returning several models from one function call",
-        "Replacing N+1 invoke loops with one bulk call and one bulk query",
-        "Parallelizing independent awaits in app code and inside functions",
-        "Bulk-calling third-party APIs through integrations",
-        "Deferring non-critical init off the cold path",
-        "Rendering with stored values and refreshing reactively",
-        "Pure compute over cached source data, invalidated by a channel message",
-        "Moving stale-tolerant third-party data to a scheduled function",
-        "Auditing an existing Primitive app for common slow patterns",
-        "Instrumenting first-paint time to verify a perf win"
+        "Deciding where a piece of work should run: on the device, in a request or in a task",
+        "Rendering a screen from a synced database instead of the network",
+        "Cutting and parallelizing the requests a screen makes",
+        "Reducing platform calls inside a server function",
+        "Filling batches and replacing per-item queries",
+        "Trimming steps, trigger runs and locks in a task",
+        "Deciding whether a database index is worth its write cost",
+        "Measuring a function or screen before and after a change",
+        "Diagnosing why a screen or a server function is slow"
       ],
       "concepts": [
-        "cold path vs background",
-        "one function call, several models",
-        "bulk query",
-        "Promise.all",
-        "pMap",
-        "integration bulk call",
-        "re-block trap",
-        "stale-while-revalidate",
-        "pure compute",
-        "channel invalidation",
-        "scheduled function",
-        "registered query cache",
-        "measuring first paint"
+        "where the time goes",
+        "do it locally",
+        "few requests, run together",
+        "requests for what a user waits on, tasks for the rest",
+        "count the platform calls",
+        "let the write do the checking",
+        "full batches",
+        "bounded concurrency",
+        "index write cost",
+        "cold start and the median of five runs"
       ],
       "prerequisites": [],
       "relatedGuides": [
@@ -904,56 +900,9 @@
       ]
     },
     {
-      "topic": "devtools",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md",
-      "description": "Using Document Explorer and Test Harness for debugging and testing",
-      "keywords": [
-        "devtools",
-        "debugging",
-        "testing",
-        "Document Explorer",
-        "Test Harness",
-        "browser",
-        "validation",
-        "inspection"
-      ],
-      "useCases": [
-        "Inspecting document data in the browser",
-        "Validating CRUD operations worked correctly",
-        "Running browser-based tests",
-        "Filtering and sorting records for inspection",
-        "Writing test cases for js-bao models"
-      ],
-      "concepts": [
-        "DevTools",
-        "Document Explorer",
-        "Test Harness",
-        "TestGroup",
-        "test cases",
-        "model inspection",
-        "data validation"
-      ],
-      "prerequisites": [
-        "documents"
-      ],
-      "relatedGuides": [
-        "documents"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_DEVTOOLS.swift.md"
-        }
-      ]
-    },
-    {
       "topic": "configuration",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md",
-      "description": "Backend configuration as code — TOML sync loop, directory map, environments, headless CI auth",
+      "description": "Configuration as code — TOML sync loop, environments, admin scopes, protection levels, CI sessions",
       "keywords": [
         "configuration",
         "config",
@@ -968,19 +917,29 @@
         "secrets",
         "tokens",
         "CI",
-        "config as code"
+        "config as code",
+        "scope",
+        "step-up",
+        "protected",
+        "protection level",
+        "PRIMITIVE_TOKEN",
+        "sessions",
+        "admin token"
       ],
       "useCases": [
         "Setting up the config directory for an app",
         "Pushing function/prompt/integration/database-type changes to the server",
         "Managing dev/staging/prod environments from one repo",
         "Storing app secrets referenced as {{ secrets.KEY }}",
-        "Authenticating the CLI in CI pipelines"
+        "Authenticating the CLI in CI pipelines",
+        "Choosing the scope and pins of a login, a step-up or a CI session, and writing to a protected app"
       ],
       "relatedGuides": [
         "app-secrets",
-        "multi-client"
-      ]
+        "multi-client",
+        "client-versions"
+      ],
+      "prerequisites": []
     },
     {
       "topic": "inspecting-and-debugging",
@@ -1001,7 +960,9 @@
         "blob-buckets",
         "records",
         "logs",
-        "--json"
+        "--json",
+        "Server-Timing",
+        "caching"
       ],
       "useCases": [
         "Listing a function's runs and a task run's step trace",
@@ -1010,12 +971,13 @@
         "Triaging a failing function",
         "Inspecting active connections and sessions for a user",
         "Reading database and document records from the CLI",
-        "Reading blob metadata without downloading the object"
+        "Reading blob metadata without downloading the object",
+        "Attributing a slow request with the Server-Timing header"
       ],
       "relatedGuides": [
-        "devtools",
         "server-functions"
-      ]
+      ],
+      "prerequisites": []
     },
     {
       "topic": "access-control",
@@ -1034,75 +996,22 @@
         "rule sets",
         "rule-sets",
         "FUNCTION_ACCESS_DENIED",
-        "lock rule set",
         "entitlement",
         "billing",
         "paywall"
       ],
       "useCases": [
         "Writing a server function's access gate",
-        "Writing rule sets for groups, collections, buckets, database types, and locks",
+        "Writing blob bucket rule sets and metadata read and write rules",
         "Scoping what a caller reaches inside function code",
         "Governing who can create groups or manage members",
         "Testing and debugging CEL rules",
         "Building a subscription-entitlement (Stripe billing) gate end to end"
       ],
       "relatedGuides": [
-        "resource-metadata"
-      ]
-    },
-    {
-      "topic": "resource-metadata",
-      "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.ts.md",
-      "description": "Typed metadata on any resource — categories, md.self/md.caller in CEL, batch reads",
-      "keywords": [
-        "resource metadata",
-        "metadata category",
-        "md.self",
-        "md.caller",
-        "metadataManifest",
-        "MetadataCategoryConfig",
-        "readRule",
-        "writeRule",
-        "resourceMetadata",
-        "getBatch",
-        "ctx.api.resourceMetadata",
-        "initialMetadata",
-        "attrs"
+        "user-properties"
       ],
-      "useCases": [
-        "Attaching schema'd, access-controlled data to a user, group, collection, or database",
-        "Reading and writing a metadata category from the client or CLI, including a batch read",
-        "Referencing declared metadata in a group, collection, or database access rule",
-        "Reading the calling user's own metadata (md.caller) in an access rule",
-        "Writing a server-owned category from a server function (writeRule = \"false\")",
-        "Stamping initial metadata when creating a collection or database"
-      ],
-      "concepts": [
-        "metadata category config (schema + readRule/writeRule)",
-        "declared-access manifest ([metadata.self]/[metadata.paths])",
-        "md.self.<category>.<key>",
-        "md.self.attrs (projected category)",
-        "md.caller (user.userId root)",
-        "ctx.api.resourceMetadata from a server function",
-        "create-time initial metadata"
-      ],
-      "relatedGuides": [
-        "access-control",
-        "users-and-groups",
-        "databases",
-        "server-functions"
-      ],
-      "variants": [
-        {
-          "language": "ts",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.ts.md"
-        },
-        {
-          "language": "swift",
-          "file": "AGENT_GUIDE_TO_PRIMITIVE_RESOURCE_METADATA.swift.md"
-        }
-      ]
+      "prerequisites": []
     },
     {
       "topic": "invitations",
@@ -1139,7 +1048,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_INVITATIONS.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "blob-buckets",
@@ -1152,8 +1063,9 @@
         "signed url",
         "ttl",
         "access policy",
-        "public-read",
-        "owner-only",
+        "public",
+        "admin-only",
+        "personal-uploads",
         "avatars",
         "function outputs"
       ],
@@ -1172,7 +1084,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_BLOB_BUCKETS.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "deploying",
@@ -1212,7 +1126,9 @@
           "language": "swift",
           "file": "AGENT_GUIDE_TO_PRIMITIVE_DEPLOYING.swift.md"
         }
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     },
     {
       "topic": "multi-client",
@@ -1224,7 +1140,7 @@
         "web and ios",
         "layout",
         "shared schema",
-        "models.toml",
+        "db3-types",
         "primitive init",
         "add client",
         "project root",
@@ -1239,10 +1155,10 @@
       ],
       "relatedGuides": [
         "configuration",
-        "documents",
-        "deploying",
-        "data-modeling"
-      ]
+        "databases",
+        "deploying"
+      ],
+      "prerequisites": []
     },
     {
       "topic": "error-handling",
@@ -1306,6 +1222,60 @@
       ]
     },
     {
+      "topic": "client-versions",
+      "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.ts.md",
+      "description": "Per-platform app version policy: declare it, read client status, template banner/gate, enforce it",
+      "keywords": [
+        "client versions",
+        "app version",
+        "appVersion",
+        "clients",
+        "minRequired",
+        "minRecommended",
+        "latest",
+        "updateUrl",
+        "enforce",
+        "CLIENT_UPDATE_REQUIRED",
+        "update banner",
+        "update gate",
+        "app update",
+        "version policy",
+        "client.appVersion"
+      ],
+      "useCases": [
+        "Declaring an app's latest, recommended and required version per platform",
+        "Reading a build's status against the version policy from the JS or Swift client",
+        "Showing an update banner or a blocking update gate in the Vue or Swift template",
+        "Enforcing a minimum version on the server (opt-in)"
+      ],
+      "concepts": [
+        "[clients.<platform>] in app.toml",
+        "client.appVersion",
+        "client.getClientVersions",
+        "AppVersionStatus",
+        "enforce",
+        "CLIENT_UPDATE_REQUIRED",
+        "client.update_refused"
+      ],
+      "prerequisites": [
+        "configuration"
+      ],
+      "relatedGuides": [
+        "analytics",
+        "usage"
+      ],
+      "variants": [
+        {
+          "language": "ts",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.ts.md"
+        },
+        {
+          "language": "swift",
+          "file": "AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.swift.md"
+        }
+      ]
+    },
+    {
       "topic": "changelog",
       "file": "AGENT_GUIDE_TO_PRIMITIVE_CHANGELOG.md",
       "description": "User-visible platform changes per production release — features, API/CLI changes, notable fixes",
@@ -1325,7 +1295,9 @@
         "Checking what changed before upgrading platform libraries",
         "Finding new platform capabilities to adopt",
         "Tracking deprecations that need migration"
-      ]
+      ],
+      "relatedGuides": [],
+      "prerequisites": []
     }
   ]
 }

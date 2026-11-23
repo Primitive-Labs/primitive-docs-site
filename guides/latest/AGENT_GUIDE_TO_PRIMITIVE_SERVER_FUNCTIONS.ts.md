@@ -1,168 +1,113 @@
 # Agent Guide to Primitive Server Functions
 
-A **server function** is TypeScript authored in the app's config tree and pushed with `primitive config push`. It runs on the platform — never on the device, whatever language the app's clients are written in — **as the app itself**: reviewed code acting with the app's authority, behind an `access` gate that decides who may call it. It answers over HTTP. It is config-as-code beside [prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md) and [integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md): `functions/<key>.toml` states the gate, the entry point and the few capabilities that still need declaring; the code sits next to it; one push builds and ships both as one immutable version.
+Server functions run TypeScript with the app’s authority. Define the entry
+point in `functions/<key>.toml` and an `authorize` method beside the handler,
+then deploy with `primitive config push`.
 
-**The caller chooses the RUNTIME, and the ROUTE is how it says so.** A function is a function and its config says nothing about how it runs. `functions.invoke` → `POST functions/{key}` runs it under the **request** runtime (the code runs inside the call and answers its result, no run row); `functions.start` → `POST functions/{key}/start` runs it under the **task** runtime (a run id immediately, one run row, and the code may sleep for hours or days). Every pushed function takes both, with no config change.
-
-| Door | Runtime |
-|---|---|
-| `functions.invoke`, a webhook delivery | request |
-| `functions.start`, `ctx.functions.start`, a cron fire | task |
-
-`ctx.runtime` is the `request` / `task` word for the runtime in use — `"request"` or `"task"` on every invocation, beside `ctx.trigger.kind` (which says which DOOR fired it). A function that must not run under one of the two says so **in code**, with `assertRuntime("request" | "task")` from `primitive-functions` — at module scope to refuse every such invocation, or inside the handler. The platform settles a mismatch as `status: "failed"`, `errorCode: "FUNCTION_RUNTIME_REFUSED"`, with a message naming both runtimes. That assertion is the only lock there is.
-
-**`mode` and `durable` are not keys of a function**, and a `[[function.triggers.cron]]` entry has no `mode` either — every cron fire starts a task run.
+Choose `functions.invoke` for a result in the request or `functions.start` for
+a background task. Webhooks use requests; cron schedules start tasks. `invoke`
+has a wall-clock budget — 5 000 ms by default, 30 000 ms at most — so work that
+can exceed 30 000 ms has to be a task.
 
 ## The config file
-
-```bash
-primitive config create function <key>   # scaffolds functions/<key>.toml
-primitive config fields function         # every key, its type and default
-primitive config push --only function/<key>
-```
 
 ```toml
 # functions/greet.toml
 [function]
-key = "greet"                       # required; URL-path-safe; one namespace per app (below)
-description = "Says hello"
-entry = "functions/greet/index.ts"  # required; relative to the config tree root
-access = "true"                     # required CEL gate — see The access gate
-                                    # No `mode` and no `durable`: the CALLER picks the runtime at
-                                    # each call. Use assertRuntime(...) in code to refuse one.
-capabilities = []                   # integration:, secret:, and the high-blast strings — see Capabilities
+key = "greet"
+entry = "functions/greet/index.ts"
 
-[function.inputSchema]              # JSON Schema, native TOML tables. Input is validated
-type = "object"                     # and coerced against it before the handler runs.
-required = ["name"]
+[function.inputSchema]
+type = "object"
 
 [function.inputSchema.properties.name]
 type = "string"
-
-[function.outputSchema]             # The return value is validated against it; a mismatch
-type = "object"                     # answers status "failed".
-
-[function.limits]                   # cpuMs, subRequests, ratePerMinute — may LOWER a platform ceiling,
-cpuMs = 2000                        # never raise one. timeoutMs is a request field, not a config key.
 ```
 
-- **One key namespace per app.** A key is unique per app, case-insensitively; pushing a function onto a key another object already holds fails naming the holder. The key doubles as the URL path segment that addresses the function.
-- **Availability is server-owned.** `status` is not a TOML key: `config pull` never writes it and `config push` never sends it. A push to a *disabled* function updates its code and leaves it out of service. Enable, disable and archive are CLI verbs (see Operating).
-- Triggers are declared in the same file — see Triggers.
+`key` identifies the function; `entry` is relative to the configuration root.
+`inputSchema` validates the input and declares the keys `input` may list; add
+`outputSchema` to validate results.
 
 ## The handler
 
 ```ts
 // functions/greet/index.ts
-import { defineFunction } from "primitive-functions";
-import { salute } from "./greeting.js";
+import { defineFunction, requireSignedIn } from "primitive-functions";
 
-// Keyed: `input` and the return are typed from functions/greet.toml's schemas
-// (the declaration `config push` generates — see Codegen). A key this tree
-// does not declare is a compile error; one that names another file's function
-// is refused at push.
-export default defineFunction("greet", async (input, ctx, step) => {
-  return { message: salute(input.name) };
+export default defineFunction("greet", {
+  input: ["name"],
+  authorize: requireSignedIn(),
+  handler: async (input: { name?: string }) => {
+    return { message: `Hello ${input.name ?? "world"}` };
+  },
 });
-
-// Unkeyed, with types you write yourself — still valid:
-// export default defineFunction(async (input: { name: string }, ctx, step) => …);
 ```
 
-| Argument | What it is |
-|---|---|
-| `input` | The request's `rootInput`, validated and coerced against `inputSchema` when one is declared. On a trigger fire: the verified delivery body (webhook) or the entry's `rootInput` (cron). |
-| `ctx` | The invocation context: `user`, `trigger`, `api`, `db`, `integrations`, `prompts`, `secret`, `configVar`, `users`, `connections`, `channels` — each documented below. |
-| `step` | Present under **both** runtimes, so one body runs either way. Under the TASK runtime it is the live engine step: `step.do` is memoized and replayed, `step.sleep` hibernates (see Task runs). Under the REQUEST runtime `step.do` runs its body **inline** (nothing persisted, nothing replayed) and `sleep`/`sleepUntil` really wait when the remaining request **budget** covers the duration — past it, and for `waitForEvent`, the invocation fails with `errorCode: "FUNCTION_RUNTIME_REFUSED"` naming the step, the duration and the budget left. The thrown error's `name` stays `STEP_NOT_AVAILABLE`. That rule holds on every request-runtime door: HTTP and a webhook delivery. |
-| `ctx.runtime` | `"request"` or `"task"` — which runtime the platform is running this invocation under, set from the runner in use. `assertRuntime(required)` from `primitive-functions` throws a typed `FunctionRuntimeError` when it differs, and the platform settles it `failed` with `errorCode: "FUNCTION_RUNTIME_REFUSED"`. |
-| `ctx.runId` | The RUN this invocation belongs to, or `null`. Set under the task runtime (every slice) and for a webhook-fired request run; `null` for an HTTP `invoke`, which writes no run row. |
-| `ctx.sliceId` | The SLICE of that run, or `null`. A task run is a sequence of slices and this changes when the run hibernates and wakes, so it tells a resume from a first pass. The same identifier `primitive functions runs` and the status route's `slice.sliceId` report. `null` under the request runtime — a request invocation is not a slice. |
+Every version pushed today must define `authorize` beside the handler — a
+version with none is refused `FUNCTION_AUTHORIZE_REQUIRED` at push. `input`
+lists the keys the handler reads, and `input: []` says it reads none; with no
+list, push refuses the function unless its TOML declares a trigger, and every
+caller's call is refused `FUNCTION_INPUT_LIST_MISSING`. See
+[Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#declaring-input-keys).
 
-- The return value is JSON-serialized as the envelope's `output` and validated against `outputSchema`. A throw settles the invocation with `status: "failed"`, `errorCode: "FUNCTION_THREW"` and the thrown message.
-- `defineFunction` is typing sugar over the same contract: `export default async function (input, ctx, step) {}` is equivalent.
-- `primitive-functions` is the one import the bundle leaves external: the platform supplies it at invoke time, so a function always runs against the SDK the platform is running. The npm package is a stub whose every export throws — a function only ever runs inside a push.
+```bash
+primitive config push
+primitive functions invoke greet --input '{"name":"Ada"}'
+```
 
-### `ctx.user` and `ctx.trigger`
+| Argument | Purpose |
+| --- | --- |
+| `input` | Caller input, webhook payload, or cron `rootInput`. |
+| `ctx` | App services and caller/trigger context. |
+| `step` | Named operations and waits, with saved results in task runs. |
 
-| Door | `ctx.trigger` | `ctx.user` |
-|---|---|---|
-| HTTP invoke | `{ kind: "http", runKey }` | `{ userId, email }` — the caller |
-| Webhook fire | `{ kind: "webhook", webhookKey, webhookId, externalEventId }` | `null` |
-| Cron fire | `{ kind: "cron", name, triggerId, scheduledFor }` | `null` |
-| Nested start (`ctx.functions.start`) | `{ kind: "function", functionKey, runId, runKey }` — the PARENT's key and run | Inherited from the tree's root, or `null` |
-| Admin system door | `{ kind: "manual", userId, runKey }` — the admin who asked | `null` |
-
-`ctx.trigger.runKey` carries the caller-supplied run key a start was **coalesced** by, on the `http`, `function` and `manual` arms — `null` when the start named none, and on a request invocation, which coalesces nothing. A trigger root's run key is its own run id, which `ctx.runId` already says, so the `webhook` and `cron` arms carry none.
-
-`ctx.trigger` is typed as that union (`FunctionTrigger`), narrowed on `kind`, with every arm's fields typed — the declaration is held identical to what the fire paths build. `ctx.user` is typed `FunctionUser | null`: a function that a trigger can fire reads it as `ctx.user?.userId`. Whichever door the invocation came through, the code runs with the same authority — the app's (see Execution identity). The caller is a **name** the code may use for attribution and scoping; it is not a second principal.
+Return JSON data. Read `ctx.runtime` for `request` or `task`, and
+`ctx.trigger.kind` to identify what started the function. `ctx.user` is the
+original caller, or `null` for a trigger or system invocation. Call
+`assertTrigger(ctx, kind)` first to refuse every other trigger and narrow `ctx`
+to that one — a tool function starts with `assertTrigger(ctx, "tool")`.
 
 ## Pushing
 
-`config push` builds the bundle with esbuild, inlines every npm dependency, and stores the built bundle **together with** the authored TOML bytes and every source file it read.
+Push bundles dependencies, generates types, checks function code, and activates
+a version. It preserves authored sources for `config pull`.
 
-- Every push that changes anything creates a new **immutable version** and repoints the function at it. "Anything" is the whole envelope: a comment-only or line-ending-only edit makes a new version, and `config pull` on a fresh clone hands back the bytes you wrote.
-- **Relative and absolute imports must stay inside the config tree.** An entry or import that resolves outside it — through a symlink included — is refused at push, so a push can never upload a file the tree does not contain.
-- **npm packages are imported by name and inlined.** They resolve through Node like any other import; `node_modules` content is never stored as source or written back by `config pull`.
-- A missing entry file or a build error names the file and the message, and nothing is pushed for that function — the rest of the tree still applies.
-- The built bundle is capped at **5 MB**.
-- **Push typechecks what it ships** against the declarations it generates, per function — see Codegen (under The typed handle).
-- Pointing a function back at an earlier version is `primitive functions activate` — see Versions and rollback (under Operating).
-- **Push runs your module scope.** Collecting the manifest (see What a function touches) means building the bundle a second time with `primitive-functions` replaced by a recording stub and executing it in a separate Node process — scrubbed environment, the config tree as working directory, hard timeout. It is the trust you extend by running a project's own build; know it before pushing a tree you did not write. A push whose collection fails is refused naming the error: the manifest is part of the version's identity.
-- Capabilities are validated before anything is applied: a malformed string, an `integration:` key the app has no active integration for, an unknown family, or a grant string or key that is not part of the grammar (below) refuses the push by name. Nothing about databases is checked at push, because nothing about databases is declared.
+- Keep source imports inside the configuration directory, or list shared
+  directories in `functionSources` in `primitive/config.json`
+  (`["web/src/engine"]`, relative to the project root; `..` may climb up to the
+  git repository root). Push bundles and typechecks shared files with each
+  function that imports them and never stores them; `config pull` writes only
+  the configuration directory.
+- A shared file's imports resolve with its own nearest `tsconfig.json`
+  `paths`/`baseUrl`, and must land in a listed directory: a `@/` alias or a
+  linked workspace package outside every listed directory is refused at push.
+  All other compiler options come from `functions/tsconfig.json` (no DOM); do
+  not set `rootDir` there.
+- Import npm packages by name. The built bundle is limited to 5 MB.
+- Pushing a function or a `schemas/` file needs `primitive-admin` 1.3.0 or newer, the first
+  CLI whose generated handler types carry the `input` list. An older CLI's push is refused
+  with `CLI_VERSION_TOO_OLD`, or `COMPILED_PAYLOAD_REQUIRED` when it carries no compiled
+  schemas; run `npm install -g primitive-admin@latest` and push again.
+- Treat generated declarations as build output. Use `primitive functions
+  codegen --check` in CI; it fails, with push's message, on a schema or a
+  db3 type file push refuses. Function, prompt, `schemas/`, db3 and user property
+  types are all in `functions/primitive.d.ts`; import them with
+  `import type { Functions, Schemas } from "./primitive"` and write
+  `Functions.<Key>Input`, `Schemas.<Def>`. Push, pull and codegen remove a
+  declaration file push no longer writes, and push refuses a function source
+  that imports one (also under `--dry-run` and `--no-typecheck`), naming
+  `./primitive` and the namespace.
+- Push executes module-level code while collecting the manifest; only push a
+  tree you trust to run locally.
+- The server loads each new version once with no network and no credentials.
+  Module-level code that throws, awaits I/O, or runs long refuses that
+  function's push with `FUNCTION_PROBE_FAILED`; keep such work in the handler.
+- A failed function build can leave other configuration changes applied.
+- An agent whose tool names a function that failed to build or typecheck, and
+  that the app does not hold (never pushed, or archived), is not pushed. Its
+  failure row names that function as the cause; fix the function first.
 
 ## Invoking
-
-```
-POST /app/{appId}/api/functions/{key}
-```
-
-Any signed-in member may call it, subject to the function's `access` gate. Every request field is optional:
-
-| Field | Meaning |
-|---|---|
-| `rootInput` | The value the handler receives as `input`. |
-| `contextDocId` | A document the invocation is about. On a task start it defaults to the caller's root document and is required when there is none. |
-| `meta` | Caller metadata, at most 1 KB encoded. |
-| `timeoutMs` | Wall-clock budget. Default 5 000 ms; clamps silently to the 30 000 ms ceiling. Ignored on a task start. |
-| `runKey` | Task only — idempotency key (see Task runs). On the request path it is validated and otherwise ignored, since there is no run row to deduplicate against. |
-
-**The request envelope** — always HTTP `200`, because the call reached the function and the function has an answer:
-
-```json
-{ "status": "completed", "output": { "message": "hello Ada" } }
-```
-
-| `status` | Meaning |
-|---|---|
-| `completed` | The handler returned; `output` is its value. |
-| `failed` | The handler threw (`FUNCTION_THREW`), returned a value JSON cannot carry (`OUTPUT_NOT_SERIALIZABLE`), exported no callable default (`FUNCTION_NO_HANDLER`), returned output `outputSchema` refuses (`OUTPUT_SCHEMA_VIOLATION`), or returned over 1 MiB (`OUTPUT_TOO_LARGE`). `errorCode` says which; `error` carries the message. |
-| `timeout` | The handler did not finish inside the budget. |
-
-An envelope from a handler that ran to an answer — `completed`, or `failed` from a throw or an `outputSchema` violation — also carries `limits`, the resolved ceilings that invocation ran under: your `[function.limits]` clamped element-wise to the platform's own values:
-
-```json
-{ "status": "completed", "output": { "message": "hello Ada" }, "limits": { "cpuMs": 2000, "subRequests": 128, "ratePerMinute": 1200 } }
-```
-
-Read it when you need to tell what the platform resolved from what you declared: asking for more than a ceiling gets the platform's value silently, and this is where that is visible. A `timeout`, an `OUTPUT_TOO_LARGE` failure and the HTTP errors below carry no `limits`.
-
-**HTTP errors** mean the platform refused before your code ran:
-
-| HTTP | `errorCode` | Cause |
-|---|---|---|
-| `400` | `INVALID_META` | `meta` over 1 KB encoded. |
-| `400` | `INVALID_RUN_KEY` | A `runKey` carrying a reserved character sequence. |
-| `400` | — | `rootInput` failed `inputSchema`; `error` is `Input schema validation failed` and `details` lists the violations. |
-| `400` | `CONTEXT_DOC_REQUIRED` | A task start with no `contextDocId` from a caller who has no root document. |
-| `403` | `FUNCTION_ACCESS_DENIED` | The `access` gate denied the caller. |
-| `403` | `FUNCTION_DISABLED` | The function is disabled — seen only by callers the gate admits. |
-| `404` | `FUNCTION_NOT_FOUND` | Unknown key, an archived function, or a hard delete in progress. |
-| `409` | `FUNCTION_NOT_PUSHED` | A function with no pushed code. |
-| `409` | `FUNCTION_DELETE_IN_PROGRESS` | A task start that raced a hard delete. |
-| `429` | `FUNCTION_RATE_LIMITED` | Past the per-function rate ceiling; `Retry-After` is set. |
-| `503` | `FUNCTION_RATE_UNAVAILABLE` | The rate limiter could not be consulted; retryable. The platform refuses rather than run unmetered. |
-
-From the client, `client.functions.invoke` returns the envelope typed by its output generic; `input` travels as `rootInput`:
 
 ```typescript
   const result = await client.functions.invoke<{ message: string }>("greet", {
@@ -178,88 +123,546 @@ From the client, `client.functions.invoke` returns the envelope typed by its out
   }
 ```
 
-Both verbs work on every function: `invoke` posts to `functions/{key}` and `start` to `functions/{key}/start`, and the route is the only thing that says which runtime the call means. A function that must not be reached one of the two ways says so in its own code with `assertRuntime`, and the refusal comes back as a `failed` invocation with `errorCode: "FUNCTION_RUNTIME_REFUSED"`.
+The result has `status: "completed" | "failed" | "timeout"`. Check status before
+using `output`. A handler failure returns an envelope; a pre-execution refusal
+uses an HTTP error. Use `invocationId` to locate its log.
 
-The output type rides on `invoke`'s `TOutput` parameter (`FunctionInvokeResult<TOutput>`).
+| Option | Use |
+| --- | --- |
+| `rootInput` | REST input; client methods call this `input`. |
+| `contextDocId` | What the invocation concerns, at most 100 characters — typically a database id. A task run is keyed under it. |
+| `meta` | Caller metadata, up to 1 KB. |
+| `timeoutMs` | Request deadline: 5 000 ms default, 30 000 ms maximum. |
+| `runKey` | Deduplicates task starts; ignored by request invocations. A *failed* run keeps its key — retry with a new one. |
 
+### Callers who are not signed in
 
-### The access gate
-
-`access` is a CEL expression (see [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md)) evaluated on **every HTTP call**, and it fails closed:
-
-- A caller it denies gets `403 FUNCTION_ACCESS_DENIED`.
-- A function with **no** `access` expression denies everyone — which is why push refuses to ship code for one.
-- App owners and admins bypass it.
-- A trigger fire (webhook, cron) and a nested `ctx.functions.start` do NOT consult it — the gate governs the HTTP route only. A function that only its triggers or another function should run declares `access = "false"`, a gate no member passes, which closes that route.
-- It is checked **before** any answer about the function's operational state, so a rejected caller cannot tell a disabled function from a never-pushed one from a live one, and cannot map the app's functions by probing keys.
-- A caller the gate rejects, or a request `inputSchema` refuses, consumes no rate-limit budget.
-
-**The gate is the authorization.** Once a caller is through it, the code runs with the app's authority — the gate is the one place a reviewer decides *who* may make this code act. Write it as tightly as the function deserves: `user.role == 'admin'` on a function that deletes, `true` on one that reads its caller's own rows.
-
-## Task runs
-
-Any function starts as a run when the caller says `start`. When running it inside a call makes no sense — a function that sleeps for a day is not something you want a caller waiting on — say so in the CODE with `assertRuntime("task")`, at module scope so every invoke is refused before a line of the handler runs:
+A call with no `Authorization` header is admitted only when the app sets
+`[app] signedOutAccess = true` and the function declares `public = true` and
+has an `authorize` method; any other such call is `401` before the code runs.
+`start` always needs a signed-in caller.
 
 ```toml
-# functions/order-sync.toml — nothing here says how it runs
+# functions/landing-stats.toml
 [function]
-key = "order-sync"
-entry = "functions/order-sync/index.ts"
-access = "true"
+key = "landing-stats"
+public = true
 ```
 
+`authorize` then sees `auth.user = { userId: "", email: null, role: "anonymous" }`
+and the handler `ctx.user = null`. `requireSignedIn()`, `requireRole()` and
+the membership helpers deny that caller; `allowAnyone()` admits it.
+
+The run reads the app's data and writes to app-held databases. These throw
+`FUNCTION_SIGNED_OUT_REFUSED` (403): `ctx.functions.start`,
+`ctx.users.forEachBatch`, any `ctx.agents` call,
+creating a database, and changing one the app does not hold. A call about one user must pass `userId`, and naming a member
+works only for reads in a function that declares `users:readAny`.
+
+A JS or Swift client created without a token makes signed-out calls.
+
+#### Serving a database named by the caller
+
+A public function that reads a database id from its input must check it in
+`authorize`, or any caller can read any database of the app. Use a helper;
+both admit on public access only while the database is public and
+`[app] signedOutAccess` is on:
+
+| Helper | Admits | `ctx.auth` |
+|---|---|---|
+| `requirePublicDb3(db3IdOf, type?)` | anyone while the database is public | `{ db3Id }` |
+| `requireDb3Level(db3IdOf, type, minLevel, options?)` | a signed-in caller at `minLevel`+ (owner > read-write > reader); with `{ orPublic: true }` (needs `"reader"`) also anyone while public | `{ db3Id, via: "sharing" \| "public", level }` |
+
 ```ts
-import { assertRuntime, defineFunction } from "primitive-functions";
+import { defineFunction, requireDb3Level } from "primitive-functions";
 
-// An invoke of this function settles `failed` with
-// errorCode: "FUNCTION_RUNTIME_REFUSED", naming both runtimes.
-assertRuntime("task");
-
-export default defineFunction(async (input: { orderId: string }, ctx, step) => {
-  const charged = await step.do("charge", async () =>
-    ctx.api.documents.get({ documentId: input.orderId })
-  );
-
-  // Hibernate. Nothing runs — and nothing is billed — while it waits.
-  await step.sleep("cooling-off", "24 hours");
-
-  return { orderId: charged.documentId, confirmedAt: Date.now() };
+export default defineFunction({
+  input: [],
+  authorize: requireDb3Level((input) => input.db3Id, "notes", "reader", { orPublic: true }),
+  handler: async (input, ctx) => {
+    const page = await ctx.api.db3.get({ db3Id: ctx.auth.db3Id });
+    return { title: page.title, via: ctx.auth.via, canEdit: ctx.auth.via === "sharing" && ctx.auth.level !== "reader" };
+  },
 });
 ```
 
-| `step` method | Under the TASK runtime | Under the REQUEST runtime |
-|---|---|---|
-| `do(name, body)` | Run `body` once; its return value is stored and replayed on every later resume | Run `body` inline; nothing stored, nothing replayed |
-| `do(name, config, body)` | The same with a retry/timeout config — `stepPolicy.<family>` is one | The config is accepted and the body runs once |
-| `sleep(name, duration)` | Hibernate for a duration (`"24 hours"`, or milliseconds) | Really wait, if the remaining request budget covers it; otherwise `FUNCTION_RUNTIME_REFUSED` |
-| `sleepUntil(name, timestamp)` | Hibernate until a `Date` or epoch-ms timestamp | The same rule, from the timestamp's distance |
-| `waitForEvent(name, options)` | Hibernate until an event arrives | `FUNCTION_RUNTIME_REFUSED`: nothing can deliver an event to a call that must return now |
+A caller a helper does not admit gets `404 NOT_FOUND` with one body for a
+private, missing or other-app database and for the setting off; an input with
+no id gets the uniform `403` (`INVALID`). Read `ctx.auth.db3Id`, not the input.
+`config push` warns on a public function whose handler passes an input-read id
+to `ctx.db3(…)` or `ctx.api.db3` while its HTTP `authorize` (for
+`allowCallers`, the `users` rule) checks no database access; a fixed id needs
+no check.
 
-### Starting and polling a run
+#### Signed action links
 
-`POST /app/{appId}/api/functions/{key}/start` — the same gate, input schema and rate ceiling as the request route — answers `201` with a run envelope instead of a result:
+A link that works for whoever holds it (email confirmation, unsubscribe, order
+status): one function signs a token bound to another function of the app and
+some arguments; that function's `requireToken(tokenOf)` admits the holder,
+signed in or not, with `ctx.auth = { args, tokenId }`. The signer declares
+`capabilities = ["tokens:sign"]`; the opened function is usually `public`.
+Deliver the link only where holding it proves something (an email
+confirmation emails it to the address bound in `args`) and never return it to
+the caller who asked for it.
 
-```json
-{ "runId": "01J…", "runKey": "01J…", "instanceId": "app-doc-01J…", "status": "running" }
+```typescript
+import { defineFunction, requireSignedIn } from "primitive-functions";
+
+// Email a one-time link that confirms the caller's address. The link goes only
+// to that inbox, and the caller is told nothing but that it was sent: a caller
+// who got the link back could confirm an address they cannot read.
+export default defineFunction({
+  input: [],
+  authorize: requireSignedIn(),
+  handler: async (input, ctx) => {
+    const email = ctx.user?.email;
+    if (!email) throw new Error("This account has no email address to confirm");
+    const { token, expiresAt } = await ctx.actionTokens.sign({
+      functionKey: "confirm-email",
+      args: { userId: ctx.auth.userId, email },
+      expiresIn: 24 * 60 * 60,
+      singleUse: true,
+    });
+    const link = `https://example.com/confirm?token=${encodeURIComponent(token)}`;
+    await ctx.api.email.send({
+      body: {
+        to: email,
+        subject: "Confirm your email address",
+        htmlBody: '<p><a href="{{link}}">Confirm your email address</a></p>',
+        textBody: "Confirm your email address: {{link}}",
+        variables: { link, appName: "Example" },
+      },
+    });
+    return { sent: true, expiresAt };
+  },
+});
 ```
 
-- `runKey` makes the start idempotent per `(caller, contextDocId, runKey)`: a repeat answers the run that already exists with `existing: true`, never a second run — and that holds for a run that FAILED, so retrying takes a new key with the same input, not the key the failure holds. It defaults to the run id.
-- `timeoutMs` is accepted and ignored: the task engine owns how long a task run may take, and a per-request budget cannot hold across a `step.sleep`.
-- Poll the run id with `functions.getStatus` / `functions.waitFor`; `terminate` takes the function key and the run key.
-- A run broadcasts nothing over the WebSocket. Poll.
-- A caller over HTTP starts a task run with `POST functions/{key}/start`, and so does `ctx.functions.start` from inside any running function. Any callee may be started; one that must not run that way says so with `assertRuntime("request")` and the child run settles `FUNCTION_RUNTIME_REFUSED`. The callee's `access` gate is NOT consulted (yours was the authorization), every run in the tree is keyed by the original external initiator, and nesting stops at 4 levels with `FUNCTION_NEST_DEPTH_EXCEEDED`.
+```typescript
+import { defineFunction, requireToken } from "primitive-functions";
 
-### Reporting back
+// Open the emailed link: whoever holds it, signed in or not, confirms once the
+// address the link was sent to.
+export default defineFunction({
+  input: [],
+  authorize: requireToken((input) => input.token),
+  handler: async (input, ctx) => {
+    return { userId: ctx.auth.args.userId, confirmedEmail: ctx.auth.args.email };
+  },
+});
+```
 
-A task run has three ways to deliver its result, and they compose:
+`ctx.actionTokens.sign({ functionKey, args, expiresIn, singleUse? })` answers
+`{ token, tokenId, expiresAt }` and stores nothing: `args` a JSON object of at
+most 2,048 bytes, `expiresIn` required, 1–31,536,000 seconds. Refusals:
+`403 FUNCTION_TOKENS_GRANT_MISSING`, `400 ACTION_TOKEN_OPTIONS_INVALID`,
+`404 ACTION_TOKEN_FUNCTION_NOT_FOUND`. A single-use token is spent before the
+handler runs and stays spent if it fails.
 
-| Channel | How | Survives the client being away? |
+A refused token answers `404 NOT_FOUND` with `error` "This link has expired",
+"This link has already been used", "This link was signed with a key that is no
+longer in use" (another app's token, or `JWT_SECRET` rotated) or "This link is
+not valid" (altered, or for another function); no token in the input is the
+uniform `403` (`INVALID`). `args` are signed, not encrypted.
+
+#### Admitting the holder of an invitation
+
+`requireInvitation(tokenOf)` (beta) admits any caller, signed in or signed out,
+presenting the token of this app's unaccepted, unexpired invitation that still
+shares something:
+
+```ts
+import { defineFunction, requireInvitation } from "primitive-functions";
+
+export default defineFunction({
+  input: [],
+  authorize: requireInvitation((input: { inviteToken: string }) => input.inviteToken),
+  handler: async (_input, ctx) => ({
+    role: ctx.auth.role,
+    databases: ctx.auth.shared.filter((item) => item.kind === "db3").map((item) => item.id),
+  }),
+});
+```
+
+`ctx.auth` is `{ invitationId, inviterId, role, shared, sharedTruncated }`.
+`shared` lists at most 20 items still pending, oldest first:
+`{ kind: "db3", id, title, level: "read-write" | "reader" }`,
+`{ kind: "group", id, groupType, title, level: "owner" | "manager" | "member" }`
+or `{ kind: "collection", id, title, level }`; deleted and already-granted
+items are left out. Every other token (unknown, revoked, expired, accepted,
+another app's, nothing left to share) gets `404 NOT_FOUND`; no token is the
+uniform `403` (`INVALID`). Use the ids in `ctx.auth.shared`, not the input.
+Its answers are never cached: push refuses `cacheSeconds` beside it
+(`FUNCTION_PUBLIC_CACHE_TOKEN_ADMITTED`).
+
+Two limits apply before the function runs, each answering
+`{ error, errorCode, retryAfter }` with `Retry-After`:
+
+| Limit | Default (provisional) | Past it |
 |---|---|---|
-| The run's `output` | Return a value; the same settlement that records the run's status records it on the run's own record | Yes — for the life of the run row (45 days), whether or not the engine still holds the instance |
-| Server state | Write database rows, documents or notifications as the app, inside `step.do` | Yes |
-| A live push | `ctx.users.send` (see Sending to a connected client) | No — a client that is offline never receives it; pair it with state or a notification |
+| Calls per minute from one IP address to the app (IPv6 by /64) | 600 | `429 SIGNED_OUT_RATE_LIMITED` |
+| Calls per hour to the app, `[app] signedOutCeiling` (0–10,000,000; 0 refuses all) | 10,000 | `429 SIGNED_OUT_CEILING_REACHED` |
 
-**`output` outlives the engine's instance.** `client.functions.getStatus(runId).output` and `waitFor(runId).output` answer it, and so do `primitive functions runs wait <function-id> <run-id>` and `primitive functions runs <function-id> --json`. The `runs` TABLE does not print it — an output can be a megabyte, so the table says where to find it. Over roughly 10 000 characters the value is stored by reference and still answered whole, which is invisible to a reader except that a `runs` page holding many large outputs may be **shorter than the limit you asked for** and continue with a cursor. If the platform could not store a large output when the run settled, the record carries a preview marked `outputTruncated` and is completed from the engine on the next read while the engine still holds the run; once it has forgotten the instance, the preview is what is left. The ceiling is the same **1 MiB** a request invocation's output has.
+An hourly ceiling that cannot be checked answers
+`503 SIGNED_OUT_CEILING_UNAVAILABLE`. `primitive usage get --meter
+signedout.invoke` (and `signedout.ceiling_refused`) reads the calls that
+reached the ceiling by day; `primitive rate-counters get signed-out` reads
+this hour's count, and `primitive rate-counters get ip:<address>` one
+address's count this clock minute (IPv6 by /64: `ip:2001:db8:0:1::-64`).
+
+`public` may be a table of options instead of `true`; it opens the function
+the same way:
+
+```toml
+[function]
+key = "landing-stats"
+public = { cacheSeconds = 60, cors = "*" }
+```
+
+| Option | Value | Effect |
+|---|---|---|
+| `cacheSeconds` | integer 1–300 | A signed-out call with the same `rootInput`, `meta` and `contextDocId` is answered from the cache for that long, after the setting and both limits; no code runs and the answer has no `invocationId`. Header `X-Function-Cache: hit \| miss \| bypass`. |
+| `cors` | `"*"` | Signed-out calls from any origin: the preflight answers `Access-Control-Allow-Origin: *` and allows `Content-Type`, never `Authorization`. |
+| `rate` | `"low"` \| `"medium"` \| `"high"` | Signed-out calls per minute from one IP address to this function: 10, 60 or 300. Past it `429 SIGNED_OUT_FUNCTION_RATE_LIMITED`, `Retry-After: 60`, checked first, so it spends neither limit above. |
+| `turnstile` | `true` | A signed-out call needs a body `turnstileToken` that Turnstile accepts, checked after `rate` (default `"high"` with `turnstile`) and before the limits above. |
+
+Only `completed` answers are stored; signed-in calls always run; a new version
+or a schema change runs again.
+
+**Turnstile.** Set `[app] turnstileSiteKey` and store the secret as
+`PRIMITIVE_TURNSTILE_SECRET` (`primitive secrets set PRIMITIVE_TURNSTILE_SECRET
+--value …`). The Admin Console's app settings also edit the site key (the
+**Signed-Out Access** card; saving it blank clears it); the secret stays the
+app secret `PRIMITIVE_TURNSTILE_SECRET`. The token is verified and stripped
+before `authorize`, the cache and the run; signed-in calls need none. Pushing a
+`turnstile` function while either is missing succeeds with a warning per missing
+item (prefix `turnstile not configured: `, in `config push` output and the
+configs push's `warnings`); signed-out calls answer
+`503 SIGNED_OUT_TURNSTILE_NOT_CONFIGURED` until both are set.
+
+A page reads the site key with `getAuthConfig()` (`turnstileSiteKey`, null when
+unset), renders the widget, and passes `turnstileToken` to `invoke`:
+
+```typescript
+// The page has <div id="turnstile"></div> and loads the widget script.
+export async function sendFeedback(client: JsBaoClient, message: string) {
+  const { turnstileSiteKey } = await client.getAuthConfig();
+  if (!turnstileSiteKey) throw new Error("This app has no Turnstile site key");
+
+  const turnstileToken = await new Promise<string>((resolve) => {
+    turnstile.render("#turnstile", { sitekey: turnstileSiteKey, callback: resolve });
+  });
+
+  // A token is good for one call: render the widget again before the next one.
+  return client.functions.invoke("send-feedback", {
+    input: { message },
+    turnstileToken,
+  });
+}
+```
+
+| Answer | When |
+|---|---|
+| `403 SIGNED_OUT_TURNSTILE_REQUIRED` | No `turnstileToken`, or not a string of 1–2,048 characters. |
+| `403 SIGNED_OUT_TURNSTILE_FAILED` | Turnstile rejected the token; `turnstileErrors` carries its codes. |
+| `503 SIGNED_OUT_TURNSTILE_NOT_CONFIGURED` | No site key, no secret, or the secret was rejected. |
+| `503 SIGNED_OUT_TURNSTILE_UNAVAILABLE` | Turnstile could not be reached within 5 s; `Retry-After: 5`. The call fails closed. |
+
+Gotchas:
+
+- **Test the role, not `auth.user`.** `auth.user` is set for a signed-out
+  caller, so `if (auth.user)` admits them; use `requireSignedIn()`.
+- **A credential that does not validate is `401`**, never anonymous.
+- **`public = true` without `authorize`** is refused at push with
+  `FUNCTION_PUBLIC_REQUIRES_AUTHORIZE`.
+- **One ceiling for the whole app.** Every public function spends the same
+  hourly `signedOutCeiling`; size it for the app's total signed-out traffic.
+- **Cache only read-only functions.** Push refuses `cacheSeconds` on a
+  version that can write (`FUNCTION_PUBLIC_CACHE_WRITE_CAPABLE`) and any value
+  outside the table (`FUNCTION_PUBLIC_OPTIONS_INVALID`).
+- **Rotating `JWT_SECRET` voids every outstanding action link.**
+- **Never cache a token function.** Push refuses `cacheSeconds` with
+  `requireToken` (`FUNCTION_PUBLIC_CACHE_UNCACHEABLE_HELPER`) or `tokens:sign`.
+- **`ctx.reauthorize()` throws** ("A single-use link cannot be reauthorized")
+  in a run a single-use token admitted.
+- **One token, one call.** A reused token answers
+  `SIGNED_OUT_TURNSTILE_FAILED` (`timeout-or-duplicate`); render or reset the
+  widget before each call.
+- **`PRIMITIVE_TURNSTILE_SECRET` is reserved** for Turnstile; see the App
+  Secrets guide.
+- **Revocation waits for the cache.** An answer can be up to `cacheSeconds`
+  old, after a data change, a database's public access is cleared, or an
+  earlier version's activation. After the
+  setting is turned off, the function is disabled or `cors` is removed, other
+  servers can answer the preflight for up to 90 seconds and browsers reuse it
+  for 10 minutes; the call itself is refused at once.
+
+### Authorization
+
+A function's `authorize` method is the authorization point — see [Access Control: The authorize method](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#the-authorize-method) for the full contract: how it runs on every door (an HTTP call, an agent tool call, a trigger fire, a nested start), what it reads, and the helpers that cover most cases. It fails closed: a version with no `authorize` is refused at push, and a caller `authorize` denies gets `403` with the deny's code.
+
+Function operations use app authority, not the caller’s data permissions.
+Check the caller's access explicitly when acting on a caller-supplied database ID.
+
+### Input and output validation
+
+Every invoke, task start, nested start, trigger and agent tool call is checked
+against `inputSchema` before the handler runs. A failed call or start is `400`
+`FUNCTION_INPUT_INVALID` with `details` naming each path and rule; a trigger
+records a failed run with that code; a tool call gets
+`AGENT_TOOL_ARGUMENTS_INVALID`. The handler's result is checked against
+`outputSchema` with the same rules; a result that breaks it fails the call or
+run with `FUNCTION_OUTPUT_INVALID`.
+
+```toml
+[function.inputSchema]
+type = "object"
+additionalProperties = false
+required = ["householdId"]
+
+[function.inputSchema.properties.householdId]
+type = "string"
+minLength = 1
+maxLength = 64
+```
+
+| Class | Keywords |
+|---|---|
+| Enforced | `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`, `anyOf`, `oneOf`, `nullable` |
+| Annotation | `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, and any other key (accepted, not checked) |
+| Refused at push | `allOf`, `not`, `if`, `then`, `else`, `patternProperties`, `propertyNames`, `dependencies`, `dependentRequired`, `dependentSchemas`, `unevaluatedProperties`, `contains`, `minContains`, `maxContains`, `prefixItems`, `additionalItems`, `unevaluatedItems`, `$dynamicRef`, `$recursiveRef` |
+
+In either schema, push also refuses a schema-valued `additionalProperties` and
+a list-valued `items`.
+
+Generated types carry every keyword a push keeps: shape keywords as the type,
+the rest as doc comments on the member or type they describe.
+
+| Generated as | Keywords |
+|---|---|
+| Type shape | `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf`, `nullable` |
+| Doc comment | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`, `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, `$schema`, `$id`, `example`, `propertyOrdering`, `readOnly`, `writeOnly`, `contentMediaType`, `contentEncoding`, `$ref`, `ref`, `$defs`, `definitions`, `coerce`, and any other key |
+
+#### Writing a schema as a field table
+
+A schema can be written in the db3 field grammar under `[function.input]` or
+`[function.output]` in place of `inputSchema` or `outputSchema`. Push compiles
+it to the JSON Schema it describes and stores exactly what that `inputSchema`
+would store:
+
+```toml
+[function.input.fields.taskId]
+type = "string"
+required = true
+
+[function.input.fields.price]
+ref = "Money"
+required = true
+
+[function.input.fields.lines]
+type = "array"
+max_items = 50
+
+[function.input.fields.lines.item.fields.sku]
+type = "string"
+required = true
+```
+
+| You need | You write |
+|---|---|
+| a nested object (closed) | a `fields` subtable |
+| an open object | `type = "object"` with no `fields`, or `open = true` |
+| an array | `items = "string"` (or a shared shape's name), or an `item` table such as `item.fields` |
+| a root that is not an object | `type` on the table itself |
+| bounds | `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items` |
+| a union, or any other JSON Schema | `schema = { ... }` on that field |
+| a shared shape or db3 model | `ref = "<name>"` (beside it only `description`, `required`, `nullable`, and for a db3 model `pick` or `omit`) |
+
+A field table takes the keys `type`, `required`, `fields`, `open`, `items`, `item`, `nullable`, `enum`, `default`, `min`, `max`, `min_length`, `max_length`, `pattern`, `min_items`, `max_items`, `coerce`, `ref`, `description`, `schema`.
+
+Push refuses any other key, naming the dotted path and the fix
+(`function.input.fields.price.indexed: ... Remove it`). A field table refuses the db3 storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element`,
+and the types `date`, `id`, `stringset`, `vector`.
+
+Watch out when writing a field table:
+
+- Push refuses `[function.input]` beside `[function.inputSchema]`. A
+  field-table key such as `fields` under `inputSchema` stays an annotation, and
+  push warns.
+- `enum` holds strings; write a number enum, `oneOf` or `const` as
+  `schema = { ... }` on the field.
+
+#### Reusing a shape with `$defs`
+
+Define a shape once under the schema's `$defs` and reference it with `$ref`.
+Push inlines each local ref, so validation uses the definition. Quote the `$`
+keys in TOML:
+
+```toml
+[function.inputSchema]
+type = "object"
+
+[function.inputSchema."$defs".Money]
+type = "number"
+minimum = 0
+
+[function.inputSchema.properties.total]
+"$ref" = "#/$defs/Money"
+```
+
+Watch out when using refs:
+
+- Only `#/$defs/<Name>` refs with a matching definition, `schemas:` refs and
+  `db3:` refs (below) resolve. Any other `$ref` (no matching definition, a
+  self-reference, a URL, the `fn:` or `prompt:` prefix) is kept as written,
+  checks nothing, and push prints a warning.
+- Beside a `$ref`, only annotations and `nullable` are allowed; push refuses an
+  enforced keyword there. Put the bound in the definition.
+- After expansion a schema may hold at most 2,048 objects and arrays and
+  160 KiB per schema, and a function at most 320 KiB for both schemas. Push
+  refuses a larger one, naming the ref chain.
+
+#### Shared shapes in `schemas/`
+
+Put a shape several functions, prompts or agents use in
+`primitive/<env>/schemas/<file>.toml`, one `[defs.<Name>]` table per shape. A
+`#/$defs/<Other>` ref inside a def names another def of the file:
+
+```toml
+[defs.Currency]
+type = "string"
+
+[defs.Money]
+type = "object"
+[defs.Money.properties.currency]
+"$ref" = "#/$defs/Currency"
+```
+
+A function schema, or a def in another file, uses a def in one of three forms;
+push inlines the def's compiled form:
+
+```toml
+[function.inputSchema.properties.price]
+"$ref" = "schemas:common#/$defs/Money"   # explicit
+[function.inputSchema.properties.total]
+ref = "schemas.common.Money"             # long
+[function.inputSchema.properties.currency]
+ref = "Currency"                         # short: <Name> or <file>.<Name>
+```
+
+- A bare name must be declared by exactly one file; the `<file>` of
+  `<file>.<Name>` must not also be a function, prompt or db3-type key.
+  Otherwise push refuses the ref and lists every long form.
+- Beside `ref`, only `description`, `required` (the array) and `nullable` are
+  allowed; each replaces the def's own. `pick` or `omit` is allowed too when
+  the def is a db3 model ref (below).
+- A db3 field can `ref` a def that is a plain string enum; push expands it to
+  the def's `enum` (databases guide, **Shared enums**).
+- `config push` stores each changed file as a new version, dependencies
+  first, then the functions; `--only schema/<file>` pushes one file;
+  `config pull` writes files back byte for byte;
+  `primitive schemas list` and `primitive schemas get <file>` read them.
+  `config push --only function/<key>` pushes the `schemas/` files the
+  selection's refs reach first.
+- Each pushed version records the defs it inlined, with an `h1:` hash of each.
+  A function keeps the def it was pushed with until pushed again; `config diff`
+  shows `pinned to schemas/<file>.toml#<Name> (older|removed|deleted)`.
+- Delete a file by removing it and running `config push --prune`, which
+  stores a tombstone version; functions already pushed keep their snapshot,
+  and a new push that refs the file is refused.
+
+A def can be a field table: one whose root carries `fields`, `item`, `open`,
+`min`, `max`, `min_length`, `max_length`, `min_items`, `max_items` or a string
+`items` (`[defs.Money.fields.amount]`).
+
+Watch out when writing `schemas/` files:
+
+- File names are lowercase letters, digits, `_` and `-`.
+- Push refuses a def that mixes field-table and JSON-Schema keys (`fields`
+  beside `properties`, `min` beside `minimum`, or `$ref`, `$defs`, `oneOf`,
+  `anyOf`, `const`), naming both. Annotations (`title`, `description`,
+  `examples`, `deprecated`, `format`, `default`, `$comment`, `readOnly`,
+  `writeOnly`) may sit beside field-table keys; any other key in such a def is
+  checked as a field table and refused with its correction.
+- A def may not declare its own `$defs`; put shared shapes in the file's
+  `[defs]`.
+- Refused-at-push keywords are refused inside a def too.
+- Push takes up to 256 defs per file and 1,024 KiB per file.
+- Push refuses a ref it cannot resolve (a missing file or def, a deleted file,
+  a ref below a def, the reserved `platform` prefix), naming it.
+- Two files that use each other's defs cannot both be pushed; push names the
+  chain. Move the shared def into one file or a third.
+- A schema's record of inlined defs may take at most 160 KiB of provenance;
+  push refuses more, naming the chain.
+
+#### db3 models in schemas
+
+A schema uses a model of a db3 type by name; push inlines one of two
+projections:
+
+```toml
+[function.inputSchema.properties.task]
+ref = "workspace.tasks"            # declared: the model's fields
+[function.outputSchema.properties.task]
+ref = "workspace.tasks"            # row: a stored record, with its id
+```
+
+| Projection | Shape |
+| --- | --- |
+| `declared` | The declared fields only (closed); storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element` are left out of the declared shape; auto-assigned, stamped and defaulted fields are optional |
+| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned and stamped fields are required, and so is a scalar field with a literal default (every read fills it); a string-set or generator default stays optional, so a record read with `ctx.db3` can be returned as is, and a hand-built row that omits a defaulted field fails `FUNCTION_OUTPUT_INVALID` |
+
+- An `outputSchema` gets the `row`; every other schema gets the `declared`
+  shape. `#row` or `#declared` chooses: `ref = "workspace.tasks#declared"`.
+- Long form `db3.<type>.<model>`; explicit form
+  `"$ref" = "db3:<type>#/$defs/<model>"`, with `/row` or `/declared` to choose.
+  A db3 ref in a `schemas/` def must name its projection.
+- Fields map as the generated db3 types render them (`string`/`id`/`date` →
+  string, `stringset` → array of strings, `vector` → base64 string; `enum`,
+  `max_length`, `max_count` and `default` carry over).
+- Validation messages end `(validated against the row projection of db3 <type>.<model>)`,
+  and the generated hover on the field names the projection.
+
+`pick` or `omit` beside the ref keeps some of the model's fields, each with
+the model's type; declare a subset used by several functions once as a
+`schemas/` def and ref it by name:
+
+```toml
+[function.outputSchema.properties.post]
+ref = "shop.posts"
+pick = ["id", "title"]               # these fields only; closed
+
+# schemas/catalog.toml — used as ref = "PostSummary", typed Schemas.PostSummary
+[defs.PostSummary]
+ref = "shop.posts#row"
+omit = ["body"]                      # every other field; a row stays open
+```
+
+- `pick` closes the object; `omit` keeps the projection's openness (`row`
+  open, `declared` closed). Fields come from the chosen projection, so
+  `pick = ["id"]` on a `declared` ref needs a declared `id`.
+- A ref to a subset def can take `pick` or `omit` again. The field-table
+  spelling takes `pick` or `omit` beside `ref` too.
+- `config push` pushes a db3 type before the `schemas/` files, functions and
+  prompts that use it. `config diff` shows
+  `pinned to db3-types/<type>.toml#<model>/<projection> (older|removed|deleted)`.
+
+Watch out when using db3 models:
+
+- Push refuses a ref to a type the app does not have, naming
+  `db3-types/<type>.toml`; push the type first or in the same push.
+- `config push --only` compiles a ref to an unselected type against the
+  server's copy; select the type when the change depends on it.
+- Push and `functions codegen` refuse a `pick`/`omit` name the projection lacks,
+  listing its fields; when a model drops a picked field, the next push of the
+  function is refused until the list is updated.
+- `pick`/`omit` beside `"$ref"` are kept as annotations and select nothing;
+  beside a `fn.`/`prompt.` ref or a def that is not a db3 model, push refuses them.
+
+## Task runs
+
+Start background work with `functions.start` and read its status or wait for
+completion:
 
 ```typescript
   const run = await client.functions.start("order-sync", {
@@ -273,7 +676,7 @@ A task run has three ways to deliver its result, and they compose:
 
   // …or wait for a terminal state.
   const settled = await client.functions.waitFor<{ confirmedAt: number }>(run.runId, {
-    timeoutMs: 60_000, // throws WORKFLOW_WAIT_TIMEOUT past it
+    timeoutMs: 60_000, // throws FUNCTION_WAIT_TIMEOUT past it
   });
   // A failed run RESOLVES — branch on the status, don't catch. `error.message`
   // is the reason, a platform refusal leads it with its code, and `error.code`
@@ -284,311 +687,450 @@ A task run has three ways to deliver its result, and they compose:
     console.log(settled.status, settled.output?.confirmedAt);
   }
 
-  // The function key goes where a workflow key would.
   await client.functions.terminate({ functionKey: "order-sync", runKey: run.runKey });
 ```
 
-`functions.waitFor` polls with a backing-off interval (0.4 s doubling to 5 s) and throws a wait-timeout past its budget (default 15 minutes; a non-positive value waits unbounded), taking `FunctionWaitOptions`. `getStatus` and `terminate` take the run id and the function key respectively; a repeated `runKey` on `start` replays the run that already exists.
+### Starting and polling a run
 
-All three answer a **function run status** — `FunctionRunStatus` (`FunctionRunSettled` once a wait has settled) in TypeScript, `FunctionRunStatus` and `FunctionRunResult<Output>` in Swift. It is a function's own type: `status` is one of `queued`, `running`, `completed`, `failed`, `terminated`, `missing`; `run` carries the function run's own fields (`functionId`, `functionKey`, `executionPrincipal`, `parentFunctionKey`, `parentRunId`, `nestDepth`, `errorCode`); `slice` and `outputTruncated` ride beside them. Which routes the client polls is its business.
+Use `ctx.functions.start(key, input, { runKey })` to start a child task from
+function code. A repeated key returns the existing run, including a failed
+one. Retry failed work with a new key.
 
-**A failed run RESOLVES with `status == "failed"`** — it is an answer, not a transport error, so branch on the status rather than catching. Why it failed rides on the one structured `error`, on `getStatus` and on `waitFor` alike:
+Child tasks inherit the original caller and usually the parent’s context id.
+Starting a child is not itself an authorization decision — the parent's own
+`authorize` was the gate, and its code chose the callee. A child's own
+`authorize` runs all the same, at every level of the chain — naming the door
+with `allowCallers({ functions: [parentKey] })` — see
+[Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance).
 
-| Field | What it is |
-|---|---|
-| `error.message` | What went wrong. **This is where a platform refusal's code is** — the message leads with it (`OUTPUT_SCHEMA_VIOLATION: …`, `OUTPUT_TOO_LARGE: …`). An ENGINE failure is the exception: its message is the engine's own text and carries no code. |
-| `error.code` | The platform's classification, from the closed set in Run error codes below — the same value the run row carries as `run.errorCode`. **Branch on this**, not on the message. |
-| `error.name` | The error's own NAME, not the platform's code: your thrown error's class name (`Error` for a plain `throw new Error(…)`) where the engine preserved it. **Absent for a failure read off the persisted row**, which is the ordinary case once a run has settled — the platform keeps only the message there. |
-| `error.details` | Anything else the platform sent with the error. Absent when there was nothing. |
+Use `assertRuntime("task")` for handlers that require background execution.
+In request mode, `step.do` executes inline, sleeps must fit the request budget,
+and `step.waitForEvent` is unavailable.
 
-Read `error.code` for the classification and `error.message` for the reason; treat `name` as a hint. `error` is absent on a run that has not failed.
+Check `status` before reading a result. Failed runs resolve with
+`status: "failed"`; inspect `error.code` and `error.message`.
 
-**`terminate` tells two 404s apart.** A run it cannot find is `NOT_FOUND` / `.notFound` naming the function key and the run key; a run that EXISTS and that the engine could not stop is `UNAVAILABLE` / `.unavailable`, carrying the engine's own diagnostic verbatim after the message. Only the second means "try again".
+Do not build a staleness timeout around a run. One that shows no progress for
+30 minutes is ended with `FUNCTION_STALLED`. The 30 minutes start once the open
+step's own `timeout` and next retry delay have passed; sleeps, event waits and
+retry delays never count.
 
-### Run error codes
+### Finding a user's runs
 
-`run.errorCode` on the row and `error.code` on the function run status carry the same closed-set value. Two of these are about the handler, five about the platform's limits, and six — the `ENGINE_*` family — about the engine that ran the code. **Nothing in your code causes an `ENGINE_*` failure**; branch on the prefix to treat the family as one.
+List the signed-in user's task runs with `functions.listRuns`, and one run's
+recorded steps, oldest first, with `functions.listRunSteps`:
 
-| Code | What happened | What to do |
-|---|---|---|
-| `FUNCTION_THREW` | The handler threw. | Read `error.message` and `primitive functions logs <key> --run <runId>`. |
-| `FUNCTION_NO_HANDLER` | The entry file exported no callable default. | Export a default function from the file `entry` names. |
-| `FUNCTION_TIMEOUT` | The invocation did not finish inside its budget. | Shorten the work, or run it as a task, where the budget is per slice. |
-| `FUNCTION_INPUT_INVALID` | The input did not match `inputSchema`. | Fix the caller's input, or the schema. |
-| `FUNCTION_OUTPUT_INVALID` | A webhook delivery's run returned output that did not match `outputSchema`. (An HTTP invoke refusing its output answers `OUTPUT_SCHEMA_VIOLATION` in the envelope instead.) | Fix the returned value, or the schema. |
-| `OUTPUT_SCHEMA_VIOLATION` | A task run's output did not match `outputSchema`. | Fix the returned value, or the schema; the message names the failing paths. |
-| `OUTPUT_NOT_SERIALIZABLE` | The returned value is not JSON. | Return plain data — no functions, no cycles. |
-| `OUTPUT_TOO_LARGE` | The output exceeds the 1 MiB ceiling. | Page the result, or write it to a database and return a handle. |
-| `FUNCTION_DELETED` | The function was hard-deleted while the run was starting. | Nothing to retry: the bundle the run pinned is gone. |
-| `FUNCTION_RUNTIME_REFUSED` | The code refused the runtime it was handed (`assertRuntime`), or a request `step` was asked for a wait its budget cannot cover. | Call it the other way — `invoke` for a request, `start` for a task. |
-| `ENGINE_ISOLATE_EVICTED` | A platform component the invocation depended on went away mid-call, or the isolate was reset for memory — including an eviction that left the attempt after it no retry, which carries the engine's own internal-error message. | Nothing in your code caused it. To run the work again, start a NEW run with a new `runKey` and the same input — a repeated key replays the failed run and executes nothing — and make side effects the failed attempt performed idempotent yourself. Report a repeat to the platform. |
-| `ENGINE_CODE_UPDATED` | A platform deploy reset the engine mid-attempt, and the attempt that followed had no retry left: the run carries the engine's own internal-error message. | Nothing in your code caused it. Start a NEW run with a new `runKey` and the same input; a repeated key replays and executes nothing, and side effects already performed need your own idempotency. |
-| `ENGINE_STORAGE_ERROR` | The engine's storage timed out or failed and the object was reset. | Nothing in your code caused it. Start a NEW run with a new `runKey` and the same input (a repeated key replays), with your own idempotency over side effects already performed. Report a repeat. |
-| `ENGINE_INTERNAL_ERROR` | The engine reported an internal error on the attempt, and no reset of this run preceded it — or the platform saw one it could not attribute to a deploy or an eviction. | Nothing in your code caused it. Start a NEW run with a new `runKey` and the same input (a repeated key replays), with your own idempotency over side effects already performed. Report a repeat. |
-| `ENGINE_SLICE_DEADLINE` | A platform call was refused because the slice's token deadline had passed. | The slice outlived its token: find the step that runs longer than the slice ceiling and split it. |
-| `ENGINE_INSTANCE_LOST` | The engine no longer reports the instance and nothing recorded how the run ended. | `primitive functions logs <key> --run <runId>` shows what was recorded. Start a new run with a new `runKey` if the work still needs doing. |
+```typescript
+  // Every run this user started against the database, a page at a time.
+  const page = await client.functions.listRuns({ contextDocId: db3Id, limit: 20 });
+  for (const run of page.items) {
+    console.log(run.functionKey, run.runId, run.status, run.startedAt);
+  }
+  if (page.nextCursor) {
+    // Same filters, plus the cursor, for the next page.
+    await client.functions.listRuns({ contextDocId: db3Id, cursor: page.nextCursor });
+  }
 
-An engine failure's `errorMessage` is the ENGINE's own text, so the code is on `error.code` and `run.errorCode` rather than the message's prefix. An attempt whose engine died before the platform wrote its invocation record leaves no record at all — the run row's code is then the whole statement.
+  // One function's runs that are still in flight.
+  const running = await client.functions.listRuns({
+    functionKey: "order-sync",
+    status: "running",
+  });
 
+  // What a run has done so far, oldest step first.
+  if (running.items.length > 0) {
+    const steps = await client.functions.listRunSteps(running.items[0].runId);
+    for (const step of steps.items) console.log(step.stepId, step.status);
+  }
+```
 
-`error` is the one structured value on the function surface: `functions.getStatus` and `functions.waitFor` read it the same way whichever shape the server sent.
+| Option | Use |
+| --- | --- |
+| `contextDocId` | Runs keyed under this context id (a database id, say). |
+| `functionKey` | One function's runs; matched exactly. |
+| `status` | `queued`, `running`, `completed`, `failed`, `terminated` or `missing`. |
+| `limit` | Page size: 50 by default, 200 at most. |
+| `cursor` | The previous page's `nextCursor`, sent with the same filters. |
+| `forward` | `true` reverses the order. |
+
+The list holds only the caller's own runs, never trigger-started ones. It is in
+storage order, not start order: most recently updated first, or, with
+`contextDocId`, by status and then newest first. Sort by `startedAt` for start
+order. Over REST, `GET functions/runs` answers `400` for an unknown query
+parameter, `GET functions/runs/{runId}/status` reads one run, and
+`GET|POST functions/{functionKey}/instances/{runKey}/status|terminate` read and
+stop a run by its run key.
+
+### Walking every user
+
+`ctx.users.forEachBatch({ function, key, filter?, sort?, input?, batchSize?, concurrency?, snapshot? })` hands every user a filter matches to a batch function, a batch at a time — no hand-rolled paging loop. `key` scopes the walk to this app and batch function: a repeat call with the same `function`/`key` finds the existing walk (`existing: true`) instead of starting a second. `filter`/`sort` take the same grammar as [`ctx.users.query`](#querying-users); `sort` needs `snapshot: true`. `batchSize` (≤100, default 100) and `concurrency` (≤16, default 4) bound each batch and how many run at once, each over a disjoint partition of the matches. `snapshot` captures every matching id before the first batch, so membership is fixed as of that capture; without it the walk reads live and its match count is provisional until enumeration ends.
+
+Each batch runs the named function under `ctx.trigger.kind === "users-batch"` with `ctx.trigger.userIds` (at most `batchSize` ids, the same on every attempt) and `ctx.trigger.input` (the walk's `input`, or `null`); the function's own input is `{}` — write `input: []` — and `ctx.user` is `null`. After `assertTrigger(ctx, "users-batch")` both read with no cast. Admit it with `authorize: allowCallers({ usersBatch: true })` (or a list of function keys, to admit only that function's own `forEachBatch` starts and refuse admin-started walks) — see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance). A batch can run twice (a retried attempt, a platform restart): make it idempotent. A failed batch retries alone, same number and ids, 3 attempts, 5 s doubling, before the walk gives up on it. `ctx.trigger.walkRunId`/`batch`/`attempt`/`startedByFunctionKey` identify the attempt.
+
+The walk's own run — not a batch's — fails with one of: `USER_WALK_DENIED` (the door refused it), `USER_WALK_INPUT_REFUSED` (the batch function's `inputSchema` refused the input `{}`), `USER_WALK_FUNCTION_UNAVAILABLE` (disabled, archived, missing, or no pushed version), `USER_WALK_BATCHES_FAILED` (a batch exhausted its retries), `USER_WALK_ORPHANED` (its coordinator held no state), or `USER_INDEX_SHARD_UNAVAILABLE` (a shard it reads was unreachable). The first three fail it before any batch runs.
+
+A start on an app with no user index is refused before any of this: `forEachBatch` itself throws `409 USER_INDEX_NOT_READY`, and no run is created. Build the index with `primitive users index rebuild`, which needs an `admin` step-up (see [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions)).
+
+Read progress (`status.walk`: phase, match count, batches done/failed/in-flight/retrying/remaining) and stop it (`terminate`: no new batch starts, in-flight ones finish) through `primitive users walk status|terminate <run-id>` or the admin API's `apps/{appId}/users/walks/{runId}` routes — there is no way to poll or stop a walk from inside a function. Batch starts never count against the batch function's own `ratePerMinute`.
 
 ### Step discipline
 
-The engine re-executes the handler from the top on every resume and replays each completed `step.do` from its **stored result**.
+The engine re-executes your handler from the top on every resume and replays
+each completed `step.do` from its **stored result** instead of running it again.
+Two rules follow, and both matter:
 
-- **Put every side effect inside `step.do`.** A charge, an email or a write outside a step runs again on every resume; inside one it runs exactly once.
-- **Do not branch on anything nondeterministic between steps.** `Date.now()`, `Math.random()`, `ulid()` or a fresh read at the top level can take a different path after a resume, and the engine then looks for steps that are not there. Read such values inside a step so the value is stored with it.
-- **Every cron fire starts a task run** — a run row, the task runtime's budgets and `overlapPolicy` asked of the engine. A webhook delivery always runs under the REQUEST runtime: the provider is waiting inside the request for an answer, so it hands slow work over with `ctx.functions.start`.
+- **Put every side effect inside `step.do`.** A charge, an email, a write made
+  outside a step runs again on every resume. Completed step results are reused on resume. Interrupted or retried steps
+  may run again, so make their side effects idempotent.
+- **Do not branch on anything nondeterministic between steps.** `Date.now()`,
+  `Math.random()` or a fresh read at the top level can take a different path
+  after a resume, and the engine then looks for steps that are not there. Read
+  such values inside a step, so the value is stored with it.
+
+### Reporting back
+
+Choose how the task exposes its result:
+
+- **Return output.** Read it with `getStatus`, `waitFor`, or
+  `primitive functions runs wait`. Results remain on the run for 45 days.
+- **Save state.** Write records inside a step for results the
+  app should retain. Return what the step wrote — `{ wrote: true, recordId }`
+  or `{ wrote: false, reason }` — so the run's output states the outcome
+  without a second lookup.
+- **Send a live message.** Use `ctx.users.send` for connected clients. Pair it
+  with saved state when offline clients need the result later.
+
+Task completion does not automatically send a WebSocket message, and there is
+no feature that pushes a run's settlement to the client — the three options
+above are it.
+
+- **For "the task's write landed":** don't poll run status for this. A client
+  subscribed to the database the task writes receives the write as a live
+  update, same as any other write to a
+  [synced database](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#synced-databases-on-a-device).
+- **For "the run finished":** call `ctx.users.send(ctx.user.userId, …)` as the
+  run's last step, after the work it reports on has committed — a connected
+  starter gets it immediately. It never fires for a platform failure
+  (`ENGINE_*`, `FUNCTION_STALLED`, a reset that exhausts retries), so keep
+  `waitFor` as the fallback that still answers when the send doesn't happen.
+
+### Run error codes
+
+A failed run carries a **code** beside its message: `run.errorCode` on the run
+row, and `error.code` on the function run status both clients read. It is a
+closed set the platform owns, so you can branch on it rather than matching
+prose — and it has no slot for an outcome your own code expects.
+
+For that, return a typed result instead of throwing — `{ ok: false, code,
+message }`, shaped however the app needs — and read it from `output` like any
+other result. Throwing is for what the handler did not expect: an uncaught
+throw settles the run `FUNCTION_THREW`. Inside `step.do`, throw only when the
+failure should spend one of the step's retries; a returned failure result is
+never retried.
+
+For a terminal `ENGINE_*` failure, start a new run with a new `runKey` if the
+work should be retried. Keep side effects idempotent because the failed run
+may have completed some work. Report repeated platform failures.
+
+| Code | What happened | What to do |
+| --- | --- | --- |
+| `FUNCTION_THREW` | Your handler threw. | Read `error.message` and the run's logs (`primitive functions logs <function-id> --run <run-id>`). |
+| `FUNCTION_NO_HANDLER` | The entry file exported no callable default. | Export a default function from the file `entry` names. |
+| `FUNCTION_TIMEOUT` | The invocation did not finish inside its budget. | Shorten the work, or run it as a task (`functions start`) where the budget is per slice. |
+| `FUNCTION_INPUT_INVALID` | The input did not match the declared `inputSchema`. | Fix the caller's input, or the schema. |
+| `FUNCTION_OUTPUT_INVALID` | The output did not match `outputSchema` — on an invoke, a webhook delivery's run or a task run. | Fix the returned value, or the schema. The message names the failing paths. |
+| `OUTPUT_NOT_SERIALIZABLE` | The returned value is not JSON. | Return plain data — no functions, no cycles, no `undefined` where a value is required. |
+| `OUTPUT_TOO_LARGE` | The output exceeds the 1 MiB platform ceiling. | Page the result, or write it to a database and return a handle. |
+| `FUNCTION_DELETED` | The function was hard-deleted while the run was starting. | Nothing to retry: the stored bundle the run pinned is gone. |
+| `FUNCTION_RUNTIME_REFUSED` | The code refused the runtime it was handed (`assertRuntime`), or a request invocation's `step` was asked for a wait its budget cannot cover. | Call it the other way — `invoke` for a request, `start` for a task. |
+| `FUNCTION_STALLED` | The run showed no progress for 30 minutes past its open step's own `timeout` and retry delay, so the platform ended it. The message names the step. | Give the step's awaits a timeout of their own, or split the step. A step that needs longer sets its own `timeout` in `step.do`. Start a new run with a new `runKey` if the work still needs doing. |
+| `ENGINE_ISOLATE_EVICTED` | The execution environment was reset. | Retry with a new run key and idempotent steps. |
+| `ENGINE_CODE_UPDATED` | A platform update interrupted execution and retries were exhausted. | Retry with a new run key and idempotent steps. |
+| `ENGINE_STORAGE_ERROR` | Task storage failed. After it, later `step.do` calls in the same run may reject at once with the same message, without running their bodies. A step whose body never ran wrote nothing and is safe to retry; when it is the task runtime's own storage that failed, the platform keeps the run open for the runtime to resume. | If the run ends `failed`, retry with a new run key and idempotent steps. |
+| `ENGINE_INTERNAL_ERROR` | The task runtime reported an internal error. | Retry with a new run key and idempotent steps. |
+| `ENGINE_SLICE_DEADLINE` | A platform call was refused because the slice's token deadline had passed. | The slice outlived its token. Look for a step that runs longer than the slice ceiling and split it. |
+| `ENGINE_INSTANCE_LOST` | The engine no longer reports the instance, and nothing recorded how the run ended. | `primitive functions logs <function-id> --run <run-id>` shows what the platform did record. Start a new run with a new `runKey` if the work still needs doing. |
+| `ENGINE_START_FAILED` | The task runtime could not begin the run, so no step ran. The start answered `500` `INSTANCE_CREATE_FAILED`. | Start the run again with a new `runKey`. |
+
+An engine failure's `errorMessage` is the **engine's own text**, not a
+code-leading sentence: for these the code is on `error.code` and
+`run.errorCode`, never in the message's prefix.
+
+An attempt whose engine died before the platform could write its
+invocation record leaves no record at all — the writer died with it. For such
+an attempt the run row's code is the whole statement; there is nothing in
+`functions logs` to read.
 
 ### Locks
 
-A function takes a named lock through `ctx.api.locks.*`. Under the task runtime there is one rule: **acquire live on every slice, outside `step.do`** — a memoized acquire hands a resumed slice the handle a previous slice was given, and that handle no longer works.
+Wait for a named lock with `ctx.locks.withLock(key, { ttlMs, timeoutMs, owner? }, fn)`: it acquires, runs `fn(handle)` while the key is held, and releases in `finally` — on a return and on a throw. It answers `fn`'s value; `fn`'s own error propagates unchanged after the release. A function is the only caller that can take a lock (the lock routes refuse anything else `FUNCTION_ROUTE_FUNCTION_ONLY`), so its `authorize` decides who may take its keys.
 
 ```ts
-export default defineFunction(async (input: { userId: string }, ctx, step) => {
-  const key = `portfolio-import:${input.userId}`;
-  const got = await ctx.api.locks.tryAcquire({
-    body: { key, ttlMs: 120_000, owner: ctx.runId },
-  });
-  if (!got.acquired) return { skipped: true, heldBy: got.owner };
-  try {
-    await step.do("import", async () => { /* work that must not overlap */ });
-  } finally {
-    await ctx.api.locks.release({
-      body: { key, handle: { handleId: got.handle.handleId } },
+import { defineFunction, requireSignedIn } from "primitive-functions";
+
+export default defineFunction({
+  input: ["itemId"],
+  authorize: requireSignedIn(),
+  handler: async (input: { itemId: string }, ctx, step) => {
+    return ctx.locks.withLock(`ingest:${input.itemId}`, {
+      ttlMs: 600_000,
+      timeoutMs: 360_000, // task runtime; a request must fit its remaining budget
+    }, async () => {
+      await step.do("ingest", async () => { /* work that must not overlap */ });
+      return { ingested: true };
     });
-  }
+  },
 });
 ```
 
-`owner: ctx.runId` is what lets a later slice of the SAME run re-take the lease instead of colliding with its own earlier slice: presenting the owner that already holds the key succeeds with a **fresh handle**, and the previous handle is fenced (`release` answers `not_holder`, `renew` answers `lease_lost`). The match is the same principal, the same kind of caller and the same owner string — so a member who started the task cannot rotate or release the lease their function holds. When a run key coalesces several triggers into one run, name the work that key stands for (`ctx.trigger.runKey ?? ctx.runId`). Never a static string: two unrelated runs presenting one would re-enter each other's hold. `status.owner` tells your own hold from another's.
+- **Not acquired within `timeoutMs`:** `withLock` throws an error with `name` and `code` `LOCK_TIMEOUT`, its `details` carrying `owner`, `holderKind`, `leaseExpiresAt` and `rateLimited`; `fn` never runs. It settles `FUNCTION_THREW` unless caught.
+- **To branch on contention instead**, call `ctx.locks.acquire(key, options)` and `ctx.locks.release(handle)` in a `try`/`finally`. `acquire` never throws for "not acquired": it answers `{ acquired: true, handle }` or `{ acquired: false, timedOut: true, rateLimited, heldBy, holderKind, owner, leaseExpiresAt }`. `release` answers `{ released: true }` or `{ released: false, reason: "not_holder" | "not_held" }`.
+- **The owner defaults to `ctx.runId`**, so a run never waits on its own hold: a resumed slice, or a second call on a key the run already holds, re-takes it at once with a **fresh handle**, and the previous handle is fenced (`release` answers `not_holder`, `renew` answers `lease_lost`). The match is the same principal, the same kind of caller and the same owner string — so a member who started the task cannot rotate or release the lease their function holds. When a run key coalesces several triggers into one run, pass `owner: ctx.trigger.runKey ?? ctx.runId`. Never a static string: two unrelated runs presenting one would re-enter each other's hold. A nested `withLock` on the same key re-enters, and its release frees the outer hold: use distinct keys or one wrapper.
+- **Cost.** Each attempt asks the platform to wait server-side for up to 30 seconds and answers the moment the key frees: no CPU, one platform call and one acquire attempt per half-minute of waiting. `timeoutMs` is capped at 1 hour (a `TypeError` above it); for longer coordination put a `step.sleep` between `acquire` calls. `ttlMs`, `timeoutMs` and the key are validated at the call (`TypeError` naming the option).
+- **Task runtime:** each attempt is a step, so the wait survives a reset or a deploy and the slice clock is refreshed at every attempt. It does not hibernate: the engine suspends nothing shorter than five minutes.
+- **Request runtime:** the whole `timeoutMs` must fit the invocation's remaining budget, or the call fails `FUNCTION_RUNTIME_REFUSED` before any attempt. A webhook delivery has 5 seconds in all; hand a longer wait to a task with `ctx.functions.start`.
+
+The one-shot calls stay available as `ctx.api.locks.tryAcquire` / `renew` / `release` / `status`; `tryAcquire` takes `waitMs` for the same server-side wait. Under the task runtime make those raw calls **live, outside `step.do`** — a memoized acquire hands a resumed slice the handle a previous slice was given, and that handle no longer works. `ctx.locks` does this itself. `status.owner` tells your own hold from another's.
 
 ### What resets a running task
 
-- **A `config push` never resets a running task.** A run is pinned to the content hash of the version that started it and reloads that same immutable bundle at every wake; a push points the function at a new version for the *next* call. Neither archive nor `functions activate` reaches a run in flight either. A developer who saw a long run die shortly after a push was not looking at the cause.
-- **A platform deploy does, and so does an isolate eviction.** The platform's own code is **not pinned** — the handler executes inside the platform's own runtime, so a redeploy resets that runtime under every slice that is *executing*. Nothing in the app's code caused it.
-- **The engine then re-runs the handler.** About five minutes later it dispatches again: the handler runs from the top, every completed `step.do` replays from its stored result, and the step that was executing runs again **as a further attempt of that step** — charged to that step's retry budget (default 5 attempts). A step whose budget the reset exhausts does not re-run: the run fails with the engine's own internal-error message (`WorkflowInternalError: Attempt failed due to internal workflows error`), recorded as `ENGINE_CODE_UPDATED` — the deploy that ended the attempt, not the engine's report of it — and as `ENGINE_ISOLATE_EVICTED` when an eviction did the same. The message is unchanged either way. A teardown the platform could not attribute to a build change (it compares the build the previous slice opened under with the one it wakes on, and equal or missing identifiers prove nothing) keeps `ENGINE_INTERNAL_ERROR`, which is also what a failure with no reset before it carries. Do not lower `retries.limit` on a step that must survive a deploy.
-- **So a step body must be safe to repeat.** The interrupted attempt may have got partway through; the replacement starts it over. Upsert rather than insert, carry an idempotency key on anything that charges or sends, and let later steps read the step's return value rather than something it wrote outside itself.
-- **An eviction is the one a handler can SEE.** A deploy stops the slice without warning it; an eviction takes the object the handler is running on away while it keeps executing, so every `step.do` it makes from then on — including the ones in its own error handling — rejects immediately, in 0 ms, with `Connection closed: this Durable Object instance is no longer active.` That rejection is not the step failing and the run is not over: the platform records the slice as reset, leaves the row `running`, and the engine dispatches again. The same sentence raised *inside* a `step.do` body — a Durable Object the handler itself called going away — is the handler's failure and is still settled `failed` with `ENGINE_ISOLATE_EVICTED`.
-- **Clean-up written in a `catch` runs against a run that will resume.** A rollback, an "abandoned" marker or a failure row written there is contradicted by the replay, which will do the work again. Keep such clean-up idempotent, the same way step bodies must be, and do not treat it as the run's ending — the outcome is on the run's own row. A run that resumes and completes reads `completed` with its output and its real `endedAt` **even if the platform had already recorded `failed` / `ENGINE_ISOLATE_EVICTED` for the teardown**: the completion overwrites that row and clears the failure, so the recorded outcome is the real one. This is the one case in which a terminal row is rewritten; a handler's own failure is never overwritten.
-- **How to see it.** A reset run that then finishes reads `completed` with no failure and no error code, so the count is the record: the `RESETS` column of `primitive functions runs`, `primitive functions runs steps` for which step was interrupted, `primitive functions logs <key> --run <id>` for what it printed, and `resets`/`lastResetAt`/`lastResetCause` on the `slice` block both clients read. A step the reset interrupted keeps **one** trace row, `running` until the replay completes it.
+A running task keeps the function version it started with. Pushing or
+activating another version does not change that run.
+
+The platform can interrupt a task during maintenance or a runtime reset.
+It resumes the handler from the beginning, reusing completed step results.
+The interrupted step may run again and consume another retry attempt.
+
+Make step bodies idempotent, and return values from steps instead of assigning
+them to outer variables. Cleanup in a `catch` must also be safe to repeat:
+an interruption does not necessarily mean the run has failed permanently.
+
+Read the run’s final status to determine its outcome. Use `functions runs
+steps` to see progress; `slice.resets`, `lastResetAt`, and `lastResetCause`
+report interruptions.
 
 ### Budgets in a task run
 
-The ceilings (see Ceilings) apply **per engine invocation, not per run**. A run is a series of *slices*: the engine runs the handler from the top until it returns or reaches a `sleep`, `sleepUntil` or `waitForEvent` that has not completed, then hibernates; the next wake is a new slice, with completed steps replayed from storage.
+A task executes in **slices**. After a pause, the handler resumes from the
+beginning and reuses completed step results.
 
-| Ceiling | In a task run |
-|---|---|
-| Wall clock | Continuous, up to 12 hours from the slice's start. Each slice is minted with a 10-minute credential and **every step begins with at least 5 minutes of it**. A single step may use up to 10 minutes of wall clock. When a step finishes with less than 5 minutes left, or is about to start with less than 5 minutes left (a cleanup step after the handler catches a failed step, or after code outside steps spent the slice), the platform REFRESHES the credential through the gateway and the clock rolls on with no pause. The guarantee holds at every `step.do` boundary; code outside steps still spends the clock it runs in, and the next `step.do` entry refreshes it. A handler that never calls `step.do` gets no refresh and dies at the 10-minute slice deadline. The request's `timeoutMs` is ignored; the run as a whole is bounded only by the 12-hour ceiling. |
-| `cpuMs` (5 minutes per task slice) | Per slice, not per step — a refreshed slice keeps counting; the paid plan's per-invocation ceiling. A step that exhausts it is killed and the run FAILS, so a step's own body must fit in 5 minutes of CPU, and a run whose steps together need more must end the slice between them (a `step.sleep` past the engine's five-minute grace period; the wake starts a fresh CPU budget). |
-| `subRequests` (10 000 per task slice) | Counted across the slice; does NOT reset while it refreshes. Replayed steps spend nothing — their bodies do not run — but any platform call *outside* a step re-spends on every wake. |
-| `ratePerMinute` (1 200) | Per **start**. A task start reserves a slot and returns it if the start is refused; resumes take none. |
-| Output (1 MiB) and `outputSchema` | Once, on the final return value, at settlement. |
+- A slice begins with 10 minutes of wall-clock time. The platform refreshes
+  that budget at step boundaries so each step begins with at least 5 minutes.
+  A sequence of steps can continue for up to 12 hours before a pause.
+- If refresh is unavailable, the task pauses for a little over 5 minutes and
+  resumes with a fresh slice.
+- Each slice allows `subRequests` of up to 10 000 and 5 minutes of active CPU.
+  These budgets do not refresh. The platform pauses at a step boundary after
+  half the subrequest allowance is used; exceeding CPU fails the run.
+- Keep individual steps within their budgets. A single long operation outside
+  `step.do` receives no wall-clock refresh.
 
-When a refresh is refused — past the 12-hour ceiling, more than once a minute (one per 60-second window on the platform's epoch-aligned clock), or during a rate-limiter or engine outage — the slice falls back to a pause of a little over 5 minutes: the engine hibernates only for a sleep longer than its own five-minute grace period, so that is what the fallback sleeps, and the next wake mints a fresh 10-minute slice with a fresh 12-hour ceiling. So a refused refresh costs a little over five minutes, once. Two budgets do NOT refresh: the subrequest count yields instead — when it passes half the resolved limit (5 000 of 10 000, or half a lower configured value), the next `step.do` boundary takes the fallback yield rather than refreshing; and CPU, which is 5 minutes of active CPU per slice — a step that exhausts it is killed, and the run fails rather than recovering. Steps running in parallel (`Promise.all` over two chains) that reach a fallback yield together: it waits for every step in flight to finish before it sleeps, because the engine hibernates only when nothing is running. Because the fallback is a hibernation, what the run printed before it is not recoverable on the log record (see Debugging a failing function). On a local development server the engine never hibernates: a fallback there is a pause with no fresh credential, and a task run is bounded by one slice.
+Use steps to divide work and `step.sleep` when the task needs to wait. For
+CPU-heavy work, a sleep longer than five minutes starts a fresh slice after
+hibernation. Output limits and `outputSchema` apply to the final result.
 
-Consequences: `step.sleep` between chunks is for waiting, not for budget — chunk a long job by steps and sleep when there is something to wait for; keep the code outside steps minimal, since it re-executes on every wake; and a refresh does not count toward the engine's maximum number of steps per run, and neither does a fallback yield (`step.sleep` and `step.sleepUntil` are excluded from that allowance; only your `step.do` calls count).
+The run status includes a `slice` block with timing, refresh counts and
+progress: `lastProgressAt` is when the run last did something, such as
+starting or finishing a step; `openStep` and `openStepStartedAt` name the step
+it is inside (`charge#0` is the first `step.do("charge", …)`); `parkedAt` is
+set while it waits. `functions runs` shows `REFRESHES` and `LAST PROGRESS`.
 
-**Observing a slice.** A task run's status carries a `slice` block beside `status` and `run` — `sliceId`, `startedAt`, `ceilingAt` (the 12-hour bound), `refreshCount`, `lastRefreshAt`, `settledAt` and `settledStatus`; a request invocation carries no `slice` key. `primitive functions runs` prints the count in a `REFRESHES` column, blank for a request run.
+### A function an agent uses
 
-`functions.getStatus` answers the block as `slice` on `FunctionRunStatus`, and the typed overloads carry it too. A block the client cannot read is dropped rather than published with a hole in it, so `slice` being absent means "no record to show you", never "this run never refreshed".
-
-**When a run's status settles.** A task run **settles its own row** as it ends: the settlement that writes the invocation record `primitive functions logs` prints also writes the run's `status`, `endedAt` and **`output`**, so `functions runs`, `functions logs`, `getStatus` and `runs wait` agree **without being polled** and without waiting for a sweep. Do not build a staleness timeout on top of it — a run that finished a day ago and was never polled reads exactly as one that finished a second ago.
-
-`running` means the run is live, **or not yet known to have ended**: executing, hibernating in `step.sleep`, or waiting out a step retry, and nothing that merely reads it writes to it. The `slice` block is how you tell the two apart, and it reads one way only — `settledAt` set (with `settledStatus`) is proof the slice ENDED; **an unsettled slice is not proof the run is live**, because the platform writes the invocation record before it settles the slice record and a settlement it could not write down is logged rather than retried. Treat `settledAt: null` on a `running` row as "not known to have ended".
-
-A `running` row whose run really did end is **repaired on read**: `primitive functions runs`, `getStatus`, `runs wait` and the hard-delete live-run scan each reconcile such a run once, asking the engine first and then the platform's own records — the settled slice record, then the run's **invocation record**, which lives seven days. So a run whose engine instance has aged out of retention is still settled from what was written down about it rather than guessed at. Polling and the platform's 60-second sweep are **fallbacks**; neither is what makes a finished run read finished.
-
-One deliberate exception: a run whose row was written in the last five minutes and about which nothing has been recorded is treated as still STARTING — answered exactly as stored, never written, and a hard delete of its function is still refused, because that run is about to load that function's code.
+Archive, hard delete (including `config push --prune`) and a schema change an
+agent cannot take are refused with `409 FUNCTION_USED_BY_AGENT` while a
+non-archived agent names the function; `details.agents` lists each agent and
+its uses. Change the agent in the same push (push applies it first), or retire
+it. If the changed agent also names a function the push creates, run
+`primitive config push --only function/<new-function-key>` first, then the push.
 
 ### Deleting a function with live runs
 
-A hard delete destroys the stored bundles a sleeping run reloads when it wakes, so it is refused — including through `primitive config push --prune` — while any run has not settled; the refusal names the live runs. Wait for them or terminate them, then retry. To stop new runs meanwhile, **archive** the function: an archived function keeps its bundles, so an in-flight run finishes on the version it pinned. While a hard delete is running, an invoke answers `404` and a task start already in flight answers `409 FUNCTION_DELETE_IN_PROGRESS`.
+Hard deletion is refused while runs are active. Archive to stop new work while
+existing runs finish. Wait for or terminate those runs before pruning.
 
 ## Execution identity
 
-Function code acts as the system. Every platform call a function makes — `ctx.api`, `ctx.db`, the helpers — carries the **app's** authority, not the caller's: the same thing the app's owner could do over the REST API. There is no execution identity to choose: `runAs` is not a key of a function.
-
-| Door | Authority of every platform call | `ctx.user` |
-|---|---|---|
-| HTTP invoke | The app's | The caller — a name for attribution and scoping |
-| Webhook, cron fire | The app's | `null` |
-
-Three consequences worth stating:
-
-- **A function is not a proxy for the caller.** `ctx.api.documents.get` inside a function reads any document of the app, whoever called; `ctx.api.users.setRole` sets a role a member could not. What a member may reach *through* a function is decided by the `access` gate and by what the code chooses to do with `ctx.user`.
-- **Scope reads yourself.** A read the caller should see only part of is filtered by the code — `filter: { owner: ctx.user!.userId }` (non-null on an HTTP invoke), or a `$caller` registered query (see Registered queries). The platform does not narrow a function's read to its caller.
-- **A revoked caller is not cut off mid-invocation.** The gate ran when the call arrived; a role change during the run does not change what the running code may do. Re-check `ctx.user` inside the code where that matters.
+A function can access all data in its app. The caller’s identity provides
+attribution; it does not limit the function’s authority. Filter records and
+validate resource access in your code when the result must be caller-scoped.
 
 ### Checking a user's access
 
-A function that writes into a document the caller named must decide for itself whether that caller may edit it — the platform will not refuse the write, because the write is the app's. `ctx.api.documents.validateAccess` answers for a NAMED user when you pass one:
+A database id in the input is a claim, not a permission: `ctx.db3` reaches
+every database in the app (both reject `DB3_NOT_FOUND`, 404, for an id naming
+none, or one that was deleted). Gate in `authorize` with the caller's effective
+level, `auth.db3(id, type).permissions()` → `"reader" | "read-write" | "owner" | null`:
 
 ```ts
-const access = await ctx.api.documents.validateAccess({
-  documentId: input.documentId,
-  body: { userId: ctx.user!.userId },
-});
-
-// A content write needs a real grant. `appRole` is NOT one.
-if (access.permission !== "read-write" && access.permission !== "owner") {
-  throw new Error("You may not write to this document");
-}
-
-await ctx.api.documents.update({
-  documentId: input.documentId,
-  body: { title: input.page },
-});
+authorize: async (input: { db3Id: string }, auth) => {
+  if (!auth.user) return deny("FORBIDDEN");
+  const level = await auth.db3(input.db3Id, "project").permissions();
+  return level === "read-write" || level === "owner" ? allow() : deny("FORBIDDEN");
+},
 ```
 
-The answer is the platform's own resolution — direct grants, group grants (collection membership included, since a collection's sharing is materialized as group grants) and "anyone with the link" access — and it is what the document routes would enforce for that user. The shape is `{ hasAccess, permission?, accessSource?, appRole? }`, with `accessSource` one of `owner`, `grant`, `group`, `link`.
+`auth.db3(id, type).publicAccess()` → `"reader" | null`: `"reader"` while the database is public and
+`signedOutAccess` is on, the same for every caller (signed out included); one read. The helpers
+`requireDb3Level` and `requirePublicDb3` wrap both reads (see "Serving a database named by the caller").
 
-- **With no `body` it answers the DISPATCH**, which carries the app's owner-level authority: `permission: "owner"` for every document of the app, whoever invoked. Useful for "does this document exist and is it reachable", never a check on the caller.
-- **`appRole` is not a grant.** It names the subject's role in the app, beside the grant. `PUT documents/{id}`, block writes and blob writes require a `read-write` or `owner` grant from everybody, administrators included. The only writes a role admits without a grant are the tag routes (`documents.addTag` / `documents.removeTag`), so only a tag change may read `appRole ∈ {admin, owner}` as permission to proceed.
-- Over REST the same body is admitted for an app owner or admin, and for a member naming themself; anyone else gets `403 DOCUMENT_ACCESS_SUBJECT_FORBIDDEN`. A `userId` who is not an admissible member of the app answers `404 DOCUMENT_ACCESS_SUBJECT_NOT_FOUND`, the same for a user that never existed, one of another app, and a disabled one.
+For another user, or from the handler: `ctx.api.db3.validateAccess({ db3Id, body: { userId } })` →
+`{ hasAccess, permission?, accessSource? }` (`accessSource`: `owner`, `grant`, `group`, `link`, `app`, or `resource` when a platform resource such as an agent session holds the database and its members read it).
+Omitting `body.userId` describes the function's own app authority, not the caller — always pass it.
+Both resolve grants, groups, collections, link and app access exactly as the database enforces them; an app role
+is not a content grant. A sync-off database answers no access for every member — gate those on
+records your app keeps (a roster row read through `auth.db3(...).model(...)`).
 
-The `function.invoke` analytics event is still attributed to the caller (see Recording), and the run row of a trigger fire records the app's system principal.
+### Which user a call is about
+
+A call about one user takes `userId`. Omitted, it means the caller
+(`ctx.user`). Only an absent `userId` means the caller: an empty, `null` or
+non-string `userId` throws `SUBJECT_USER_INVALID` (400), so omit it rather than pass `""`. A run with no caller — cron, a webhook, `--as system`, or a task
+started from one — must name the user, or the call throws
+`FUNCTION_SUBJECT_REQUIRED` (400):
+
+```ts
+// A cron fire has no caller: name the member.
+const page = await ctx.api.collections.list({ userId: member.userId });
+```
+
+| Calls | `userId` |
+| --- | --- |
+| `collections.list`; `db3.aliases.set` (in `body`), `resolve`, `delete`; `ctx.agents.*` | Optional; defaults to the caller |
+| `collections.listForUser`, `groups.listUserMemberships`, `db3.listHeldByUser`, `db3.listSharedWithUser`, `ctx.usage.forUser` | Required |
+| App-wide reads (`groups.list`, `users.list`) | None |
+| Calls that hand something to a user (`users.setProfile`, `ctx.channels.authorize`) | Names the recipient; not restricted below |
+
+Naming a user other than the caller, with an optional or a required `userId`:
+
+| Run | `userId` omitted | Another member |
+| --- | --- | --- |
+| No caller | `FUNCTION_SUBJECT_REQUIRED` | Allowed |
+| Invoked by an app owner or admin | The caller | Allowed |
+| Invoked by any other member | The caller | `SUBJECT_USER_FORBIDDEN` (403) |
+| Invoked by any other member, function declares `users:readAny` / `users:actAsAny` | The caller | Allowed on reads / on calls acting as them |
+| A tool, context or history run, and anything it starts | The initiator | `SUBJECT_USER_FORBIDDEN` (403) |
+| A signed-out caller's run | `FUNCTION_SUBJECT_REQUIRED` | Allowed on reads with `users:readAny`; otherwise `SUBJECT_USER_FORBIDDEN` (403) |
+
+The role is read at each call, so a task sees a role change made while it
+slept. A named user who is not a member throws `SUBJECT_USER_NOT_FOUND` (404)
+on the optional-`userId` calls and on `ctx.usage.forUser`. Of the other
+required-`userId` reads, `groups.listUserMemberships` answers an empty list and
+the rest a plain 404 with no code.
+
+Gotchas:
+
+- **A subject grant reaches any member the code names.** A function holding
+  `users:readAny` or `users:actAsAny` lets every member who may invoke it name
+  anyone; take the user id from your own data, not from input.
+- **Writes toward a named user are not restricted.** `users.setProfile` and
+  `ctx.channels.authorize` accept any member, so a
+  tool that passes a model-supplied user id to them changes that user's data.
+  Check the id before passing it.
+- **`ctx.channels.authorize` keeps its own code.** With no caller and no
+  `userId` it throws `FUNCTION_CHANNEL_GRANTEE_REQUIRED`.
+
+## Reading and writing user properties
+
+`ctx.users.get(userId)` → member with [declared properties](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md), defaults applied, `null` if not a member. `ctx.users.getBy(name, value)` → the member holding a unique property's value or a named constraint's values (array in declared order, or object by field name), `null` if none.
+
+`ctx.users.setProperties(userId, patch, options?)` merge-patches (`null` clears to default); `addToSet`/`removeFromSet` touch one `stringset` field. `options.condition` is a records-query filter over `properties.*` plus `userId`/`email`/`name`/`avatarUrl` (not `role`/`status`), checked inside the write:
+
+```ts
+await ctx.users.setProperties(userId, { plan: "pro" }, { condition: { "properties.plan": "free" } });
+```
+
+Throws `PrimitivePlatformError`; branch on its `errorCode`: `USER_PROPERTY_UNKNOWN`, `USER_PROPERTY_INVALID`, `USER_PROPERTY_UNIQUE_CONFLICT`, `USER_PROPERTY_CONDITION_FAILED`, `USER_PROPERTY_NOT_CLIENT_WRITABLE` (client sessions only — a function may always write a declared field). Two calls patching different fields of the same user both land concurrently.
+
+`ctx.users.list(options?)`/`iterate(options?)` page the roster directly (`limit` ≤100, `cursor`; `iterate` is `list` as an `AsyncIterable`, for a request function or a single-slice loop only — a durable loop still takes its own pages inside `step.do` with an explicit cursor). Both keep working, take no filter, and are soft-deprecated: prefer `ctx.users.query` to filter/sort/page up to 1,000, and [`ctx.users.forEachBatch`](#walking-every-user) to run a function over every match instead of paging by hand.
+
+`ctx.invitations.getBy(name, value)` finds a pending invitation by a unique value its `initialProperties` will give the invitee — see [Invitations](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#invitations).
+
+### Querying users
+
+Same filter grammar as [a records query](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#querying), over base fields (`userId`, `email`, `name`, `avatarUrl`, `role`, `status`, `addedAt`, `testUser`) and `properties.<name>`, read from an index that trails a write by seconds — not the live record (see [The Consistency Contract](AGENT_GUIDE_TO_PRIMITIVE_USER_PROPERTIES.md#consistency-contract)):
+
+```ts
+const page = await ctx.users.query({ filter: { role: "member", "properties.plan": "pro" }, sort: { addedAt: -1 }, limit: 50 });
+const { count } = await ctx.users.count({ filter: { "properties.plan": "pro" } });
+const { result } = await ctx.users.aggregate({ operations: [{ type: "count" }], groupBy: ["properties.plan"] });
+```
+
+`include` is refused. Up to 1,000 per page. `meta.scans` names any filter/sort field the index served by scanning rather than indexing (undeclared, or not `indexed`).
 
 ## `ctx.api` — the platform from inside a function
 
-`ctx.api` is a typed client for the platform's own API, generated from its OpenAPI document. The namespaces a function may call mirror the operation ids: `analytics`, `blobBuckets`, `channels`, `collections`, `configVars`, `connections`, `databases`, `documents`, `email`, `groups`, `integrations`, `locks`, `notifications`, `prompts`, `resourceMetadata`, `secrets`, `users`. Each method takes one options object carrying the operation's path parameters, query parameters, headers (under their wire names) and `body`; a missing required parameter is a compile error.
+Use typed `ctx.api` methods for app services. Methods take an options object
+with path/query parameters and `body` where needed. Use `ctx.prompts.run` and
+`ctx.integrations.call` for prompt and external-service calls.
 
-```ts
-import { defineFunction } from "primitive-functions";
+Each method's `body` and answer are typed from the platform's API spec.
+`config push` refuses a function that sends a body key or reads an answer field
+the spec does not declare; `primitive config push --no-typecheck` ships it
+unchecked.
 
-export default defineFunction(async (input: { documentId: string }, ctx) => {
-  const doc = await ctx.api.documents.get({ documentId: input.documentId });
-  return { title: doc.title, readBy: ctx.user?.userId ?? null };
-});
-```
+Direct internet `fetch` calls are denied. Missing capabilities return
+`FUNCTION_INTEGRATION_GRANT_MISSING`, `FUNCTION_SECRET_GRANT_MISSING`, or
+`FUNCTION_HIGH_BLAST_GRANT_MISSING`.
 
-A sandbox has **no network access**. Its only route out is the platform, and every operation the gateway publishes is reachable **with no declaration**, as the app, under one of three rules:
-
-- **Admitted as the system** — the ordinary families: `documents`, `databases`, `users`, `groups`, `collections`, `notifications`, `locks`, `blobBuckets`, `resourceMetadata`, `analytics`, `channels`, `email`, `configVars`. No grant, no declaration.
-- **Admitted under a keyed capability** — `integration:<key>` for `ctx.integrations.call`, `secret:<NAME>` for `ctx.secret`. These are declared because each names an outside credential the reviewer should see in the file.
-- **Admitted under a high-blast capability** — eleven exact strings for the operations that destroy or re-own (see Capabilities). Declared so that "this function can delete a database" is a line in a reviewed TOML, not a surprise in a log.
-
-Of `functions.*`, only `functions.start` (what `ctx.functions.start` calls) and `functions.logs` (a function's invocation logs) are published. Not published to functions at all: every other `functions.*` operation (a function cannot invoke or manage a function), `iterations.*`, and `databaseTypeConfigs.*`. A prompt runs only through `ctx.prompts.run` and an integration is called only through `ctx.integrations.call`; any other `ctx.api.prompts` / `ctx.api.integrations` route that runs or calls one is refused. A method that type-checks can still be refused here.
-
-A refused call rejects with an error carrying `status` and `errorCode`:
-
-| `errorCode` | Meaning |
-|---|---|
-| `FUNCTION_EGRESS_DENIED` | `fetch` to any host other than the platform. |
-| `FUNCTION_ROUTE_NOT_ALLOWED` | An operation the gateway does not publish to functions — the list above. |
-| `FUNCTION_INTEGRATION_GRANT_MISSING` | An integration call the capabilities do not cover; the message names the string that would. |
-| `FUNCTION_SECRET_GRANT_MISSING` | A secret read the capabilities do not cover. |
-| `FUNCTION_HIGH_BLAST_GRANT_MISSING` | A high-blast operation the capabilities do not cover; the message names the string. |
-| `FUNCTION_SECRET_NOT_FOUND` / `FUNCTION_VAR_NOT_FOUND` | This environment holds no value of that name. |
-| `FUNCTION_CHANNEL_NAME_INVALID` | A channel name outside the grammar (`400`). |
-| `FUNCTION_CHANNEL_GRANTEE_REQUIRED` | `ctx.channels.authorize` from a trigger fire without an explicit `userId` — there is no caller to default to. |
-| `FUNCTION_CHANNEL_GRANTEE_NOT_FOUND` | The `userId` a grant names is not a member of this app (`404`) — the same answer as a user that never existed. |
-| `FUNCTION_SEND_TARGET_NOT_FOUND` | The user is not a member of this app, or the connection is not one of this app's. |
-| `FUNCTION_SEND_PAYLOAD_TOO_LARGE` | A send payload over 64 KiB; nothing was delivered. |
-| `FUNCTION_SEND_PAYLOAD_INVALID` | A send payload JSON cannot serialize. |
-| `QUERY_IN_LIST_TOO_LARGE` | A single `$in`/`$nin` list over 1 000 values (`400`); the message names the field, the count and the cap. |
-
-Every platform call carries the invocation's credential, which expires at the invocation's deadline — a function that outlives its budget has late calls denied and side effects that never land (see Ceilings).
+A single `$in` or `$nin` list is limited to 1 000 values
+(`QUERY_IN_LIST_TOO_LARGE`). How to split a longer list depends on the
+operator — see the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#limits).
 
 ## Capabilities
 
-`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only three kinds exist:
+`capabilities` is an array of exact strings. No wildcards, no case folding; a repeated string is the same string. Only five kinds exist:
 
 | Kind | Strings | Unlocks |
 |---|---|---|
 | Integration | `integration:<key>` | `ctx.integrations.call(key, …)` — checked at push against an active integration |
 | Secret | `secret:<NAME>` | `ctx.secret(NAME)` — grammar-checked at push; the value is provisioned per environment |
-| High-blast | `databases:create`, `databases:delete`, `databases:transferOwnership`, `databases:addManager`, `databases:revokePermission`, `databases:grantGroupPermission`, `databases:revokeGroupPermission`, `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
+| High-blast | `users:setRole`, `blobBuckets:createBucket`, `blobBuckets:deleteBucket`, `db3:setSync`, `db3:transfer`, `db3:setOwnerRow`, `db3:setAppAccess`, `db3:setPublicAccess` | The operation of the same name on `ctx.api`, which is otherwise refused `FUNCTION_HIGH_BLAST_GRANT_MISSING` |
+| Naming other members | `users:readAny`, `users:actAsAny` | In a run a plain member invoked, naming another member: `users:readAny` on the user-subject reads (memberships, a member's collections, their db3s (owned and shared), agent sessions, user aliases, holdings, usage); `users:actAsAny` on calls that act as them (`ctx.agents` session calls other than `listSessions`, `ctx.db3` `asUser`, setting or deleting their aliases). Never in an agent-driven run, never for `custodian: "app"`; a nested start uses its own version's grants |
+| Action links | `tokens:sign` | `ctx.actionTokens.sign`, which is otherwise refused `FUNCTION_TOKENS_GRANT_MISSING` |
 
-**Nothing else is declared.** Database models, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
+**Nothing else is declared.** Database records, prompts, config vars, channels, sends, email and analytics writes are admitted with no declaration, because the code acts as the system.
 
-**Push checks the list** before anything is applied: it refuses a malformed string, an `integration:` naming a key the app has no active integration for, and any string outside the three kinds, naming the string. `secret:` is checked for grammar only — values are provisioned per environment, so push the function, then provision the value; a name with no value is `FUNCTION_SECRET_NOT_FOUND` when the function reads it.
+Push checks capability syntax and integration existence. Secret values are
+provisioned separately; an unset value returns `FUNCTION_SECRET_NOT_FOUND`.
 
 The platform reads capabilities from the TOML file you review in a pull request, so what a reviewer sees and what the platform enforces are one statement.
 
 ### What a function touches is documented, not declared
 
-Push scans the built bundle and records a **manifest** on the version: the model names it saw in `.model("…")` and in the records calls' `modelName`/`model` keys, the `ctx.api` families and helpers it uses, the queries it registered, and whether a model name is resolved at run time. `primitive functions get <function-id>` prints it under `Manifest (documentation, not authorization)`. It is what it says: a reviewer's and an operator's map of what a version reaches, refreshed on every push, and never consulted when a call is admitted. A model missing from the manifest is a scan the code defeated (a name built from a string), not a model the function cannot read.
+`functions get` shows the version’s manifest of used models, queries, and
+services. It supports review and does not control access.
 
 ## Calling an integration
 
-A function cannot `fetch` the internet. Under an `integration:<key>` capability, `ctx.integrations.call` asks the platform to make the request on the function's behalf, so the integration's `{{secrets.*}}` and `{{vars.*}}` templates are resolved server-side and the credential never enters the sandbox.
+Declare `integration:<key>` in capabilities, then call
+`ctx.integrations.call(key, { method, path, query, body })`. The integration
+supplies credentials and restricts the destination, methods, and paths.
 
-```ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { orderId: string }, ctx) => {
-  const response = await ctx.integrations.call("stripe", {
-    method: "POST",
-    path: "/v1/refunds",
-    body: { payment_intent: input.orderId },
-  });
-  return { status: response.status, refund: response.body };
-});
-```
-
-Request: `method` (must be in `allowedMethods`; defaults to the integration's own), `path` (relative to `baseUrl`), `query`, `headers`, `body`, `form` (form-urlencoded; not combinable with `body`), `bodyMode` (`json` | `raw` | `multipart`). Result: `status`, `headers`, `body`, `durationMs`, `traceId`, and `errorCode` when the platform or the upstream refused.
-
-- The integration's own rules apply to what the request really asks for — path normalization against `allowedPaths`, `allowedMethods`, redirect re-checks, and its `timeoutMs`, which is also bounded by the invocation's remaining time (`UPSTREAM_TIMEOUT`). They are the integration's contract: see [Integrations — The call contract](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md#the-call-contract).
-- **Authorization is the function's.** An integration has no client endpoint and no rule of its own: the function's `access` gate decides who may make the code run, and the `integration:<key>` capability in the reviewed TOML is the egress allowlist that admits the call. A disabled or deleted integration refuses every call (`INTEGRATION_INACTIVE`).
-- Every call is recorded on the integration's own log with the function's key, and with the RUN it was made from when the invocation has one (a task run or a trigger fire): `primitive integrations logs <integration-id>`, narrowed to one run with `--run <run-id>`.
-
-See [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md) for declaring one.
+Check the response’s `errorCode` before using `body`. Calls are bounded by the
+function’s remaining time. Each call is logged with its run and, inside
+`step.do`, its step (`primitive integrations logs <integration-id> --run <run-id> --step <name>`).
+See [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md) for configuration
+and examples.
 
 ## Running a prompt
 
-`ctx.prompts.run(key, { variables, modelOverride, configId })` — no capability; the code is the app — runs one of the app's saved prompts and answers an envelope: `success`, `output`, `error`, `metrics`, `configId` (which config ran), plus `upstreamStatus` when a provider answered non-OK. `modelOverride` swaps the model for this call only.
-
-```ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { text: string }, ctx) => {
-  const result = await ctx.prompts.run("summarize", { variables: { text: input.text } });
-  if (!result.success) throw new Error(result.error ?? "prompt failed");
-  return { summary: result.output };
-});
-```
-
-- `configId` pins a config **of that prompt**; any other answers `PROMPT_NO_CONFIG`.
-- **Authorization is the function's.** A prompt has no client endpoint and no rule of its own; the function's `access` gate is the whole authorization. An inactive or archived prompt refuses every run.
-- The model call is bounded by the invocation's remaining time. A provider call that passes the deadline answers `PROMPT_UPSTREAM_TIMEOUT` — catch it separately from a model failure: the budget ran out, not the model.
-
-**Do not parse a JSON prompt by hand.** When the prompt declares `[prompt.outputSchema]`, the success arm carries `parsed` — the answer parsed, validated against that schema and typed from it:
-
-```ts
-const answer = await ctx.prompts.run("categorize", { variables: { payload } });
-if (!answer.success) throw new Error(answer.error ?? "categorize failed");
-// `parsed` is typed from the prompt's schema; no JSON.parse, no failure branch.
-return { suggested: answer.parsed.suggested_transactions };
-```
-
-`parsed` is on the **success arm only**, which is what the `success` check unlocks. Declaring the schema, the `PROMPT_OUTPUT_*` codes a wrong-shaped answer returns, `outputFormat`, and the generated `primitive-prompt-types.d.ts` are the Prompts guide's: see [Prompts — Typed output](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md#typed-output).
-
-A **provider** failure sets `error`, and `upstreamStatus` when a provider answered — its own HTTP status, which `error` names too, whichever provider the config names. The field is absent when there was no provider answer to report (an unset provider key, an empty completion), so a status in it is always the provider's. There is **no** `errorCode` unless the upstream itself ran out of time, when it is `PROMPT_UPSTREAM_TIMEOUT`. That is how to decide whether to try again: retry on 408, 429, 502, 503 and 504 — 408 and 504 are the upstream timeouts — and do not retry any other 4xx.
-
-See [Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md).
+Call `ctx.prompts.run(key, { variables })`; no capability is needed. Check
+`success` before reading `output` or `parsed`. Declare `[prompt.outputSchema]`
+for validated, typed `parsed` results. See
+[Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md#typed-output).
 
 ## Secrets and config vars
 
-A `secret:<NAME>` capability lets a function read one app secret by name; a config var needs no declaration:
+Use `ctx.secret("KEY")` with `secret:KEY` in capabilities. Use
+`ctx.configVar("KEY")` for non-secret settings without a capability.
 
-```ts
-const region = await ctx.configVar("REGION");
-const token = await ctx.secret("PARTNER_TOKEN");
-```
-
-```toml
-capabilities = ["secret:PARTNER_TOKEN"]
-```
-
-- **Prefer an integration when the secret is a credential for one** — there the value is injected into the outbound request and never enters the sandbox. `ctx.secret` is for what an integration cannot express, and it stays declared for that reason: a reviewer sees which secrets can enter the sandbox.
-- Secrets and config vars are provisioned per environment, out of band from the push. A secret capability is checked for spelling at push and for existence at call time: a name with no value in this environment answers `FUNCTION_SECRET_NOT_FOUND` / `FUNCTION_VAR_NOT_FOUND`, naming the key.
-- The namespaces are separate: `ctx.secret("X")` never reads a config var named `X`, and vice versa.
-- Secret values come through a short stale-while-revalidate cache: a secret rotated just now may serve its previous value for up to about a minute.
-- **`ctx.configVar` is read once per version.** Its value is cached keyed on the function version's config id — across calls in one invocation and across invocations on a warm sandbox — so a changed var reaches a function reliably only on its next pushed version; a re-push starts cold. A miss is never cached (provision the var, and the next read sees it). `ctx.secret` keeps no per-version cache — a rotated secret needs no push, and arrives once the platform's short read cache (above) refreshes.
-
-See [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
+Secrets refresh through a short cache, usually within about a minute. A
+running function version caches each config var it reads and keeps that
+value until a new version is pushed (any change to its code or TOML) or its
+running instance is recycled on its own — there's no fixed expiry, so one
+test invocation after changing a var is not proof every invocation sees the
+change. Never log credentials. See [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md).
 
 ## Sending to a connected client
 
@@ -599,11 +1141,13 @@ const result = await ctx.users.send(input.userId, { kind: "order-ready", orderId
 return { delivered: result.connections, truncated: result.truncated };
 ```
 
-- **Presence is not guaranteed and there is no durable record.** A user with no connected client answers `{ connections: 0, truncated: false }` — a success. A client that was offline never receives the frame later; use a notification when the message must survive being missed.
-- **One socket, one frame.** A client with several documents open is one connection, delivered once.
+- **Presence is not guaranteed and there is no durable record.** A user with no connected client answers `{ connections: 0, truncated: false }` — a success. A client that was offline never receives the frame later; write a record the client reads when the message must survive being missed.
+- **One socket, one frame.** A client with several databases open is one connection, delivered once.
 - **Fan-out is bounded** at 64 unique connections per user, and the lookup behind it is bounded too; past either, the send delivers what it found and answers `truncated: true` — "there may be more", not an error.
 - **Payloads are capped at 64 KiB** serialized (`FUNCTION_SEND_PAYLOAD_TOO_LARGE`; nothing delivered).
-- `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`).
+- `ctx.connections.send(connectionId, payload)` addresses one connection. An id from another app answers exactly as an id that never existed (`FUNCTION_SEND_TARGET_NOT_FOUND`). A browser tab keeps its connection id across reloads, and each tab has its own.
+
+Read `client.getConnectionId()` after `initializeClient` resolves: until the tab's id is settled it is empty.
 
 On the client, listen for the `directMessage` event:
 
@@ -617,36 +1161,8 @@ On the client, listen for the `directMessage` event:
 
 ## Channels
 
-A direct send addresses a user or a connection the function already knows; a **channel** addresses whoever is listening to a named topic — an order's status, a game table, a document's presence lane — without the function knowing who that is. Two calls make one, and neither needs a capability:
-
-```ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { orderId: string }, ctx) => {
-  // The grant names the CALLER (an HTTP invocation's default grantee), so it
-  // is not a credential anybody else can present.
-  const { grant, expiresAt } = await ctx.channels.authorize(`orders:${input.orderId}`);
-  return { grant, expiresAt };
-});
-```
-
-```ts
-// Any function publishes to the topic — including the one that just wrote the row.
-const result = await ctx.channels.publish(`orders:${orderId}`, { status: "shipped" });
-// result: { connections, truncated }
-```
-
-| Call | Contract |
-|---|---|
-| `ctx.channels.authorize(channel, { userId?, ttlSeconds? })` → `{ channel, grant, expiresAt }` | Mints a signed, short-lived grant naming this app, this channel and one user. `userId` defaults to the HTTP caller; a trigger fire has no caller and must pass it (`FUNCTION_CHANNEL_GRANTEE_REQUIRED` otherwise). `ttlSeconds` defaults to 300 and is clamped to the 900 ceiling — asking for more gets the ceiling, not an error. `expiresAt` is epoch milliseconds. There is no app-wide grant. |
-| `ctx.channels.publish(channel, payload)` → `{ connections, truncated }` | Delivers a `channel.message` frame, payload verbatim, to every connection holding a live membership. Fan-out stops at 500 connections per channel (`truncated: true`). Zero connections is a success — nobody was listening. |
-
-- **Channel names** are one or more `[A-Za-z0-9_-]` segments joined by `:`, at most 200 characters — `orders`, `orders:42`, `orders:42:chat`. Outside the grammar: `400 FUNCTION_CHANNEL_NAME_INVALID`, decided before anything else.
-- **Expiry is the only revocation, and it ends membership.** A grant is a token, not a row: past `expiresAt` the server stops delivering even though the socket stays open. Renewal is another authorize and another subscribe — same channel, same socket, new expiry — and replaces the membership rather than adding one.
-- **Refusals are uniform.** An expired, tampered, cross-app, cross-user or wrong-channel grant all get the same error frame with the same message; the frame echoes the channel, so a client with several subscribes in flight knows which one failed, but never why. A grant is refused at subscribe time if the socket's user is not the one it names.
-- **Reconnect re-issues every held subscribe** with its stored grant; a grant that expired meanwhile is refused, and only that channel's registration is dropped.
-
-On the client, present the grant on the socket it already has:
+Authorize a user with `ctx.channels.authorize(channel)` and return its `grant`
+and `expiresAt`. The caller subscribes using that grant:
 
 ```typescript
   // 1. Ask the authorizing function for a grant; it names this caller and one channel.
@@ -677,13 +1193,43 @@ On the client, present the grant on the socket it already has:
   subscription.unsubscribe();
 ```
 
-- `subscribeToChannel(channel, grant)` resolves with `channel`, `expiresAt` and an `unsubscribe` closure on the server's ack for that channel, and fails on the uniform refusal. Calling it again with a fresh grant renews the membership; two calls for the same channel run one after the other, so a renewal is answered on its own merits.
-- `unsubscribeFromChannel(channel)` — or the subscription's `unsubscribe` — is idempotent and safe on a closed socket; a subscribe still in flight for that channel is cancelled and its call fails.
-- `channelMessage` fires for every held membership, carrying `channel`, `payload`, `functionKey` and `sentAt` — a live frame with no durable record, so a client that was offline never receives it later.
-- `channelSubscribeFailed` (`channel`, `message`) announces a refusal nothing was waiting on — the reconnect case, where a grant that expired while the socket was down is refused: invoke the authorizing function again and re-subscribe. A refusal that answers a `subscribeToChannel` call surfaces from that call instead, so a failure is never announced twice.
+Publish with `ctx.channels.publish(channel, payload)`. Any function in the app
+can publish; no capability is required.
 
-The join fails by rejecting the `subscribeToChannel` promise; `channelMessage` / `channelSubscribeFailed` are `client.on(...)` events.
+- Grants belong to a specific user. Triggered functions must pass `{ userId }`
+  because they have no caller.
+- A grant expires after 300 seconds by default, up to 900. Renew by invoking
+  the authorizing function and subscribing with the new grant before expiry.
+- Expiry stops delivery even on an open connection. On reconnect, handle
+  `channelSubscribeFailed` by obtaining a fresh grant.
+- Channel names contain letters, digits, `_`, and `-`, separated by `:`;
+  the maximum length is 200 characters.
+- Publish returns `{ connections, truncated }`, with a limit of 500 recipient
+  connections. Zero recipients is a successful send.
 
+Check the caller’s access to the resource before authorizing its channel.
+
+## Inviting someone with no account
+
+`ctx.api.invitations` creates an app invitation with no grant attached; the
+invitee passes an invite-only app's gate and becomes a member at sign-up.
+Branch on `ctx.api.users.lookup` (`{ exists, user? }` for a member of THIS
+app), then deliver the returned `inviteToken` yourself:
+
+```ts
+const found = await ctx.api.users.lookup({ email });
+if (!found.exists) {
+  const inv = await ctx.api.invitations.create({ body: { email } });
+  const url = `https://myapp.example/invite/accept?inviteToken=${inv.inviteToken}`;
+  await ctx.api.email.send({ body: { to: email, subject: "You're invited", htmlBody: `<a href="${url}">Join</a>` } });
+}
+```
+
+- `get({ invitationId })` (with `inviteToken` and `status`), `list({ limit, cursor })` and `delete({ invitationId })` reach every invitation in the app; member invitation settings and quotas do not apply.
+- `role` is `"member"` only: `admin`/`owner` answers `403 FUNCTION_INVITE_MEMBER_ONLY`. Promote after sign-up with `ctx.api.users.setRole` (`users:setRole` capability).
+- Duplicates answer `400 USER_ALREADY_MEMBER` or `400 INVITATION_PENDING` (`error.errorCode`). The email is stored lowercased; a case variant is a duplicate.
+- `ctx.api.invitations.accept` is refused (`403 FUNCTION_ROUTE_NOT_ALLOWED`); the invitee accepts in the client.
+- With no caller, `invitedBy` is `sys:<appId>` and `sendEmail: true` sends nothing.
 
 ## Sending email
 
@@ -702,12 +1248,25 @@ await ctx.api.email.send({
 ```
 
 - Template mode and inline mode are exclusive, as are `to` and `toUserId`; a `toUserId` must be a member of this app.
+- `variables` fill each `{{name}}`: `htmlBody` HTML-escapes the value, `textBody` inserts it as written (a link arrives intact).
 - The route, `POST /app/{appId}/api/emails/send`, is reachable **only from a function** (`403 FUNCTION_ROUTE_FUNCTION_ONLY` otherwise) — sending as the app is the function's declared authority, not a member role.
 - The app has **one hourly email budget**; passing it answers `429 EMAIL_RATE_LIMITED`.
 
 ## Writing analytics for a user
 
 `ctx.api.analytics.writeForUser({ body: { userId, action, feature, … } })` records an event attributed to a **subject** user rather than to whoever is running. Function-only route (`POST /app/{appId}/api/analytics/write-for-user`; `403 FUNCTION_ROUTE_FUNCTION_ONLY` otherwise). The subject must be a member of this app; `appId` and `userId` are reserved — a `context` object of your own cannot rewrite whose activity the event is. Fields and refusal codes: [Analytics — Writing Events from a Server Function](AGENT_GUIDE_TO_PRIMITIVE_ANALYTICS.md#writing-events-from-a-server-function).
+
+## Reading a member's usage
+
+`ctx.usage.forUser(userId, { since?, until? })` (beta) answers one member's usage in this app: `meters` (`meter`, `unit`, `quantity`, `bytes`, `points`, costliest first) over the window, and `storage` (bytes they own now per storage meter). No cost field. The window is UTC and half-open, ISO 8601 strings or `Date`s, default the 30 days before now; the raw operation is `ctx.api.usage.forUser({ userId, since, until })`.
+
+```ts
+const usage = await ctx.usage.forUser(member.userId, { since: new Date(Date.now() - 86_400_000) });
+const tokens = usage.meters.find((line) => line.meter === "llm.tokens.in")?.quantity ?? 0;
+```
+
+- Naming follows [Which user a call is about](#which-user-a-call-is-about): another member needs an owner- or admin-invoked run, a run with no caller, or `users:readAny`; an agent-driven run reads only its initiator.
+- `SUBJECT_USER_NOT_FOUND` (404) for anyone who is not a member of this app; `USAGE_WINDOW_INVALID` (400) for a bound that is not ISO 8601 or `since` not before `until`; `USAGE_WINDOW_TOO_OLD` (400) for `since` more than 90 days ago.
 
 ## Helpers: `pMap`, `ulid`, `stepPolicy`
 
@@ -732,214 +1291,165 @@ await step.do("send-receipt", stepPolicy.email, () =>
 
 `stepPolicy.<family>` is `{ retries: { limit, delay, backoff }, timeout }` — a default you apply, never one the engine forces on your own `step.do` calls. `PMAP_DEFAULT_CONCURRENCY` (8) is the bound `pMap` applies when none is given.
 
-`step.do`'s config parameter is a `StepConfig` — `{ retries?: { limit, delay, backoff? }, timeout? }`, Cloudflare Workflows' own step config, which each `stepPolicy.<family>` is one of. The shape is closed: a key outside it, such as `retry` for `retries`, fails the `config push` typecheck rather than being carried along and ignored.
+`step.do`'s config parameter is a `StepConfig` — `{ retries?: { limit, delay, backoff? }, timeout? }`, the step configuration, which each `stepPolicy.<family>` is one of. The shape is closed: a key outside it, such as `retry` for `retries`, fails the `config push` typecheck rather than being carried along and ignored.
 
 ## Database records
 
-### On the app's authority
-
-```toml
-# functions/monthly-report.toml
-[function]
-key = "monthly-report"
-entry = "functions/monthly-report/index.ts"
-access = "user.role == 'admin'"
-```
-
-Nothing about databases is declared. A function reads and writes **every database of the app** — every type, every model, every row — as the app, through `ctx.db` and `ctx.api.databases.records.*`. There is no read grant and no write grant; the `access` gate above is where a reviewer decides who may make this code run, and the code is where the reviewer reads what it does with the rows.
-
-- **Scope reads in the code.** A read the caller should see only part of is filtered — `query({ filter: { owner: ctx.user!.userId } })` — or bound through a `$caller` registered query (below). The platform does not narrow a function's read to its caller.
-- **Every row is the app's.** The database's own permission rows (owner, managers, groups) are records a function can read (`ctx.api.databases.listPermissions`, `listGroupPermissions`) and app admins manage; they do not narrow a function. Creating, deleting or re-owning a database is the one exception, gated by a high-blast capability (see Capabilities).
-- `ctx.db(databaseId, "<type>")` still takes the type key, for typing: the declarations `config push` writes name each type's models.
-- The typed `databaseId` a function reaches must belong to this app; another app's id answers as one that does not exist.
-
-### The typed handle
-
-`ctx.db(databaseId, "<type>")` returns the models that database type declares, typed from its schema. The second argument is the database type's key; once `config push` has written the declarations (see Codegen below), a model the type does not declare is a compile error. Before the first push the handle is untyped.
+`ctx.db3(db3Id, "<type>").model("<model>")` reads and writes one model of one database:
 
 ```ts
-import { defineFunction } from "primitive-functions";
-
-export default defineFunction(async (input: { databaseId: string }, ctx) => {
-  const orders = ctx.db(input.databaseId, "orders").model("Order");
-
-  await orders.save({ id: "o-1", data: { label: "first", total: 10 } });
-  const open = await orders.query({ filter: { status: "open" } });
-  const total = await orders.count({});
-
-  // A row that came back from a read carries its id, so it can be changed or
-  // removed with no cast and no second lookup.
-  await orders.patch(open.items[0].id, { data: { label: "renamed" } });
-  await orders.delete(open.items[1].id);
-
-  // Several writes to ONE model in one request; the handle supplies the model.
-  await orders.batch({
-    operations: [
-      { op: "save", id: "o-2", data: { label: "second", total: 4 } },
-      { op: "delete", id: "o-3" },
-    ],
-    atomic: true,
-  });
-
-  return { open: open.items.length, total };
-});
+const orders = ctx.db3(input.db3Id, "orders").model("orders");
+const open = await orders.query({ filter: { status: "open" }, sort: { createdAt: -1 }, limit: 50 });
+await orders.patch(open.items[0].id, { data: { status: "picked" }, condition: { status: "open" } });
 ```
 
-**Every read row carries `id: string`**, whatever its schema declares — the
-record identity is the platform's, not your schema's, and it is what `patch`
-and `delete` take. It is there on a queried row even when the model's `.toml`
-declares no `id` field, and on one whose `id` is declared optional. A row you
-BUILD for a write still needs none: every write takes a partial row.
+The handle's contract:
 
-| Handle | Surface |
+- **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
+- **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). A write's `data` takes `null` on any field the model leaves optional (`patch(id, { data: { note: null } })`), with no cast: it stores `null` and does not remove the field; on a string set it empties the set. A required field refuses `null`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
+- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name is written with the types `primitive-functions` exports keyed by the database type: `Db3TypeModelName<"orders">` bounds `M`, `Db3TypeRow<"orders", M>` is a row, `Db3TypeFilter<"orders", M>` and `Db3TypeSort<"orders", M>` type a filter and sort the caller passes, and `Db3TypeBatchOp<"orders", M>` is one `batch` write (any model's when `M` is left out), its `data` checked against the model its `model` names: `async function readAll<M extends Db3TypeModelName<"orders">>(ctx: FunctionContext, id: string, model: M, filter: Db3TypeFilter<"orders", M>): Promise<Array<Db3TypeRow<"orders", M>>>` loops `ctx.db3(id, "orders").model(model).query({ filter, sort: { id: 1 }, cursor })`, and a chunked writer takes `ops: Array<Db3TypeBatchOp<"orders">>` and calls `ctx.db3(id, "orders").batch(ops.slice(at, at + 100))`. At the call site the rows and the filter are the named model's. Gotcha: a literal filter or sort inside the helper is checked against every model `M` may be, so a field another candidate types differently is a mismatch (take the filter as a `Db3TypeFilter` parameter instead), and a literal `upsertOn` there is refused (pass a `string`). `Db3TypeBatchOp<"orders", M>` with `M` a type parameter is refused by the database handle's `batch` (`ctx.db3(id, "orders").batch(ops)`): build the op with a literal model name, take already-built ops as a parameter typed `Db3TypeBatchOp<"orders">` with no model parameter, or pass the `M`-typed ops to `.model(model).batch(ops)` instead.
+- **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
+- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`, `deleteWhere`, `patchWhere`. `deleteWhere({ filter, limit?, cursor?, requestId? })` and `patchWhere({ filter, data, ... })` change up to 1,000 records matching a filter per call as one write, answering `{ changed, hasMore, nextCursor?, cutBy?, lsn }`; loop passing `nextCursor` back as `cursor` until `hasMore` is false ([Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#changing-every-record-that-matches-a-filter)). `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database. Each result of `batchRead`, and of a batch's `reads` (in op order, writes skipped), is typed by the read at its position: after `if (r.ok)` a `query` read's `items` are that model's rows, a `count` read has `count`, an `aggregate` read `result`. Read rows without a cast; a field the model doesn't declare, or a cast to an unrelated row type, fails the push typecheck.
+- **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`; the condition is judged first, so a `patch` or `delete` with a `condition` on a missing record is this 409, with `details.current.row` `null`), `DB3_RECORD_NOT_FOUND` (404, a `patch` without a `condition` on a missing record, or an `increment` on a missing record with or without one; nothing is created), `DB3_TRIGGER_REFUSED` (409, a type rule's `refuse`; its code in `details.reason`), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare). A `delete` of a missing record without a `condition` is a no-op, not a refusal. Two refusals answer 409, so branch on `code`, never on status.
+- **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
+- **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
+- **Includes:** `include` nests up to 3 levels; a `hasMany` include reads at most 1,000 related records per request (`DB3_PAGE_TOO_LARGE` past either budget).
+- **Typed filters and sorts.** The `ctx.db3(id, "<type>").model("<Model>")` handle types the filter and sort of `query`, `count` and `aggregate` (`options.filter`, `options.sort.direction`) from the model's declared fields. In this release a mismatch through the handle (`$startsWith` on a number) is a `config push` warning and the function still ships; a later release refuses it. `save`'s `upsertOn` and a batch `upsert`'s `constraint` are checked the same way: a literal must be one of the model's unique fields or named unique constraints; a `string` variable is not checked. Each model also gets `Db3.<Model>Filter`, `Db3.<Model>Sort` and `Db3.<Model>Unique` (those names) in `functions/primitive.d.ts`; a value annotated with them (`const filter: Db3.OrdersFilter = { total: { $gte: 10 } }`) is refused by the typecheck now. To make the handle's mismatches errors now, add `functions/db3-strict.d.ts` holding `export {};` and then `declare module "primitive-functions" { interface Db3FilterTyping { enforced: true } }`. A declared field's value follows its kind (a string for `string`, `id` and an enum, a `Date` or date string for `date`, any scalar for `stringset` and `vector`, `null` for all); at most one of `$startsWith`, `$endsWith`, `$containsText` per field; `$and`/`$or` nest, `$search`/`$near` are top-level; a sort takes `1` or `-1`. Null and unset matching: [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Gotchas: a field the model doesn't declare is open, so a misspelled field name is not refused; a filter variable typed `Record<string, unknown>` is not checked, so type it `Db3.<Model>Filter`; the opt-in file must start with `export {};`, or it replaces the `primitive-functions` module and every function importing it fails to push. `--no-typecheck` skips the warning check too.
+
+| Kind | Operators |
 |---|---|
-| `ctx.db(id, type).model(name)` | `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `batch` — the model is bound per call, and `patch`/`delete` take the record id first |
-| `ctx.db(id, type)` | `databaseId`, `databaseType`, `batch` (spans models — each item names its own) |
-| `ctx.api.databases.records.*` | The untyped form of the same operations, plus the rest of the records surface — `increment`, `addToSet` / `removeFromSet`, the index and unique-constraint routes (`registerIndex`, `dropIndex`, `listIndexes`, `syncIndexes`, `registerUniqueConstraint`, `dropUniqueConstraint`, `listUniqueConstraints`), `describe` and `models` — as the app |
+| `string` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$startsWith`, `$endsWith`, `$containsText`, `$all`, `$size` |
+| `number` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `boolean` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$all`, `$size` |
+| `date` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `id` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, `$all`, `$size` |
+| `stringset` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$startsWith`, `$endsWith`, `$containsText`, `$contains`, `$all`, `$size` |
+| `vector` | `$eq`, `$ne`, `$in`, `$nin`, `$exists`, `$all`, `$size` |
 
-Filters and query options are ordinary objects — see [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) for the cursor parameter. `include` works as it does over REST.
+Every operation's options and server-function examples are in the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#records). Creating a database, transferring it, and switching its sync or app access go through `ctx.api.db3` with the `db3:*` capabilities — see [Access](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#access).
 
-**One paged envelope.** Every paged read the SDK exposes answers `{ items, hasMore, nextCursor? }` — the database handle, the document handle, `ctx.users.list`, and the raw `ctx.api.databases.records.query`, which adds a `prevCursor` and is the only surface that has one. Shared paging code is therefore written once:
+### Bulk loads: `load`
 
-```ts
-const drain = async (page) => {
-  const rows = [];
-  while (true) {
-    rows.push(...page.items);
-    if (!page.hasMore) return rows;
-    page = await next(page.nextCursor);
-  }
-};
-```
-
-**A list filter holds 1 000 values.** A single `$in` or `$nin` list is capped at 1 000 values, and the filter shares a 100-parameter bind cap with the model name and the cursor's sort values. The cap, how to chunk past it, and the untyped form's `increment` / `addToSet` / `removeFromSet` verbs are on the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#reading-and-writing-records).
-
-**Documents page and narrow the same way.** `ctx.api.documents.records.query({ documentId, model, filter, limit, cursor })` and `documents.records.count({ documentId, model, filter })` take the same `filter` object a database model does — the client JSON-encodes it into the query string; a malformed one answers `400` — and answer the `{ items, hasMore, nextCursor }` page the route and the CLI do, so a function that walks a large model pages it rather than reading it whole.
-
-**Codegen.** `config push` writes the generated files into the tree's `functions/` directory beside your sources, and none is part of what gets pushed (the full `functions/` listing is in [Configuration — Functions directory](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#functions-directory)):
-
-| File | What it carries |
-|---|---|
-| `functions/primitive-db-types.d.ts` | The database types behind `ctx.db`, model by model |
-| `functions/primitive-functions.d.ts` | The `primitive-functions` module's own types |
-| `functions/primitive-function-types.d.ts` | `<Key>Input` / `<Key>Output` for every function, from its `inputSchema` and `outputSchema`, and the `FunctionSchemas` augmentation that types the keyed `defineFunction("<key>", handler)` |
-| `functions/primitive-prompt-types.d.ts` | The `PromptSchemas` augmentation that types `ctx.prompts.run("<key>")` from each prompt's `[prompt.outputSchema]` — see [Prompts — Typed output](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md#typed-output) |
-| `functions/generated/<key>.generated.ts` | A typed **client** invoker per function (imports `js-bao-wss-client`): all five verbs — `invoke`, `start`, `getStatus`, `waitFor`, `terminate` — on every function, because the caller picks the runtime at each call. `input` is required iff the schema rejects `{}`; the `waitFor` output is `<Key>Output`. `-o <dir>` moves them |
-| `functions/tsconfig.json` | Scaffolded once, then yours; push keeps the `primitive-functions` path mapping, the declarations in the program and the `generated/**` exclusion, and restores those if they go missing |
+`ctx.db3(id, type).load(rows, options?)` writes any number of records in one call, as one bulk load: it cuts the rows into chunks, sends them, and waits for the database to apply them. Use it past what one `batch` carries.
 
 ```ts
-import { greet } from "../primitive/dev/functions/generated/greet.generated";
-const answered = await greet(client).invoke({ input: { name: "Ada" } }); // output typed GreetOutput
+const result = await ctx.db3(input.db3Id, "ledger").load(
+  input.transactions.map((t) => ({ model: "transactions", id: t.id, patch: { amount: t.amount } }))
+);
+if (!result.done) return { pending: result.sessionId }; // read loadStatus(sessionId) later
 ```
 
-`config diff` reports when a schema change has left any of them stale; the next push refreshes them (edits are discarded).
+- **Rows:** `{ model, id, patch }`, in any order, across models, each record once. `patch` is the model's fields (each optional; an optional field takes `null`) or exactly `{ _deleted: true }` to delete; a typed handle refuses a wrong model, a wrong field type or a delete mixed with fields at compile time. The untyped handle (`ctx.db3(id)`) takes open rows.
+- **Options:** `mode` `"merge"` (default) or `"refresh"` (also removes the records of the rows' models, and of `models`, that no row names); `models`; `reserveEpoch` `"open"` (default) or `"commit"`; `waitMs`, the wait after sending: 20,000 ms by default, at most 600,000 ms, `0` returns at once.
+- **Result:** `{ sessionId, state, done, mode, rows, chunks, applied, refusedRows, refused, failure }`. `state` is `uploading`, `committed`, `validating`, `staging`, `applying`, `finalizing`, `registering`, `complete`, `failed` or `aborted`; `done` is true for the last three. A `failed` load resolves with `failure`, it does not reject. `refused` is the first 20 refused rows (`{ model, id, code }`); `sessionId` is `null` only when there was nothing to send.
+- **Later:** `loadStatus(sessionId)` answers the same result; `loadRefused(sessionId, { limit, cursor })` pages every refused row as `{ items, hasMore, nextCursor }`.
 
-```bash
-primitive functions codegen --check   # CI: non-zero when the generated files are stale; no --check regenerates
-primitive functions codegen -o src/generated/functions   # the invokers, somewhere your client code imports from
-```
+Gotchas:
 
+- **The wait is bounded by the invocation.** It ends 1,000 ms before the request deadline (default timeout 5 s) or the task slice's, and answers `done: false` with the `sessionId` instead of timing out. Return the id and poll `loadStatus` from a later call, raise `timeoutMs`, or run a large load as a task.
+- **One load per database at a time.** `load` while another load on the database is open or applying rejects with `DOCUMENT_INGEST_ACTIVE` (409). An invocation the platform ends while it is still sending rows leaves its load open until it expires, refusing other loads until then.
+- **`DB3_LOAD_INVALID` rejects before any request:** a record named twice, an id that is empty or carries a tab, newline or carriage return, a model name outside letters, digits and `_`, a patch that is not an object or holds a non-finite number, rows past a load's limits, `waitMs` out of range, and any of the three methods on a handle opened with `asUser` (a load runs on the app's authority). Branch on `error.code`.
+- **Rows the database refuses** (a type mismatch, a unique-key collision, a delete carrying a field) are skipped and counted in `refusedRows`; the load still completes.
 
-**Push typechecks what it ships.** The same `config push` that writes those declarations compiles your sources against them — the tree's own `functions/tsconfig.json`, so it is the program your editor loads — and refuses the function with the compiler's own diagnostics when they do not hold. esbuild erases types, so a bundle that builds proves nothing: a handler that dereferences `ctx.user` without checking for `null` builds cleanly and throws on the request path. The refusal is per function (the rest of the tree still lands), `--dry-run` reports the same diagnostics without shipping, and reproducing one by hand is `tsc -p functions/tsconfig.json --noEmit`. `primitive config push --no-typecheck` skips it. A CI job that runs `primitive config push --dry-run` therefore fails on broken function code with no extra wiring.
+### A member's collections, databases and profile
 
-### Registered queries
-
-`defineQuery` and `defineMutation` name a read or write over the handle so it can be called from several places, validated once, scoped to its caller by the code, and — when the platform can verify what it touched — cached. The registration example, the parameter grammar, and the cache keying and invalidation rule are on the [Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#registered-queries).
-
-### The typed document handle
-
-`ctx.doc(documentId).model("<Model>")` is `ctx.db`'s shape for a document's record models: a thin binding over `ctx.api.documents.records.*` that states the document and the model once and answers the routes' own shapes.
+Triggered functions have no caller, so name the member (see
+[Which user a call is about](#which-user-a-call-is-about)).
+`ctx.api.collections.listForUser({ userId })` pages the collections a member
+belongs to, with `permission`. `ctx.api.db3.listHeldByUser({ userId })` and
+`ctx.api.db3.listSharedWithUser({ userId })` page the databases a member holds
+and those shared with them, as `client.db3.listMine` entries (`via: "held"` or
+`"shared"`); the held listing includes sync-off databases. Both take `tag` and
+`type` filters. Loop on `hasMore`, since a page can be short or empty while
+`hasMore` is `true`. A non-member throws 404. No capability gates them: a run
+with no caller, or one an app owner or admin invoked, can list any member's, so
+keep such a function admin-only or trigger-only.
 
 ```ts
-const orders = ctx.doc(input.documentId).model("Order");
-const page = await orders.query({ filter: { status: "open" }, limit: 50, cursor: undefined }); // { items, hasMore, nextCursor? }
-const { count } = await orders.count({ filter: { status: "closed" } });               // { count }
-const { record } = await orders.save({ id: "o-1", data: { label: "x" } });          // { record }
-await orders.patch("o-1", { data: { label: "y" } });                                  // { record }
-const { deleted } = await orders.delete("o-1");                                       // { deleted }
+// A nightly sweep over what one member holds, typed databases only.
+let cursor: string | undefined;
+do {
+  const page = await ctx.api.db3.listHeldByUser({ userId: member.userId, type: "journal", cursor });
+  for (const db of page.items) await archive(db.id);
+  cursor = page.hasMore ? page.nextCursor : undefined;
+} while (cursor);
 ```
 
-Its rows carry `id: string` too, by the same rule as a database row's: `query().items[0].id`, `save(...).record.id` and `patch(...).record.id` are the id `patch` and `delete` take, whatever the schema declares.
+`ctx.api.db3.aliases.resolve({ scope: "user", aliasKey, userId })` returns the
+database a member's alias names, with `alias`;
+`ctx.api.db3.aliases.set({ scope: "user", aliasKey, body: { documentId, userId, mustNotExist } })`
+binds one (`mustNotExist: true` throws 409 `alias_exists` instead of re-pointing
+it) and `ctx.api.db3.aliases.delete({ scope: "user", aliasKey, userId })`
+removes it. An alias on something that is not a database throws 409
+`NOT_A_DB3`.
 
-The rows are typed from the project's `models/models.toml` (fallback: the web client's `src/models/models.toml`), rendered by `config push` into `functions/primitive-document-types.d.ts`: an undeclared model is a compile error, a declared field has its type, and a project with no schema file gets the open form. It confers nothing — the same authority as every other call — and another app's document id is the uniform not-found.
-
-`batch` applies an ordered blob of ONE model's ops in a single transaction — all of it commits or none of it does, and a connected client sees one update. Every op's `model` is the handle's, so an op naming another is overwritten; a blob that genuinely spans models is the raw `ctx.api.documents.records.bulk`.
-
-```ts
-await ctx.doc(input.documentId).model("Order").batch([
-  { action: "create", id: firstUlid, data: { label: "one" } },
-  { action: "patch", id: "o-1", data: { status: "closed" } },
-  { action: "delete", id: "o-2" },
-]);
-```
-
-### A member's root document and user-scoped aliases
-
-A function that acts on behalf of each user (a cron-fired nightly summary, a webhook for one account) has no caller, so nothing that defaults to "the caller" has anyone to default to. Name the user instead.
-
-- `ctx.api.users.getRootDocument({ userId })` answers `{ userId, rootDocId }` and creates nothing. `rootDocId: null` means a member who has never had a root document (never signed in); a user who is not a member of this app throws a `PrimitivePlatformError` with status 404. Over REST the route (`GET /users/{userId}/root-document`) needs an owner or admin; a function reaches it on the app's authority.
-- `ctx.api.documents.aliases.resolve` and `.delete` take `userId` for a user-scoped alias. Without it they act for the caller, so a function with no caller gets 404 `alias_not_found` even for a user who has the alias.
-
-```ts
-const { rootDocId } = await ctx.api.users.getRootDocument({ userId: input.userId });
-if (rootDocId) {
-  const prefs = await ctx.doc(rootDocId).model("UserPref").query({ limit: 1 });
-  const optedOut = prefs.items[0]?.emailOptOut === true;
-}
-
-const bound = await ctx.api.documents.aliases.resolve({ scope: "user", aliasKey: "user-prefs", userId: input.userId });
-```
-
-### A function may be a document's first writer
-
-A document's record models carry their schema inside the document (`_meta_<model>`), and a collection field (a `stringset`) cannot be written without it. `config push` carries the project's `models/models.toml` **inside the function's version**, and the first write to a model that version declares seeds the model's metadata from it and writes the record **in the same operation** — one transaction, one persisted update, one broadcast. The record and its stringset read back from a client exactly as if a client had saved the model first, and the seeding write is coerced, defaulted, stamped and uniqueness-checked against the declaration it just wrote.
-
-- A model the version's schema does NOT declare keeps today's behavior: a scalar write succeeds, a collection value is refused with `could not be resolved to a collection (stringset)`. Nothing in a request body can supply a schema — the platform builds it from the running version.
-- A client's declaration wins: a model the document already declares is left exactly as it is.
-- Editing `models/models.toml` changes every function's envelope hash, so `config diff` reports every function Modified and the next push mints a new version of each.
-- A schema declaring a RESERVED field name — `type`, or any name starting with `_` — is refused at the push with a 400 naming the block (`[models.X.fields.type]: Field 'type' is reserved (maps to internal _type column in queries)`). A version is immutable, so it is refused before one is minted rather than seeding a model whose filters would match the model name. Rename the field in `models/models.toml` and push again.
-- `config pull` writes the schema back as the generated `functions/primitive-document-schema.generated.toml`; push resolves the project file first and that copy only as the fallback, regenerating the copy on every push.
-- `primitive functions get` prints the models the running version can seed.
+`ctx.api.users.setProfile({ userId, body: { name, avatarUrl } })` sets a
+member's display name and avatar (`avatarUrl` is an `http:` or `https:` URL;
+`null` clears it).
 
 ## Ceilings
 
-`[function.limits]` may **lower** any ceiling and never raise one; a config asking for more gets the platform value. One caveat: `cpuMs` is enforced — past its budget the invocation is stopped and answers `failed` — but the runtime adds an allowance of about **two seconds** before it stops anything, so `cpuMs = 50` and `cpuMs = 200` buy the same thing and neither stops code in milliseconds. To bound a function tightly, use `timeoutMs` on the request: that is wall clock and is held exactly. The table describes one request invocation; a task run is bounded per slice (see Budgets in a task run).
+Every function runs under fixed platform ceilings. `[function.limits]` may
+**lower** any of them and can never raise one — a config asking for more simply
+gets the platform value.
 
-The two RUNTIMES differ in what they may spend, which is most of why the
-runtime matters at all:
+The two runtimes differ in what they are allowed to spend, which is most of
+why the runtime matters at all:
 
 | Limit | Request runtime | Task runtime | Key |
-|---|---|---|---|
-| CPU | 5 000 ms per invocation | 5 minutes per slice | `cpuMs` |
+| --- | --- | --- | --- |
+| CPU | 5 000 ms per invocation | 5 minutes per slice | `cpuMs` (see below) |
 | Outbound subrequests | 128 | 10 000 per slice | `subRequests` |
 | Wall clock | 5 000 ms default, 30 000 ms ceiling | continuous up to 12 hours; every step begins with at least 5 minutes | `timeoutMs` on the request (request only); see Budgets in a task run |
-| — a `step.sleep` has to fit the budget | past it, `FUNCTION_RUNTIME_REFUSED` | hibernates; hours and days are fine | — (start it as a task) |
+| — a `step.sleep` has to fit the budget | past it, the invocation fails `FUNCTION_RUNTIME_REFUSED` | hibernates; hours and days are fine | — (start the function as a task) |
 
 And the ones that are the same under both:
 
 | Limit | Platform value | Key |
-|---|---|---|
+| --- | --- | --- |
 | Invocations per minute, per function | 1 200 | `ratePerMinute` |
 | Response size | 1 MiB, kept on the run row | — |
 | Values per `$in` / `$nin` list | 1 000 | — |
-| Built bundle | 5 MB | — |
-| Send payload | 64 KiB | — |
 
-- **Rate.** Buckets are per app and per function. A slot is taken only once a call is going to run. Past the ceiling: `429 FUNCTION_RATE_LIMITED` with `Retry-After`. Limiter unreachable: `503 FUNCTION_RATE_UNAVAILABLE`, retryable.
-- **Response size** is measured by the platform on the parsed `output` (and `error`): over 1 MiB is `{"status":"failed","errorCode":"OUTPUT_TOO_LARGE"}` whatever the sandbox did. Page results, or write them to a database and return a handle. A TASK run's output is held to the same 1 MiB and is **kept on the run row** for its life, so it outlives the engine's instance (see Reporting back).
-- **The wall clock starts when the platform accepts the invocation**, so a cold load of the function's code comes out of it. Past the budget the caller gets `{"status":"timeout"}` and the sandbox request is aborted. The platform cannot kill a running sandbox, so a function that ignores the abort may execute until `cpuMs` stops it — but it can no longer *act*: the invocation's credential carries an absolute deadline checked on every platform call, so late calls are denied and late side effects never land. The same deadline cuts off `ctx.integrations.call` (`UPSTREAM_TIMEOUT`) and `ctx.prompts.run` (`PROMPT_UPSTREAM_TIMEOUT`).
-- The clock does not advance during CPU-only work: a loop that waits for `Date.now()` to move never finishes. Wait on a timer, not on the clock.
+`ratePerMinute` is one count per app and function, shared by invoke, start,
+nested starts, agent tool calls, webhook deliveries and trigger fires; past it
+the call answers `429` `FUNCTION_RATE_LIMITED` with `Retry-After`. Read a
+function's count with `primitive rate-counters get fn:<function-id>` (the id
+`primitive functions list` shows).
+
+**Gotchas**
+
+- A `ratePerMinute` of 20 or more can refuse slightly before the limit when
+  calls are spread across locations, never after it. Under 20 the count is
+  exact; lower the limit below 20 if an exact count matters.
+- When the count cannot be reached, an invoke or start answers `503`
+  `FUNCTION_RATE_UNAVAILABLE` with `Retry-After` once slots already taken run
+  out; cron and webhook fires still run. Retry after the header's delay.
+
+The platform adds no cap of its own on how many task runs run at once; the
+start rate above is its only control. The task runtime has its own
+ceilings: at most 50 000 task runs running at once per
+Cloudflare account, shared by every environment on that account, and up to 100 new starts per second per
+environment, shared by every app and function. A run only sleeping, waiting
+on a retry, or waiting on an event does not count toward the running ceiling;
+once it is reached, a waiting run that becomes ready waits for a free slot. Under this shared load a run waits longer
+between steps. A start the runtime refuses is retried for about a second,
+then answers `500` `INSTANCE_CREATE_FAILED` and the run settles `failed`
+`ENGINE_START_FAILED`: start again with a new `runKey`, since the old one
+replays the failed run.
+
+Use request `timeoutMs` for a precise wall-clock bound. `cpuMs` includes a
+runtime allowance of roughly two seconds. A timeout denies further platform
+calls but does not undo completed side effects.
 
 ## Triggers
-
-A function's config block can declare one inbound **webhook** and up to ten **cron** schedules. The platform creates and operates whatever they need. Which RUNTIME a kind uses is the door's, not the declaration's: every **cron** fire starts a task run, and a **webhook** delivery runs under the request runtime, because the provider is waiting for the function's answer inside the request — it hands slow work on with `ctx.functions.start`.
 
 ```toml
 # functions/stripe-events.toml
 [function]
 key = "stripe-events"
 entry = "functions/stripe-events/index.ts"
-access = "false"                       # trigger-only: no member calls it over HTTP; fires skip the gate
+# authorize: allowCallers({ webhook: true, cron: true }) in the handler — trigger-only, no member calls it over HTTP
 
 [function.triggers.webhook]           # one per function; answers on the function's own key
 verificationScheme = "stripe"          # required; "none" is refused
@@ -958,142 +1468,277 @@ cron = "0 * * * *"
 overlapPolicy = "skip"                 # skip (default) | allow
 ```
 
-```ts
-export default async function (input, ctx) {
-  if (ctx.trigger.kind === "webhook") return { received: input.type };
-  return { swept: ctx.trigger.name }; // kind === "cron"
-}
+Webhooks run in request mode after signature verification; cron schedules start
+tasks. Both have `ctx.user = null`. Use `ctx.functions.start` to hand long
+webhook work to a task, with an idempotent run key.
+
+An app can have up to **50 webhooks**. A function can declare one webhook and
+up to ten cron entries. `overlapPolicy = "skip"` skips a scheduled invocation
+while the previous run remains active, including while it sleeps.
+
+Operate triggers with `primitive functions triggers`, by function key (and a
+cron entry's name):
+
+| Verb | Does |
+| --- | --- |
+| `events <key>` | The webhook's delivery log. |
+| `test <key> [--deliver]` | Signs a test delivery; `--deliver` posts it and runs the function. |
+| `verify <key> --header … --body-file …` | Checks captured provider bytes without running code. |
+| `rotate-secret <key> --secret "{{secrets.NEXT}}"` | Moves the signing secret, keeping the old one for the grace period. |
+| `fire <key> <name>` | Starts a cron entry's task run now. |
+| `disable <key> <name>` / `enable <key> <name>` | Takes an entry out of service and back. `enable` also resumes an entry a hard failure paused. |
+
+### Database change triggers
+
+```toml
+[[function.triggers.db3]]
+type = "orders"                        # the db3 type to watch; at most ten per function, each named once
+models = ["Order"]                     # optional: a batch must change at least one listed model
+writers = ["user", "function"]         # optional: the batch's writer kind must be listed
 ```
 
-**Webhook.** The receiver is `POST /app/{appId}/webhook/{functionKey}`. Verification, replay protection and a delivery log are built in. Accepted keys: `verificationScheme`, `signingSecret`, `toleranceSeconds`, `deduplicationEnabled`, `deduplicationWindowMs`, `maxBodyBytes`, `secretGracePeriodMs`, and a `[function.triggers.webhook.verification]` table for scheme-specific settings (a Discord public key, a JWT's JWKS, …). A verified delivery runs the function and answers `200 {"received": true}` **whatever the function did** — the run row records the outcome. A delivery that cannot run right now (function disabled, rate ceiling hit) answers `202` with the reason in the delivery log and no dedup key stored, so the provider's redelivery runs once the condition clears. A rotation via `primitive webhooks rotate-secret <webhook-id>` survives later pushes: a push touches the signing secret only when the TOML value itself changed. A delivery always runs under the REQUEST runtime: for work that outlasts it, verify and acknowledge in the delivered function and `ctx.functions.start` another, keying the start on the provider's event id or a body id so a redelivery replays rather than starting a second run. Each webhook trigger is one of the app's webhooks, and an app holds at most **50 webhooks**: a push that would add one past the limit refuses that function, naming the limit.
+Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. A bulk load starts none. The batch is the `db3` arm of `ctx.trigger`: `{ kind: "db3", db3Id, type, triggerId, from, to, principal, writer, changes: [{ l, model, id, kind }] }` (`principal` is the writer or `null`; `l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(ctx.trigger.db3Id, ctx.trigger.type)`.
+
+`ctx.trigger.writer` is the batch's writer kind, as hook rules read `user.writer`: `"user"` (a device, a records call with a member's or admin's token, a function acting `asUser`), `"function"` (a function a signed-in user invoked, and its nested starts), `"system"` (a cron fire, a webhook, a db3 trigger run, `--as system`).
+
+`models` and `writers` are optional, each a non-empty list (`models` at most 50, names matched exactly); with both, a batch must pass both, and with neither every batch starts a run. A batch that passes starts one run with all of its changes; one an entry leaves out starts nothing — no run, no `trigger.fire` usage, no rate slot. `config push` refuses an unknown writer kind and a model the type does not declare (`[type] models` shared models count; a model the same push adds to the type is accepted; a type the app does not hold is not checked). `functions get` shows `models` and `writers` (`all` when absent). A changed filter takes effect within 30 seconds. The run's input is `{}`: write `input: []` and no `inputSchema`. The run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`; `auth.trigger` carries the same changes.
+
+```ts
+import { allowCallers, assertTrigger, defineFunction } from "primitive-functions";
+
+export default defineFunction("order-placed", {
+  input: [],
+  authorize: allowCallers({ db3: true }),
+  handler: async (_input, ctx) => {
+    assertTrigger(ctx, "db3");
+    for (const change of ctx.trigger.changes) {
+      if (change.model === "Order" && change.kind === "create") {
+        await ctx.channels.publish(`orders:${change.id}`, { status: "placed" });
+      }
+    }
+  },
+});
+```
+
+In a keyed `defineFunction`, `change.model` is the watched types' model names (`Db3Trigger<K>`, `Db3Change`, `Db3ChangeKind`); with two watched types, check `ctx.trigger.type` first. A change to a type the active version no longer watches is dropped `DB3_TYPE_NOT_WATCHED`.
+
+- **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Its own writes are `"system"`: declare `writers = ["user", "function"]` to skip them.
 
 ### Webhook verification schemes
 
-`verificationScheme` is `stripe`, `github`, `slack`, `discord`, `jwt`, `plaid`, or `custom`; `"none"` is refused on a function trigger. `signingSecret` (where the scheme takes one) must be a whole `{{secrets.KEY}}` reference — a raw value is `SIGNING_SECRET_MUST_BE_SECRET_REF`, and a scheme that verifies with public-key material only (`discord`, `jwt`, `plaid`) refuses a supplied one (`SIGNING_SECRET_NOT_SUPPORTED_FOR_SCHEME`). Rotate onto a different secret key with `primitive webhooks rotate-secret <webhook-id> --secret "{{secrets.NEW_KEY}}"`: the previous reference keeps verifying for `secretGracePeriodMs` (24h default, 30 days max, `0` to cut over immediately).
+Choose `stripe`, `github`, `slack`, `discord`, `jwt`, `plaid`, or `custom`.
+Shared-secret schemes require a whole `{{secrets.KEY}}` reference. Public-key
+schemes use their verification settings instead.
 
-- **`discord`** — `[function.triggers.webhook.verification.discord] publicKey = "<64-char hex>"`, Ed25519.
-- **`jwt`** — each delivery arrives as a JWT carrying a body-hash claim: `header` (which request header carries the token), `algorithms` (`ES256`/`384`/`512`, `RS256`, `PS256`, `EdDSA`), `bodyHashClaim`, `bodyHashEncoding` (`hex`/`base64`/`base64url`), optional `issuer`, and exactly one of `jwks` (inline key set) or `jwksUrl` (fetched and cached; `https`, port 443, public hostname only). A delivery is accepted only when the token verifies against a JWKS key, the algorithm is listed, it was issued inside `toleranceSeconds`, and the body-hash claim matches.
-- **`plaid`** — a fixed `jwt`-shaped preset with keys fetched from Plaid's API: `[function.triggers.webhook.verification.plaid] environment = "sandbox" | "production"`, `clientId`, `secret` (both `{{secrets.*}}` references).
-- **`custom`** — declare the provider's own scheme under `[function.triggers.webhook.verification.custom.detachedSignature]`: `primitive = "hmac-sha256"`, `encoding`, `signature = { header, key?, prefix? }` (where the signature lives), `freshness = { from, format }` (must be one of the signed parts), optional `dedup.signedBodyPointer` (an RFC 6901 pointer into the signed body) and `externalEventId.untrustedHeader` (display only), and an ordered `signedPayload` array of `{ header | signatureField | literal | body = true }` parts with exactly one `body = true` and a `literal` separator between any two variable-length parts. Without a `detachedSignature` table, `custom` verifies its own fixed format: `t=<unix>,v1=<hmac hex>` in `X-Webhook-Signature` over `<t>.<body>`.
+Rotate to a second key with `primitive functions triggers rotate-secret`; the
+old key remains valid during `secretGracePeriodMs` (24 hours by default, up to
+30 days).
 
-**Deduplication.** A signed delivery is deduplicated on the provider's own event id where the scheme carries one, otherwise a SHA-256 of the signed payload; a suppressed replay answers `200 {"received": true, "duplicate": true}` and does not run the function again. `github` (and a `custom` scheme with no `freshness`) keeps its dedup entries forever, since neither signs a timestamp.
+Duplicate signed events do not run the function again. GitHub and custom
+signatures without freshness timestamps keep duplicate entries permanently.
+Make handlers idempotent because a re-signed logical event can be new.
 
-**CLI.** `primitive webhooks test <webhook-id> --payload '{…}'` signs a preview without delivering it; add `--deliver` to post it for real (verification, dedup and dispatch all run, and it reports a `dispatched`/`refused`/`unconfirmed` outcome). `primitive webhooks verify <webhook-id> --header '…' --body-file captured.json` checks a captured delivery's signature without running anything — the only way to check `discord`/`jwt`/`plaid`, which `webhooks test` cannot preview. `primitive webhooks events <webhook-id>` lists recent deliveries. All three take the webhook id `primitive functions get <function-id>` prints under the trigger.
+`triggers test` previews a signed payload. Add `--deliver` only when you intend
+real side effects. `triggers verify` checks captured provider bytes without
+running code. Find the receiver URL in `functions get`.
 
-**Cron.** Every fire starts a task run (`ctx.user` is null, `ctx.trigger.kind` is `"cron"`, and the run polls and terminates on the ordinary run routes). With `overlapPolicy = "skip"`, a fire that arrives while the previous run is still going is counted as a skip; for a task run that question goes to the **engine**, so a sleeping run counts as live, and so does one the platform cannot be asked about. `overlapPolicy = "allow"` starts one run per fire.
+A provider that confirms an endpoint first (Slack `url_verification`, Discord
+PING) is answered by a handshake rule. `allowedIpCidrs` refuses deliveries
+from any other IPv4 address or prefix, before verification; a handshake rule
+runs after verification, in turn.
 
-**Following up on a write.** The function that writes a record is the place to do the work that follows it. It has the row, it knows why the write happened, and its caller can see what it did. Do the follow-up in the handler that writes:
+A handshake `when` is a request matcher, not an access rule: by the time it
+runs, the IP allowlist and signature verification have already decided
+whether the delivery is admitted, so it doesn't authorize anything. It sees
+no caller — no `user`, no memberships, no `md`, none of the access-control
+identity context — only the shape of this request: `body`, `query`,
+`headers`, `rawBody`. The first rule that matches answers with its `response` and the
+function does not run.
 
-```ts
-export default async function (input, ctx) {
-  const saved = await ctx.db(input.databaseId, "orders").model("Order").save({
-    id: input.orderId,
-    data: { label: input.label },
-  });
-  // …then publish, notify, or write another type — in the same handler. `save`
-  // answers `{ success, id, appliedFields? }`, not the row: the values you
-  // wrote are the values you have, and `appliedFields` carries what the
-  // platform stamped on top of them.
-  await ctx.channels.publish(`orders:${saved.id}`, { op: "save", label: input.label });
-  // …and hand anything slow to a task rather than making the caller wait.
-  await ctx.functions.start("reconcile-order", { orderId: input.orderId }, {
-    runKey: `reconcile-${input.orderId}`,
-  });
-  return { placed: input.orderId };
+```toml
+[function.triggers.webhook]
+verificationScheme = "slack"
+signingSecret = "{{secrets.SLACK_SIGNING_SECRET}}"
+allowedIpCidrs = ["203.0.113.0/24"]
+
+[[function.triggers.webhook.handshakeRules]]
+when = "body.type == 'url_verification'"   # CEL over this request's body, query, headers, rawBody — no caller
+response = { status = 200, contentType = "text/plain", body = "{{ body.challenge }}" }
+```
+
+Removing a webhook block stops delivery; restoring it resumes the same URL.
+Removing a cron entry cancels the schedule.
+
+## Unit-testing a handler
+
+Run a handler's logic offline with the test doubles in
+`primitive-functions/testing`: `createTestContext(overrides)` returns a
+`FunctionContext`, `createTestStep(overrides)` a `FunctionStep`. Install
+`primitive-functions` as a dev dependency on the CLI's channel
+(`primitive-functions@alpha` beside an alpha CLI), put the logic in a module of
+its own as a function of `(input, ctx, step)` that the entry passes to
+`defineFunction`, and override only what it calls. Overrides
+are typed from the generated declarations, so a drifted override fails the
+typecheck; keep spec files under `functions/` (or copy its tsconfig `paths`).
+
+```typescript
+import type { FunctionContext, FunctionStep } from "primitive-functions";
+import { createTestContext, createTestStep } from "primitive-functions/testing";
+
+// functions/archive-order/archive-order.ts — the logic, in a module of its own
+// that calls nothing from `primitive-functions` at module scope.
+export async function archiveOrder(input: { orderId: string }, ctx: FunctionContext, step: FunctionStep) {
+  const ordersDb = await ctx.configVar("ORDERS_DB");
+  const orders = ctx.db3(ordersDb).model("orders");
+  return step.do("archive", () => orders.patch(input.orderId, { data: { archived: true } }));
 }
+
+// functions/archive-order/index.ts — the entry, the only module that calls
+// `defineFunction`; the test never imports it:
+//
+//   import { defineFunction, requireSignedIn } from "primitive-functions";
+//   import { archiveOrder } from "./archive-order";
+//
+//   export default defineFunction("archive-order", {
+//     input: ["orderId"],
+//     authorize: requireSignedIn(),
+//     handler: archiveOrder,
+//   });
+
+// functions/archive-order/archive-order.spec.ts — the test imports the logic
+// module (`import { archiveOrder } from "./archive-order"`) and overrides only
+// what it calls. Anything else it touches throws TEST_MEMBER_NOT_PROVIDED,
+// naming the member.
+const ctx = createTestContext({
+  configVar: async () => "orders-db",
+  db3: (db3Id: string) => ({
+    model: () => ({
+      patch: async (recordId: string) => ({ record: { id: recordId, archived: true } }),
+    }),
+  }),
+});
+
+const result = await archiveOrder({ orderId: "o1" }, ctx, createTestStep());
+console.log(result.record.id); // "o1"
 ```
 
-It runs in order, it cannot loop, and it fails where you can see it.
+| Member | Not overridden |
+| --- | --- |
+| Function (`ctx.configVar`, `ctx.users.send`, `ctx.api.<ns>.<op>`, `ctx.reauthorize`, `step.sleep`) | Throws `TEST_MEMBER_NOT_PROVIDED` when called; `error.member` is the path. |
+| `ctx.user`, `trigger`, `runtime`, `runId`, `sliceId`, `auth` | Throws the same error when read. Set `null` or a value to read it. |
+| `ctx.tool` | Reads `undefined`. |
+| `step.do` | Runs the body once and resolves to its result, for both call forms. |
 
-**Every webhook or cron fire writes a run row** — the only record it leaves, since nobody is waiting for an answer. A fire has no caller: `ctx.user` is `null`, and the code acts as the app exactly as it does on an HTTP invoke (see Execution identity).
+For an object-form handler, pass `auth` and, when the logic checks the caller
+again, `reauthorize` (`reauthorize: async () => ({ userId: "u1" })`; a deny fake
+rejects). Either one types the result as the handler's
+`FunctionContext & FunctionAuthorizedContext`. With `auth` given, the
+`reauthorize` fake must resolve the type of `auth`.
 
-```bash
-primitive functions runs <function-id>      # newest first: status, what fired it, refreshes, timings, failure code
-primitive functions get <function-id>       # receiver URL, schedules, last fired
-```
+Gotchas:
 
-**The file is the whole truth.** Removing the webhook block stops deliveries (the receiver answers `410`); putting it back resumes them on the same URL with the log intact. Removing a cron entry cancels it; re-adding schedules it again.
+- A namespace override (`users`, `api.groups`) must be a plain object; a class
+  instance throws a `TypeError` at creation. Pass `{ send: fakes.send.bind(fakes) }`.
+- A partial handle a function override returns has only the methods you gave it.
+- Import the logic module, never the entry: a named import still runs the
+  module, and its `defineFunction` call throws outside the platform.
+- Annotate a `db3` override's parameters (`db3: (db3Id: string) => …`); it has
+  several call forms. Leave `type` off or type it `string`: the override must
+  fit every db3 type the pushed types declare.
+- `config push` refuses a function whose bundle imports `primitive-functions/testing`.
 
 ## Recording
 
-Every HTTP invocation writes one `function.invoke` analytics event attributed to the **caller** — never the app, although the app's authority is what the code ran with — carrying the function key, the version that ran, the terminal status and the duration. Trigger fires are recorded as run rows instead. The event is a COUNT: it answers "how often", never "why" — for why, read the invocation records below. A failed invocation's event reports `outcome: "error"` through the shared inspection contract, so failures are countable.
+HTTP calls create `function.invoke` analytics events attributed to the caller.
+Use logs for diagnostics and run records for tasks and triggers.
 
 ## Debugging a failing function
 
-Every invocation the platform dispatched toward the sandbox leaves a record, and `console.log` is where you read it back:
-
 ```bash
-primitive functions logs <function-id>            # newest first
-primitive functions logs <function-id> --json     # the shared inspection items
-primitive functions logs <function-id> --follow   # tail as invocations happen
-primitive functions logs <function-id> --limit 50 --cursor <cursor>
-primitive functions logs <function-id> --run <run-id>        # one task run's records
-primitive functions logs <function-id> --invocation <id>     # one record, by the id an invoke answered with
+primitive functions logs <function-id> --invocation <invocation-id>
+primitive functions logs <function-id> --run <run-id>
+primitive functions runs steps <function-id> <run-id>
 ```
 
-`--invocation` names ONE record and refuses `--run`, `--follow`, `--cursor` and `--limit` beside it; `--run` narrows to one run and refuses `--follow`. An id that names nothing, one of another function and one whose seven days are up all answer the same not-found.
+Logs include output, errors, version, and timing, with step and attempt labels
+where applicable. The attempt counts body runs since the task last paused and
+restarts at 1 after a pause; integration calls made in the body carry the same
+attempt. Owners and admins can read them for seven days.
 
-How `--follow` tails — polling, NDJSON under `--json`, and the look-back that still prints a slow invocation settling after a faster one — is in the `--follow` section of the [Inspection guide](AGENT_GUIDE_TO_PRIMITIVE_INSPECTION.md).
+A shortened record ends with
+`… truncated: the platform's per-record cap dropped later lines`.
 
-A record carries what the invocation printed (`console.log`/`info`/`debug`/`trace` as stdout, `warn`/`error` as stderr), the thrown error with its code and a bounded stack, and the correlation keys — app, function, config version, the run id for a trigger fire or task run, and what triggered it. **Retention is seven days.**
+A record can carry `timing`: the phases of `durationMs` the platform measured,
+in whole milliseconds, each omitted when it could not be measured. The phases
+present add up to `durationMs`.
 
-| | |
-|---|---|
-| Doors that write one | HTTP invoke, webhook fire, cron fire, a task run's settling slice |
-| Also written | A TIMED-OUT invocation, carrying what the function printed **before** it hung |
-| Never written | A gate refusal — 403 (access), 404 (unknown key), 409 (not pushed), 400 (input schema), 429 (rate). Answered in the HTTP response, and debugged from there |
-| Who can read | Owner and admin, on the CLI, the admin API and `ctx.api.functions.logs({ functionKey, limit })` |
+- `waitMs`: request arrival to the function starting to load (lookup, access
+  check, input schema, rate limit); on a task record, the record's start to
+  the handler being called.
+- `authorizeMs`: the `authorize` call, on a version that has one.
+- `startupMs`: minting the credential and loading the bundle (request only).
+- `handlerMs`: the handler's run, including a cold isolate's start; on a task
+  record, the slice's run with every step in it.
+- `settleMs`: the answer to the record (output checks; on a task record, also
+  reading the console output).
+- `coldStart: true`: the first call an isolate served.
+- `beforeStart.startupMs` (task records): loading before `startedAt`, not part
+  of `durationMs`.
+- `calls`: up to 50 `ctx` platform calls as `{ op, offsetMs, ms, ok }`;
+  `callsTruncated` counts the rest. No need to wrap `ctx` to time calls.
 
-**Secrets are redacted, best-effort.** A value `ctx.secret()` returned is replaced with `[REDACTED:<NAME>]` in the captured lines, in the lines forwarded to the live console, and in the error message and stack — on both sides of the sandbox boundary. It is best-effort by nature: a secret your code transformed before printing is not detectable. Do not print credentials.
+The time to send the answer comes after the record and is not in it.
+`functions logs --invocation` and `--run` print a one-line summary;
+`--json` carries the block under `detail.timing`.
 
-**Output from inside a step is captured, and attributed to its step.** A line printed inside a `step.do` body carries the step's NAME, which call of that name it was (`occurrence`, from 0, counting every named step call in the slice — `do`, `sleep`, `sleepUntil` and `waitForEvent` alike, so it lines up with the row of that name in `primitive functions runs steps`) and which `attempt` of the body it was, from 1. A line printed BETWEEN steps carries none of the three. A body that THROWS is recorded under its step as an `err` line, `step "<name>" attempt <n> threw: <message>`; the throw itself is unchanged — the engine still retries it if you configured retries and still fails the run when it runs out. A retried body's lines sit under one name and one occurrence with ascending attempts; a step the engine answers from its memo on a replay runs no body and records nothing new.
-
-`primitive functions logs <function-id> --run <run-id>` prints the run's step trace, then each record oldest first with its lines under `step <name> #<occurrence> attempt <n>` headers, in the order they were PRINTED — stdout and stderr interleaved as they happened, so a `console.error` immediately followed by a `console.log` comes back in that order even though the record stores the two streams separately. A `thrown` line takes a `!` in the gutter. A record whose output hit a cap ends with `… truncated: the platform's per-record cap dropped later lines`, so a shortened record never reads as a complete one.
-
-```
-04:39:45  failed  http  cfg_01XYZ  01M2M8...  FUNCTION_THREW  the depot is closed
-  +0ms  out  between: starting
-  step ship #0 attempt 1
-    +103ms  out  about to ship
-  ! +104ms  err  step "ship" attempt 1 threw: the depot is closed
-```
-
-**Task runs have a narrower guarantee, and it is about SLICES, not steps.** A task run's record is written when the slice that SETTLES it finishes, and it carries everything that slice printed — between steps and inside step bodies alike. What it cannot carry is what an EARLIER slice printed: a slice that hibernated at a `step.sleep` never settles, so it writes no record, and a `step.do` body that ran in it does not re-execute on replay. Output from before a hibernation is **not recoverable**. The same applies to a fallback yield the platform takes when a refresh is refused (see Budgets in a task run), which is a hibernation like any other sleep. So a run that sleeps leaves one record per settled slice and a run that never sleeps leaves one record with everything in it; print what you need in the slice that settles, or write progress as data. A local development server never hibernates, so a task run there is one slice and one record however many times it sleeps.
-
-Three markers: `truncated` says a line or the channel hit its cap (2 KiB per line, 16 KiB and 256 entries per invocation) — the invocation is never failed for logging too much; `logsUnavailable` says the platform could not retrieve the buffer at all (an evicted isolate, or a dispatch refused before any code ran), which is not the same as a function that printed nothing (an attempt that ended in the engine before the handler printed anything carries `endedIn: "engine"`, and `functions logs --run` prints `ended in the engine — no handler output`, or `logs unavailable` / `output suppressed`); `contentSuppressed` says the platform could not load EVERY secret the version declares at write time (the store did not answer, or a declared `secret:<NAME>` has no value in this environment), so it kept the correlation and the status and dropped the console and the error fields rather than publish them unredacted — an unprovisioned declared secret suppresses every record of that version, so provision it or drop the declaration.
-
-Records outlive the function: archiving does not remove them, and both read surfaces keep answering for an archived function until the seven days are up.
+- Pre-execution refusals have no invocation log; inspect the HTTP error. An
+  `authorize` denial is different: it writes no run row, but the call's
+  invocation log records it `denied`.
+- Task logs contain output from the finishing slice. Output before earlier
+  pauses is unavailable. Store important progress as data.
+- Never log credentials. Redaction cannot recognize transformed values;
+  missing declared secrets suppress log content entirely.
 
 ## Operating
 
 ```bash
-primitive functions list                 # keys, status, and which carry a webhook or crons — each one's status, schedule, next and last fire; --status active|inactive|archived
-primitive functions get <function-id>    # active version, capabilities, manifest, and the triggers' receiver URL, ids and secret state
-primitive functions configs <function-id>                   # every version, newest first; --json --limit <n> --cursor <cursor>
-primitive functions activate <function-id> <config-id>      # point it at one of them; -y skips the prompt, makes no version
-primitive functions runs <function-id>   # trigger fires and task runs, newest first; --limit <n> --cursor <cursor>
-primitive functions runs steps <function-id> <run-id>       # one task run, step by step
-primitive functions runs terminate <function-id> <run-id>   # end a run that will not settle; -y skips the prompt
-primitive functions logs <function-id>   # what it printed and what it threw; --follow --limit <n> --cursor <cursor>
+primitive functions list
+primitive functions get <function-id>
+primitive functions runs <function-id>
+primitive functions runs steps <function-id> <run-id>
+primitive functions runs terminate <function-id> <run-id>
 primitive functions disable <function-id>
 primitive functions enable <function-id>
 primitive functions archive <function-id>
-primitive functions codegen --check      # the selected environment's tree; --env <name> picks another
-primitive config set function/<key> <path>=<value>
 ```
+
+Disable stops new calls; pushing code does not re-enable the function.
+Archive preserves versions for existing runs. Prune permanently deletes the
+function and is refused until its runs finish or are terminated.
+
+On a version with `authorize`, `functions get` prints a `Handler input` row
+(the declared `input` keys, `none (empty list)` for `[]`, or
+`missing (caller calls refused)` for a version with no list) and a
+`Trigger doors` row (`all`: trigger and agent hook doors hand the handler the
+whole input). A version whose `public` is a table also gets a
+`Public options` row (`cacheSeconds = 60, cors = "*"`). One run's admissions are read with
+`primitive functions logs <function-id> --run <run-id> --json`: on an allowed
+call, `detail.authorize.input` is the key list, `"all"` or `"none"`; a refused
+call's block has no `input`. `functions runs --json` carries no `authorize`
+block.
 
 ### Running one
 
 ```bash
-primitive functions invoke <key> --input '{"n":21}'    # the REQUEST runtime: run it, print the result
-primitive functions start <key> --input '{"n":21}'     # the TASK runtime: start a run, print its id
-primitive functions start <key> --wait                 # …and wait for it
-primitive functions runs wait <function-id> <run-id>   # wait for a run already started
+primitive functions invoke <key> --input '{"n":21}'
+primitive functions start <key> --input '{"n":21}' --wait
+primitive functions runs wait <function-id> <run-id>
 ```
 
-`invoke` and `start` take the **key** (the public route's argument); `runs`, `runs wait`, `runs steps`, `runs terminate` and `logs` take the **function id**. Every id a verb prints is followed by the command that takes it, so nothing has to be looked up.
-
-BOTH VERBS work on every function, and the ROUTE is what says which runtime a call means. A function that must not be reached one of the two ways says so in its own code with `assertRuntime`; the refusal comes back as a `failed` invocation with `errorCode: "FUNCTION_RUNTIME_REFUSED"` rather than as a mistake the CLI could have caught. `functions runs` prints the runtime each run used in its RUNTIME column, and `functions logs` prints it per invocation.
+`invoke` and `start` take the key; inspection commands take the function ID,
+which `primitive functions list` prints beside each key.
+`--timeout <seconds>` bounds an invoke request or a CLI wait; waits default to
+900 seconds. A wait timeout does not stop the task.
 
 | Exit code | Meaning |
 |---|---|
@@ -1101,43 +1746,39 @@ BOTH VERBS work on every function, and the ROUTE is what says which runtime a ca
 | `1` | It failed, timed out, was terminated, or the platform refused the call |
 | `124` | `runs wait` spent its budget with the run still going; it prints the resume command |
 | `130` | Ctrl-C, same resume line; a second one exits at once |
-
-`--timeout <seconds>` is the request budget for `invoke` (clamped at 30 s by the platform) and the WAIT budget for `runs wait` and `start --wait` (default 900).
-
-**Who it runs as.** By default your own app user — and the output says so, because an admin or owner BYPASSES a function's `access` expression, so your own invocation does not exercise the gate.
-
 | Flag | Identity | Notes |
 |---|---|---|
-| *(none)* | Your app user | `Ran as <user-id> (<role>)`; the gate is bypassed for an owner or admin |
+| *(none)* | Your app user | `Ran as <user-id> (<role>)`; an `authorize` method gives an owner or admin no implicit bypass |
 | `--user <user-id>` | That app user | Mints a ten-minute token, invokes with it, revokes it on every path including Ctrl-C; the value is never printed. Owner and admin only |
 | `--as system` | No caller at all | `ctx.user` null, `ctx.trigger` `{ kind: "manual", userId: <you> }`, the app's system authority — the shape a cron or webhook fire has. Owner and admin only |
 
-The two flags are mutually exclusive and `--as` accepts only `system`. A task started with `--as system` is keyed to the system like a trigger-fired root (`FIRED BY manual`, you recorded as the initiator).
 
-**A task start mints your root document.** `functions start` needs a context document and the app user provisioned for an admin has none, so the CLI asks for it through the same idempotent route sign-in uses — `start` works on a fresh app with nothing done first. `--context-doc-id` names one yourself; `--as system` uses the synthetic `fn:<function-id>` context and asks for nothing.
-
-Every verb takes `--app <app-id>` and `--json`.
-
-- `runs steps` is the step-level view of a **task** run: one row per `step.do` / `step.sleep` / `step.waitForEvent`, with its name, its kind (`function.step` / `function.sleep` / `function.event`), status, the idle GAP before it and its duration. Rows are written as the run goes, so an in-flight run is readable — the step executing right now reads `running` with its elapsed time, and a sleeping run's `function.sleep` step stays `running` until it wakes. A resume replays completed steps from the engine's memo: one row per step, keeping the timing of the slice that executed it.
-- `runs terminate` stops the run and settles its row `terminated`. Both happen, and the row stays settled. A run whose instance is already gone still settles — that is the case the verb exists for. A run that finished on its own is reported, not overwritten. Whichever door stops a run — this verb or `client.functions.terminate` — the steps its trace left open are closed with it, and asking again on a run that is already over closes anything still open, so a trace left behind by an older stop is repaired rather than restated.
-- `disable` refuses invocations and leaves config and code unchanged; pushes still land.
-- `archive` takes a function out of service without destroying it: the row keeps its key, pushing code to it is refused, and there is no un-archive. Reclaiming the key is a hard delete — `primitive config pull` (removes the tombstone's local files), then a confirmed `primitive config push --prune`, which destroys the function, every version and their bundles (refused while a run is live — see Deleting a function with live runs).
+`--user` and `--as system` are mutually exclusive. Invoking as yourself
+already exercises `authorize`, because it gives an owner or admin no implicit
+bypass.
 
 ### Versions and rollback
 
-`primitive functions configs <function-id>` lists a function's versions newest first — config id, when it was pushed, an `*` on the active one, both hashes, the trigger summary and who pushed it; `--json`, `--limit` and `--cursor` page it. `primitive functions activate <function-id> <config-id>` points the function at one of them.
+List with `functions configs`; select with
+`functions activate <function-id> <config-id>`. New calls use that version’s
+code and configuration. Existing tasks keep their starting version.
 
-- **Activation is a repoint, not a new version.** Nothing is created and the version list is the same length afterwards.
-- **Request calls and trigger fires use the activated version from the next call** — they resolve the active version per call, so there is no window and nothing to restart — and **that version's own capabilities, limits and triggers apply**: a version IS its declaration, so rolling back to one that declared a cron entry a later version dropped makes that schedule live again, and rolling back past a `secret:` capability stops the function reading that secret.
-- **A task run already in flight finishes on the version it started on.** Its code is pinned by content hash and reloaded from the same immutable bundle at every wake.
-- A trigger is admitted against the **app**, not against the version, so a rollback that asks for triggers the app can no longer take is refused `FUNCTION_TRIGGERS_NOT_ADMISSIBLE` and **nothing moves**.
-- Versions are content-addressed per function, so **pushing a tree that matches a version the function already has re-activates that version and makes none** — which is how a rollback is undone without editing anything — and pushing an edited tree makes a new one.
-- `config pull` writes the **active** version's bytes and names a newer version when one exists; `config diff` says *the tree matches version `<newest>`, which is not the active one (`<active>`)* rather than reporting an edit nobody made.
-- The version each run and invocation executed is on `primitive functions runs`, `primitive functions logs` and the invocation log record; the active version's id and content hash, and who activated it and when, are on `primitive functions get`.
+## Gotchas
+
+- Check a signed-in caller’s access to a database they name explicitly;
+  function code has app authority. Triggers have no caller.
+- Completed task steps reuse results, but interrupted attempts can run again.
+  Keep side effects idempotent and nondeterministic reads inside `step.do`.
+- Reusing a run key returns the existing run, even after failure. Retry with a
+  new key.
+- A timeout blocks later platform calls; it does not undo completed writes.
+- A push can partially apply after local validation succeeds. Inspect errors
+  and re-run after resolving them.
+- Do not hard-delete a function with running tasks; archive it first.
 
 ## Related
 
 - [Configuration](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md) — the sync loop that pushes `functions/<key>.toml` and its code.
-- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — database types, models and the records surface.
+- [Databases](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md) — types, records, synced databases and access.
 - [Integrations](AGENT_GUIDE_TO_PRIMITIVE_INTEGRATIONS.md), [Prompts](AGENT_GUIDE_TO_PRIMITIVE_PROMPTS.md), [App Secrets](AGENT_GUIDE_TO_PRIMITIVE_APP_SECRETS.md) — what a function calls out to.
-- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the CEL the `access` gate is written in.
+- [Access Control](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md) — the `authorize` method every version defines.
