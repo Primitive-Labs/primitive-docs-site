@@ -146,7 +146,7 @@ The server function tips below give the technique for each.
 **Writing**
 
 - **Let the write do the checking.** Don't read to decide whether to write. Use `upsertOn` to create or update, `ifNotExists` to create only when absent, and a `condition` to change a record only if it is unchanged.
-- **Fill every batch.** A batch costs about the same with one operation as with a full load, so a write set costs its number of batches. A batch spans models: stage all of a phase's writes, then cut by the batch limits (100 operations, 1 MiB).
+- **Fill every batch.** A batch costs about the same with one operation as with a full load, so a write set costs its number of batches. A batch spans models: stage all of a phase's writes, then cut by the batch limits (1,000 operations, 1 MiB).
 - **Never fall back to one write per call.** Send independent writes with `{ atomic: false }` and read each operation's result.
 
 **Running calls together**

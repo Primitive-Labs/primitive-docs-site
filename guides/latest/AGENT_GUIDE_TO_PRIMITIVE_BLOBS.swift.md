@@ -46,7 +46,7 @@ let blobs = client.db3.blobs(db3Id)
   let blobs = client.db3.blobs(db3Id)
 
   let list = try await blobs.list()
-  let url = blobs.downloadUrl(blobId: blobId)          // synchronous
+  let url = try blobs.downloadUrl(blobId: blobId)      // synchronous
   let bytes = try await blobs.read(blobId: blobId)
 ```
 
@@ -57,7 +57,18 @@ let blobs = client.db3.blobs(db3Id)
 
   let page = try await blobs.list(limit: 50) // page.items, page.nextCursor
   let meta = try await blobs.get(blobId: blobId)
+  print(meta.filename ?? "", meta.numBytes ?? 0, meta.createdBy ?? "app", meta.etag ?? "")
   _ = try await blobs.delete(blobId: blobId)
+```
+
+A blob's metadata is `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, `createdBy` (the uploading member's user id; `null` for a signed upload), `createdAt`, `etag` (the download's tag) and `status`.
+
+### Batch delete
+
+Up to 500 ids in one request. An id that is not a blob of the database is skipped and counted; it answers `{ deleted, blobIds, db3Id }`. Once the server accepts, the client cancels a named upload queued for this database and drops its local copy of each id.
+
+```swift
+  let result = try await client.db3.blobs(db3Id).deleteBatch(blobIds: blobIds)
 ```
 
 ## Overview
@@ -112,9 +123,9 @@ let meta = try await blobs.get(blobId: blobId)
 
 ### Download URL
 
-The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string. The URL carries no credentials: `BlobImage` and `downloadRequest` add the user's auth (see [Displaying images](#displaying-images)).
+The basic call is shown in **List / URL / read** above. `downloadUrl` is synchronous and returns a string; it `throws`, so call it with `try`. The URL carries no credentials: `BlobImage` and `downloadRequest` add the user's auth (see [Displaying images](#displaying-images)).
 ```swift
-  let url = blobs.downloadUrl(
+  let url = try blobs.downloadUrl(
     blobId: blobId,
     disposition: .attachment,         // or .inline
     attachmentFilename: "report.pdf"  // optional override (RFC 5987-encoded)
@@ -158,7 +169,7 @@ See **List / metadata / delete** above.
 let result = try await blobs.delete(blobId: blobId) // result.deleted == true
 ```
 
-Deleting also cancels any in-flight upload for the same `blobId` and clears local bytes.
+Once the server accepts the delete, the client cancels an upload of that `blobId` queued for this database, in flight included, and clears this database's local bytes of it. An upload of the same id queued for another database stays queued, and a refused delete changes nothing on the device. `deleteBatch` cleans up the same way.
 
 ---
 
@@ -180,7 +191,7 @@ The upload queue is keyed by user identity, retries with exponential backoff (2s
   let text = try await blobs.read(blobId: result.blobId, as: String.self)
 
   // Warm the cache; per-blob errors are logged and swallowed.
-  await blobs.prefetch(blobIds: blobIds, concurrency: 4)
+  try await blobs.prefetch(blobIds: blobIds, concurrency: 4)
 
   // Queued uploads resume automatically once back online.
   client.setNetworkMode(.online)
@@ -214,13 +225,13 @@ Inspect and control a database's upload queue, and set the client-wide upload co
   let concurrency = await client.blobUploadConcurrency
 ```
 
-Every queue verb is `async`: the upload queue lives behind an actor, so reading or changing it is an `await`. The queue members carry the `Async` suffix (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`, `setBlobUploadConcurrencyAsync(_:)`, …), and the concurrency reader is an `async` property: `await client.blobUploadConcurrency`. `downloadUrl(blobId:disposition:attachmentFilename:)` and `downloadRequest(blobId:disposition:attachmentFilename:)` stay synchronous, so they are safe to call straight from a SwiftUI `body`.
+Every queue verb is `async`: the upload queue lives behind an actor, so reading or changing it is an `await`. The queue members carry the `Async` suffix (`uploadsAsync()`, `pauseUploadAsync(blobId:)`, `pauseAllAsync()`, `setBlobUploadConcurrencyAsync(_:)`, …), and the concurrency reader is an `async` property: `await client.blobUploadConcurrency`. `downloadUrl(blobId:disposition:attachmentFilename:)` and `downloadRequest(blobId:disposition:attachmentFilename:)` stay synchronous (both `throws`), so a SwiftUI `body` can call them directly; `body` cannot throw, so call them with `try?` or inside a `do`/`catch`.
 
 ---
 
 ## Events
 
-The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level progress event — it fires on status transitions. There is no per-byte progress callback. `delete` issued mid-upload cancels the in-flight transfer and evicts the cached bytes.
+The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level progress event — it fires on status transitions. There is no per-byte progress callback. A `delete` the server accepts mid-upload cancels the in-flight transfer and evicts the cached bytes.
 
 ```swift
   let progress = client.observeOnMainActor(BlobUploadProgressEvent.self) { e in
@@ -258,7 +269,7 @@ With an image library (Kingfisher, Nuke), send `blobs.downloadRequest(blobId:dis
 
 ## From a server function
 
-A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list` and `get` read its metadata, `ctx.api.db3.blobs.download` returns its bytes as a `Uint8Array`, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
+A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list` (one page; `limit` 1 to 100 and `cursor`, the previous page's `nextCursor`) and `get` read its metadata, `ctx.api.db3.blobs.download` returns its bytes as a `Uint8Array`, `ctx.api.db3.blobs.delete` removes it, and `ctx.api.db3.blobs.deleteBatch({ db3Id, body: { blobIds } })` removes up to 500 in one call. A function reaches the blobs of a database with sync turned off the same way.
 
 ```ts
 await ctx.api.db3.blobs.upload({

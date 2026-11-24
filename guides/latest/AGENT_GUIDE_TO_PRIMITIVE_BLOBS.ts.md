@@ -52,7 +52,18 @@ const blobs = client.db3.blobs(db3Id);
 
   const { items, nextCursor } = await blobs.list({ limit: 50 });
   const meta = await blobs.get(blobId);
+  console.log(meta.filename, meta.numBytes, meta.createdBy, meta.etag);
   await blobs.delete(blobId);
+```
+
+A blob's metadata is `blobId`, `filename`, `contentType`, `numBytes`, `sha256`, `createdBy` (the uploading member's user id; `null` for a signed upload), `createdAt`, `etag` (the download's tag) and `status`.
+
+### Batch delete
+
+Up to 500 ids in one request. An id that is not a blob of the database is skipped and counted; it answers `{ deleted, blobIds, db3Id }`. Once the server accepts, the client cancels a named upload queued for this database and drops its local copy of each id.
+
+```typescript
+  const { deleted } = await client.db3.blobs(db3Id).deleteBatch(blobIds);
 ```
 
 ## Overview
@@ -182,7 +193,7 @@ See **List / metadata / delete** above.
 const { deleted } = await blobs.delete(blobId); // { deleted: true }
 ```
 
-Deleting also cancels any in-flight upload for the same `blobId` and clears local bytes.
+Once the server accepts the delete, the client cancels an upload of that `blobId` queued for this database, in flight included, and clears this database's local bytes of it. An upload of the same id queued for another database stays queued, and a refused delete changes nothing on the device. `deleteBatch` cleans up the same way.
 
 ---
 
@@ -241,7 +252,7 @@ Inspect and control a database's upload queue, and set the client-wide upload co
 
 ## Events
 
-The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level progress event — it fires on status transitions. There is no per-byte progress callback. `delete` issued mid-upload cancels the in-flight transfer and evicts the cached bytes.
+The upload queue emits lifecycle events. `upload-progress` is *not* a byte-level progress event — it fires on status transitions. There is no per-byte progress callback. A `delete` the server accepts mid-upload cancels the in-flight transfer and evicts the cached bytes.
 
 ```typescript
   // status is one of: "queued" | "uploading" | "pending" | "paused"
@@ -276,7 +287,7 @@ Where no worker controls the page (`blobs.hasServiceWorkerControl()` is `false`,
 
 ## From a server function
 
-A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list` and `get` read its metadata, `ctx.api.db3.blobs.download` returns its bytes as a `Uint8Array`, and `ctx.api.db3.blobs.delete` removes it. A function reaches the blobs of a database with sync turned off the same way.
+A server function uploads a database blob with `ctx.api.db3.blobs.upload`: `db3Id`, a `blobId` it mints (a ULID), `"X-Blob-Filename"`, `"X-Blob-Size"` (the byte length), `"X-Blob-Sha256"` (the base64 SHA-256 of the bytes), `body`, and the media type in `"Content-Type"`. `ctx.api.db3.blobs.list` (one page; `limit` 1 to 100 and `cursor`, the previous page's `nextCursor`) and `get` read its metadata, `ctx.api.db3.blobs.download` returns its bytes as a `Uint8Array`, `ctx.api.db3.blobs.delete` removes it, and `ctx.api.db3.blobs.deleteBatch({ db3Id, body: { blobIds } })` removes up to 500 in one call. A function reaches the blobs of a database with sync turned off the same way.
 
 ```ts
 await ctx.api.db3.blobs.upload({

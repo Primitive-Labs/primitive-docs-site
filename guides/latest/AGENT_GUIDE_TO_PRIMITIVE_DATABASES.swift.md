@@ -85,6 +85,8 @@ A model needs no `id` field; every record gets one, minted on create.
   try task.delete(in: db3Id)
 ```
 
+**Tags.** A database carries at most 10 tags, each 1 to 48 characters, every one of `A-Z`, `a-z`, `0-9`, `_` and `-` (no spaces), taken exactly as given. `client.db3.create`, `getOrCreateWithAlias`, `ctx.api.db3.addTag` and `primitive db3 tags add` refuse any other tag before anything is created or sent: `INVALID_ARGUMENT` on the clients, `400 INVALID_TAG` from the server. `ctx.api.db3.removeTag` and `primitive db3 tags remove` take any tag the database carries.
+
 ## Types
 
 A type is the schema for every database of that type, every client, and every function. `primitive config create db3-type <name>` scaffolds one; `primitive config fields db3-type` lists the top-level keys. Pushing and deleting types is for app admins and owners, and a type takes no rule set: push refuses a type file with a `ruleSetName` or `ruleSetId` line, and `PUT db3-types/{name}` refuses a `ruleSetId` with `DB3_TYPE_RULE_SET_UNSUPPORTED`. Delete the line, or run `primitive config pull`, which rewrites the file without it.
@@ -95,13 +97,13 @@ A type is the schema for every database of that type, every client, and every fu
 | `[type] timestamps` | `{ create = "<field>", update = "<field>", models = ["<model>"] }` — epoch-ms numbers stamped on every create/update by any writer; `models` (optional) limits them to those models; declare the fields `number` |
 | `[type] autoPopulatedFields` | `{ field = "user.userId" }` fills on create; `{ field = { value = "…", on = ["update"] } }` names lifecycles. Fills only absent/`null` fields |
 | `[type] models` | `["<key>", …]` — models this type holds that another file in `db3-types/` declares. Push includes those declarations. Once any file names one, a name no file declares, or one model declared differently in two files, is refused at push |
-| `[models.<key>]` | A model. `<key>` is the stored model name (used by functions, the CLI, includes); `class_name` is the generated class/struct |
+| `[models.<key>]` | A model. `<key>` is the stored model name (used by functions, the CLI, includes); `class_name` is the generated class/struct (Swift codegen refuses `TypedQueryModel`, `PrimitiveModel` and `PrimitiveRowDecodable`: pick another `class_name`) |
 | `[models.<key>.fields.<field>]` | `type` = `string` \| `number` \| `boolean` \| `date` \| `id` \| `stringset` \| `vector` (see **Vector fields** below; declare `id` only to set its options; an undeclared `id` is minted on create); options `required`, `default`, `indexed`, `unique`, `enum` (string only; types the generated field, writes unchecked unless `enforce_enum = true`; see **Enforced enums** below), `max_count` / `max_length` (stringset: member count / each member's length, client-checked), `auto_assign`, `auto_stamp` (`create`\|`update`\|`both`; epoch ms, stamped by whichever side writes). A `date` field takes an ISO 8601 string (or a number) |
 | `[[models.<key>.unique_constraints]]` | `name` + `fields` — a compound unique key (upsert target). A unique constraint applies to scalar fields only. A `stringset` is refused `UNIQUE_ON_STRINGSET` at push, and a client model declaring one throws `UniqueStringsetError` |
 | `[models.<key>.relationships.<rel>]` | `type` = `refersTo` \| `hasMany` (`model`, `related_id_field`, optional `order_by_field`, `order_direction`) or `hasManyThrough` (`model`, `join_model`, `join_model_local_field`, `join_model_related_field`) |
 | `[triggers.<key>] triggers = [...]` | `{ on = "create"\|"update"\|"save", when = "<CEL>", set = { field = "<CEL>" } }` or `refuse = { code = "…", message = "…" }` |
 
-**Defaults.** A `default` is written on create. In a database, a record stored without the field reads as the default in both clients (generated models); the read stores nothing, and a field cleared to `null` reads empty. A record in a document with Yjs state reads only what it holds: a missing field reads empty. Queries compare stored values: `{ completed: false }` misses a record stored without `completed`; add `{ completed: { $exists: false } }` under `$or`.
+**Defaults.** A `default` is written on create. A scalar field with a literal default (not a string set, not a generator such as `"$now"`, not a string starting with `$`) reads the default whenever the stored value is missing, `null` or of another kind (judged as stored: `"5"` in a number field, `1` in a boolean field) on every read: the generated web and iOS models, `ctx.db3` and the record routes, a database filling from the type revision it holds. It is typed non-optional there (web model, iOS model, the function `Db3` row and the row projection an `outputSchema` ref inlines); a create may omit it, and a typed write of `null` to it does not compile. In a document with Yjs state a stored `0` or `1` in a boolean field still reads `false` or `true`. A database record without a string set reads the set's default. The read stores nothing: a saved `null` stays `null`, a change trigger's payload and socket sync carry the stored row, and a read that selects fields (an include's `projection`) fills only those. Filters, sorts, counts, aggregates and cursors compare stored values: `{ completed: false }` misses a record stored without `completed`; add `{ completed: { $exists: false } }` under `$or`. An `include` relates records by stored keys, never by a filled default. A page of a typed database is measured with its defaults filled, so it can end earlier.
 
 Trigger and `autoPopulatedFields` expressions see `user.userId`, `user.writer`, `record.*`, `database.id`, `now()` and `lookup()`. A rule never writes `id`. `user.writer` is `"user"` (a member's device or API call, or a function acting `asUser`), `"function"` (a server function someone invoked; `user.userId` is that member) or `"system"` (cron, webhook, database change, `--as system`; `user.userId` is `sys:<appId>`). Keep members off a model only your functions write with `{ on = "save", when = "user.writer == 'user'", refuse = { code = "PIPELINE_ONLY" } }`. It stops saves and batches, not a bulk load by anyone with write access: a guard against app mistakes, not an access boundary (for that, a sync-off database only functions write). A `refuse` reaches the writer as `DB3_TRIGGER_REFUSED` with your code in `error.details.reason`; values a rule set come back as `appliedFields` (server calls) and sync to devices with the record. Reading a field the record lacks is an error, not `false`: a refusing trigger whose `when` errors refuses the write with reason `TRIGGER_EVALUATION_FAILED`, and a `set` trigger's is skipped, so guard optional fields (`has(record.status) && record.status == 'blocked'`). `has()` takes a path that starts at a name; for a looked-up record's field write `lookup('m', record.ref).?field.hasValue()`. Push refuses an expression that can never be evaluated, naming the trigger and the failing term.
 
@@ -109,11 +111,13 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `user.writer`, 
 
 **Untyped databases.** Without a type, a database's indexes and unique constraints come from the declarations of the clients that write it. A client declares to an untyped database only the models it uses there: models its copy holds records of; a model it first writes there (declared just before the write); models bound to it with `BaseModel.setModelDefaultDb3(model, id)` (Swift: `client.setModelDefaultDb3(model, id)`); and, when it is the client's default (`BaseModel.setDefaultDb3(id)`; Swift: `client.setDefaultDb3(id)`), every model without a default database of its own. A model used only in other databases, runtime additions (`client.registerModel`; Swift: `client.registerModels`) included, is not declared there. To have a model's indexes and unique constraints in force before its first record, bind it with `setModelDefaultDb3` before subscribing.
 
-**Changing a type.** Edit and `primitive config push`; the push reaches every database of the type in the background (`primitive db3-types push-status <type>`, `db3-types list`, `db3-types get <type>`). Adding models, fields and enum values, making a field optional, and `indexed`/`unique`/`default`/`description` edits are safe; a field newly `indexed`/`unique` is indexed everywhere. Once a database of the type exists, push refuses `DB3_TYPE_NOT_APPEND_ONLY` (409, `details.reasons[]` = `{ path, change, reason }`, nothing written) for a removed model or field, a changed field `type`, a removed `enum` value, a field made `required` or a new `required` field in an existing model, and a changed vector `dims`/`element`; `config push` checks every type before writing any and prints each reason. Retire a field instead (below), or add a new one and copy values with a function; with no database of the type, everything pushes. To push one anyway: set `[app] allowFieldRemoval = true` in `app.toml`, push, then `primitive config push --allow-field-removal` (HTTP: `?allowFieldRemoval=true`; refused `DB3_TYPE_FIELD_REMOVAL_NOT_ENABLED` unless the stored setting is already `true`). A database whose records break an allowed revision (e.g. a new `unique` over duplicates) refuses it and keeps its old revision; `push-status` names it, `primitive db3-types push <type> --retry <run-id>` retries after the fix.
+**Changing a type.** Edit and `primitive config push`; the push reaches every database of the type in the background (`primitive db3-types push-status <type>`, `db3-types list`, `db3-types get <type>`). What to write: to add, write the new model, field or enum value (also safe: making a field optional, `indexed`/`unique`/`default`/`description` edits; a field newly `indexed`/`unique` is indexed everywhere); to stop using a field, retire it (below); to rename a field, `storedAs` (below); to change a field's type, add a new field and copy the values (below); to remove outright, the override (below). Once a database of the type exists, push refuses `DB3_TYPE_NOT_APPEND_ONLY` (409, `details.reasons[]` = `{ path, change, reason }`, nothing written), and each refusal has its alternative: a removed field (retire it), a removed model (leave it declared, or the override), a changed field `type` (a new field plus a copy), a removed `enum` value (keep the value; stop writing it), a field made `required` or a new `required` field in an existing model (add it optional, with a `default`), a changed vector `dims`/`element` (a new vector field). `config push` checks every type before writing any and prints each reason; with no database of the type, everything pushes. To push one anyway: set `[app] allowFieldRemoval = true` in `app.toml`, push, then `primitive config push --allow-field-removal` (HTTP: `?allowFieldRemoval=true`; refused `DB3_TYPE_FIELD_REMOVAL_NOT_ENABLED` unless the route's own app has the stored setting `true`, so another app's setting never applies; a type with `allowLocalOnly = true` refuses with the flag too). The override removes only the declaration: stored values stay, server reads still return them and builds that declare the field still read them; retire a field to hide its values. A database whose records break an allowed revision (e.g. a new `unique` over duplicates) refuses it and keeps its old revision; `push-status` names it, `primitive db3-types push <type> --retry <run-id>` retries after the fix.
 
-**Retiring a field.** Three pushes, each a field key: `deprecated = true` (still read and written; generated `@deprecated` / `@available(*, deprecated)`; type writes answer `deprecatedFields: ["<model>.<field>"]`), then `cleared = true` beside it (needs `deprecated`; refused with `required = true`), then the name moves into the model's `removedFields = ["<field>"]` (a tombstone: never declared again in that model by any type of the app, never removed). A cleared or removed field is left out of every read and generated model, reads as unset in filters, sorts and aggregates, is stripped from writes (an old build's write is accepted, not refused), and a record's stored value is dropped on its next write or read. Refusals are `DB3_TYPE_NOT_APPEND_ONLY` with `change` `cleared-field-in-use` (a compound unique constraint, trigger, `autoPopulatedFields` or `timestamps` names it), `cleared-field-required` (clearing a field stored `required` on a type with databases; push it optional and ship that build first), `field-tombstoned-without-clear`, `tombstoned-name-declared` or `tombstone-removed`; all but `cleared-field-required` carry `always: true` and hold with no database and under `--allow-field-removal`. A database holding a registered index over several fields, or a vector index, that names the field refuses the clearing revision (`DB3_TYPE_REFUSED`): `DELETE /indexes/<name>`, then `db3-types push <type> --retry <run-id>`. Removing `cleared = true` un-clears: the write answers `unclearedFields`, server reads return values not yet dropped, dropped registered indexes are not restored, and a device keeps its local copy until it next downloads the database whole. `db3-types get <type>` prints `Deprecated`, `Cleared` and `Removed` rows, each `<model>.<field>`. Clearing is not erasure.
+**Retiring a field.** Three pushes, each a field key: `deprecated = true` (still read and written; generated `@deprecated` / `@available(*, deprecated)`; type writes answer `deprecatedFields: ["<model>.<field>"]`), then `cleared = true` beside it (needs `deprecated`; refused with `required = true`), then the name moves into the model's `removedFields = ["<field>"]` (a tombstone: never declared again in that model by any type of the app, never removed; deleting the last type that declares the model, with no database of it, releases the name). A cleared or removed field is left out of every read and generated model, reads as unset in filters, sorts and aggregates, is stripped from writes (an old build's write is accepted, not refused), and a record's stored value is dropped on its next write or read. Refusals are `DB3_TYPE_NOT_APPEND_ONLY` with `change` `cleared-field-in-use` (a compound unique constraint, trigger, `autoPopulatedFields` or `timestamps` names it), `cleared-field-required` (clearing a field stored `required` on a type with databases; push it optional and ship that build first), `cleared-field-defaulted` (clearing a field stored with a `default` on a type with databases, even when the same push drops the default; push it without the default and ship that build first), `field-tombstoned-without-clear`, `tombstoned-name-declared` or `tombstone-removed`; all but `cleared-field-required` and `cleared-field-defaulted` carry `always: true` and hold with no database and under `--allow-field-removal`. A database holding a registered index over several fields, or a vector index, that names the field refuses the clearing revision (`DB3_TYPE_REFUSED`): `DELETE /indexes/<name>`, then `db3-types push <type> --retry <run-id>`. Removing `cleared = true` un-clears: the write answers `unclearedFields`, server reads return values not yet dropped, dropped registered indexes are not restored, and a device keeps its local copy until it next downloads the database whole. `db3-types get <type>` prints `Deprecated`, `Cleared` and `Removed` rows, each `<model>.<field>`. Clearing is not erasure.
 
 **Renaming a field.** Change the key and add `storedAs = "<old name>"` (e.g. `[models.tasks.fields.dueAt]` with `storedAs = "due"`); records, indexes and older builds keep the stored name, nothing is rewritten. Later renames change the key again and keep `storedAs`; a field may take back a former name. Type writes answer `renamedFields: [{ model, storedAs, from, to }]`; `GET db3-types/:name` answers `formerNames` (`{ <model>: { <stored>: [names] } }`); `config pull` never writes former names. The server takes the current, former or stored name in record data, filters, sorts, aggregates, write options, index registrations and hooks; HTTP record routes answer stored names unless `?names=current` (`ctx.db3` and the CLI pass it). Refusals: `field-name-collision` (a name another field has or had, or a removed field's) and `hook-name-not-compilable` (an expression using `record` whole or a computed key on a renamed model, or a type-wide name stored two ways), both `always: true`; changing or dropping an existing `storedAs` is `field-removed`, and also `field-name-collision` under the same key (it stays reserved to the old stored name). `storedAs` is refused while legacy databases of the type exist. `db3 export` writes a renamed field's records and declaration under its current name (the declaration keeps `storedAs`); `db3 import` loads them under the stored name, and an export from before or after a rename imports with this CLI (compared by stored name). Regenerate models from the renamed file: generated models expose only the current name and write the stored one (`CodingKeys` raw value in Swift), and a single-field unique constraint keeps its stored-derived name (`tasks_due_unique`). `client.db3.records(id)` answers the build's current names and sends stored names, but only on a database whose type the model was generated from (a `schemaToml` with `[type] name` counts; `defineModelSchema` doesn't); elsewhere it keeps stored names. It never sends `names=current`, so a later push doesn't change a shipped build's answers. JS records calls go to the server, which also takes former names; a device (models, Swift `client.db3.records`) takes only the current and the stored name. Upsert targets are sent as written: a constraint of that name wins over a field. A rename is live in a database once the push has committed there.
+
+**Changing a field's type.** A field's `type` never changes on a type with databases; replace the field in four pushes. Add the new field beside the old (`sizeN` of type `number` beside `size` of type `string`) and ship code that writes both; copy each record's value with a server function called once per database (`ctx.db3(db3Id, "<type>").model("tasks")`: page with `query({ limit, cursor })` and `nextCursor`, `patch(id, { data: { sizeN: Number(task.size) } })` wherever `sizeN` differs, since the old field is the source until cleared); deprecate the old field and ship code that reads the new one and still writes both; clear the old field. Reads then return only the new field. Builds from before the first push write only the old field, and each copy run catches `sizeN` up with their changes: run it again just before the clear, since a cleared field can't be read. An old field written after that last run is lost with the clear, so clear once those builds have stopped writing, or accept the loss.
 
 **Archiving a type.** `[type] archived = true` (or `primitive db3-types archive <type>`, which edits the file and pushes it; `unarchive` removes the line and pushes) stops new databases of the type: `client.db3.create` with it, `getOrCreateWithAlias` whose alias names nothing, and `setType` on an untyped database are refused 409 `DB3_TYPE_ARCHIVED` (`details.type`) for every caller, functions and admins included. Existing databases of it, an alias already naming one, re-attaching it to a database already of it, and pushing new revisions work as before; `db3-types list`/`get` show the status, and `PUT db3-types/:name` takes `archived` (`true`, `false`/`null`; omitted keeps it). A create made on the device resolves first, then `db3:create-failed` fires with `code: "DB3_TYPE_ARCHIVED"`; its records stay on the device. Archiving, like any type push, reinstalls the type in each of its databases.
 
@@ -145,12 +149,18 @@ Trigger and `autoPopulatedFields` expressions see `user.userId`, `user.writer`, 
   let db = try await client.db3.create(title: "Design team", type: "team")
 ```
 
+**Types for local-only databases.** `[type] allowLocalOnly = true` lets the type describe local-only databases: the generated code carries its declarations, and a device judges a local-only database of the type by them. `PUT db3-types/:name` takes `allowLocalOnly` (omitted keeps it); `db3-types list`/`get` show it; `config pull` writes it only when true. From the push after the one that sets it, every change must only add, with or without a database of the type and with `--allow-field-removal` too; otherwise `DB3_TYPE_NOT_APPEND_ONLY` with `details.allowLocalOnly: true`:
+
+| Pushes | Refused (`change`) |
+| --- | --- |
+| New models, fields (a `default` allowed), enum values, `indexed`, `unique`, constraints, an `enum`, `enforce_enum = true`; clearing, `removedFields`, `storedAs` renames; `description`, `class_name`, `deprecated` | Every append-only refusal above; `field-uncleared`; `index-dropped` (`indexed`/`unique` removed or a constraint removed or changed, unless the field is cleared); `default-changed` (an existing field's `default` added, changed or removed); `enum-removed`; `enum-enforcement-removed`; `field-option-changed` (any other option); `local-only-hooks` (a trigger, `autoPopulatedFields` or `timestamps`, which also refuse setting the key; use a second type for hooks); `allow-local-only-removed` (`false`, `null` or the line deleted; also deleting the type, by `config push --prune` or `DELETE db3-types/:name`, `force` included, with or without databases: keep the file); `tombstone-not-stored-name` (a renamed field moved to `removedFields` under its current name: name its stored name) |
+
 **Reserved field names.** `type`, anything starting with `_`, and the names generated models use are refused with `RESERVED_FIELD_NAME` (use `kind`/`category`/`status`; `id` is allowed). The generated-model names: `CodingKeys`, `UniqueConstraint`, `UniqueField`, `applyAutoStampsForSave`, `applyStringSetChangeToYMap`, `clearLocalChanges`, `constructor`, `delete`, `deleteRecordLog`, `discardChanges`, `ensureLocalChanges`, `getChangedFields`, `getCurrentJSState`, `getCurrentValue`, `getDocumentId`, `getFromYjs`, `getOrCreateStringSet`, `getOriginalValue`, `getStringSetCurrentValues`, `getStringSetFromYjs`, `getValue`, `hasFieldChanged`, `hasLocalChange`, `hasUnsavedChanges`, `hashValue`, `isDirty`, `markAllChanged`, `markStringSetChange`, `normalizeNonStringSetValue`, `primitiveValues`, `related`, `resolveUnresolvedFormat2Document`, `save`, `saveRecordLog`, `schemaDefaultFor`, `setValue`, `syncState`, `toJSON`, `validateBeforeSave`, `validateFieldValue`.
 
 **Vector fields.** `type = "vector"` with `dims` (how many numbers, at least 1) and `element` = `f32` \| `f16` \| `i8`; only `required` besides. Bytes per vector: `f32` 4·dims, `f16` 2·dims (rounded to nearest, magnitudes ≤ 65504), `i8` dims + 4 (one signed byte each plus a per-vector scale, within 1/254 of the largest magnitude); stored as RFC 4648 standard base64 with padding, 4·ceil(bytes/3) characters. No `indexed`, `unique`, `default`, `enum`, `auto_*`, `max_*`, and no unique constraint over one. A value that doesn't fit (wrong length, non-finite number, `f16` overflow, non-canonical base64) is refused `DB3_VECTOR_INVALID`; a push changing `dims`/`element` while records hold values is refused for that database (`DB3_TYPE_REFUSED`).
 
-**JSON fields.** In a `db3-types/` file with a `[type]` table, a field may `ref` an object def in `schemas/` (same three ref forms as a shared enum); only `required` sits beside it, and no unique constraint names it. The record stores canonical JSON text (RFC 8785) in a plain `string` field; push sends `type = "string"`. In functions the member is `Db3Json<Schemas.<Name>>` (a plain string doesn't compile): write `encodeDb3Json(value)`, read `decodeDb3Json(row.field)`, both from `primitive-functions`; neither checks the def, and the server stores any string. Filters take only `$exists` on it; no sort, index or path filter. A JSON field's def may use only `type`, `enum`, `properties`/`fields`, `required`, boolean `additionalProperties`, one-schema `items`, `oneOf`, `minimum`, `maximum`, `minLength`/`maxLength` (Unicode code points), `pattern` (JavaScript and `NSRegularExpression` syntax, no backreference such as `\1` or `\k<name>`), `minItems`, `maxItems` and the annotations `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, `readOnly`, `writeOnly`; push and `functions codegen` refuse any other. `encodeDb3Json` refuses a non-object root, a non-finite number or one above 2^53 in magnitude (`DB3_JSON_INVALID`); store such a number as a string.
-On iOS, `primitive functions codegen --lang swift` declares in `Primitive.generated.swift` each such def's type, the alias `Db3JSON_<file>_<Name>` (a `-` in the file stem written `_`) and a `Db3JSONDef_<file>_<Name>` binding the models use; the app target must compile it. The model property is `Db3JSON_<file>_<Name>?` (Optional even when `required`, which the save checks); an in-place change (`order.shipping_address?.city = "x"`) marks it changed. Every save encodes an assigned value and validates it against the def, throwing `Db3JSONValueError` (`path`, `reason`, `kind`) and writing nothing when it doesn't match or holds an `Int` above 2^53 in magnitude. Only the generated web and iOS models validate: functions, bulk loads, raw `client.db3` writes and older clients don't. Stored text that doesn't decode into the struct reads `nil` (logged once per field) and stays in `<field>Raw`; a save that didn't assign the field leaves it. A struct drops keys it doesn't declare when saved, so add def fields as optional. The model's hash combines only whether a JSON field holds a value.
+**JSON fields.** In a `db3-types/` file with a `[type]` table, a field may `ref` an object def (`type = "object"`), a list def (`type = "array"`, e.g. `items = { type = "string" }`) or a map def (`type = "object"` with a schema-valued `additionalProperties`, e.g. `additionalProperties = { type = "number" }`) in `schemas/` (same three ref forms as a shared enum); only `required` sits beside it, and no unique constraint names it. The record stores canonical JSON text (RFC 8785) in a plain `string` field: the object, or the array itself for a list def (no wrapper); push sends `type = "string"`. In functions the member is `Db3Json<Schemas.<Name>>` (a list def's `Schemas.<Name>` is `T[]`, a map def's `Record<string, T>`; a plain string doesn't compile): write `encodeDb3Json(value)`, read `decodeDb3Json(row.field)`, both from `primitive-functions` and taking an object or an array; neither checks the def, and the server stores any string. Filters take only `$exists` on it; no sort, index or path filter. A JSON field's def may use only `type`, `enum`, `properties`/`fields`, `required`, `additionalProperties` (boolean, or a schema every key `properties` doesn't declare must match, a `required` key among them), one-schema `items`, `oneOf`, `minimum`, `maximum`, `minLength`/`maxLength` (Unicode code points), `pattern` (JavaScript and `NSRegularExpression` syntax, no backreference such as `\1` or `\k<name>`), `minItems`, `maxItems` and the annotations `title`, `description`, `default`, `format`, `examples`, `$comment`, `deprecated`, `readOnly`, `writeOnly`; push and `functions codegen` refuse any other. `encodeDb3Json` refuses a root that is neither an object nor an array, a non-finite number or one above 2^53 in magnitude (`DB3_JSON_INVALID`); store such a number as a string. An app build older than this release reads a list field as empty (`undefined` / `nil`). A function or prompt schema that refs a map def is refused at push and by `functions codegen` (`additionalProperties must be true or false`).
+On iOS, `primitive functions codegen --lang swift` declares in `Primitive.generated.swift` each such def's type, the alias `Db3JSON_<file>_<Name>` (a `-` in the file stem written `_`) and a `Db3JSONDef_<file>_<Name>` binding the models use; the app target must compile it. The model property is `Db3JSON_<file>_<Name>?` (Optional even when `required`, which the save checks); an in-place change (`order.shipping_address?.city = "x"`) marks it changed. Every save encodes an assigned value and validates it against the def, throwing `Db3JSONValueError` (`path`, `reason`, `kind`) and writing nothing when it doesn't match or holds an `Int` above 2^53 in magnitude. Only the generated web and iOS models validate: functions, bulk loads, raw `client.db3` writes and older clients don't. A list def's type is a Swift array (`[String]`, or `[Address]` for `items = { ref = "Address" }`), a map def's a dictionary (`[String: Double]`); beside declared `properties`, the catch-all is typed by the value schema. Stored text that doesn't decode into the field's type reads `nil` (logged once per field) and stays in `<field>Raw`; a save that didn't assign the field leaves it. A struct drops keys it doesn't declare when saved, so add def fields as optional. The model's hash combines only whether a JSON field holds a value.
 
 **Enforced enums.** `enforce_enum = true` beside a string field's `enum` (or its shared-enum `ref`) makes the database refuse any create, patch, upsert, trigger `set` or load line that leaves a non-null value outside the set, with `DB3_VALUE_NOT_IN_ENUM` (message: `tasks id=<id>: field "status" takes one of open, doing, done; the write is "archived"`); a device refuses it before sending, in the same words. `null`, an absent field and a delete pass. The value is `true` or `false` only (anything else is refused when the type is read); not on the `id` field; an enforced `default` must be in the set; a database type with databases of it is refused `ENFORCE_ENUM_DB3_ONLY`. A push or attach that turns enforcement on, or drops a value, over a database whose live records hold an outside value is refused for that database (`DB3_TYPE_REFUSED`, reason with `rows` and up to three `[id, value]` `samples`); it keeps its revision until the records are fixed and the push retried. In an `atomic: false` batch the outside operation's `results[i]` carries the code with `status: 400`; a default batch fails whole at its `index`.
 
@@ -208,7 +218,7 @@ A database that grew without a type: `primitive db3 schema <db3-id> --toml --out
 
 On a device, the generated models read and write the **local copy** of a synced database. Name the database with `{ db3: id }` on `query`/`count`/`aggregate`/`save`/`increment` (Swift: `QueryOptions(db3: [id])`, `AggregateOptions(db3: [id])`, `save(in: id)`, `Model.increment(id:fields:in: id)`), or set a default with `BaseModel.setDefaultDb3(id)` (Swift: `client.setDefaultDb3(id)`). Unless you name a database, a read applies to every database on the device.
 
-In a server function, `ctx.db3(db3Id, "<type>").model("<key>")` reads and writes on the server with the app's authority — any database, synced or not, no grant needed. A model handle has `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch` and `batchRead`. Over HTTP from a client — admin tooling, or a database with sync off — `client.db3.records(id)` offers the same verbs with the same options and refusals.
+In a server function, `ctx.db3(db3Id, "<type>").model("<key>")` reads and writes on the server with the app's authority — any database, synced or not, no grant needed. A model handle has `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`, `deleteWhere` and `patchWhere`. Over HTTP from a client — admin tooling, or a database with sync off — `client.db3.records(id)` offers the same verbs with the same options and refusals.
 
 ### Querying
 
@@ -358,6 +368,26 @@ Vectors: a device writes numbers and reads them decoded; `null` clears. A stored
 A model's vector field is `[Float]` (`PrimitiveValue.vector`; a raw row's `row["embedding"]?.floatArrayValue`). `VectorCodec.encode(_:encoding:)`, `VectorCodec.decode(_:encoding:)` and `VectorCodec.bytes(_:)` convert the stored text.
 
 
+Batches: `client.db3.batch(db3Id, [...])` takes `.create`, `.patch`, `.delete`, `.upsert` and `.increment` (each with an optional `condition`), and applies them in order as one unit, all or none; `options: Db3BatchOptions(atomic: false)` lets each stand alone, and `results` says which were refused and why.
+
+```swift
+  _ = try await client.db3.batch(db3Id, [
+    .create(model: "tasks", data: ["title": "Plan"]),
+    .create(model: "tasks", data: ["title": "Build"]),
+    .create(model: "tasks", data: ["title": "Ship"]),
+  ])
+
+  // `atomic: false`: each write stands on its own, so one refusal doesn't
+  // undo the others.
+  let outcome = try await client.db3.batch(db3Id, [
+    .create(model: "tasks", data: ["title": "Optional"]),
+    .create(model: "tasks", data: ["title": "Also optional"]),
+  ], options: Db3BatchOptions(atomic: false))
+  for result in outcome.results ?? [] where !result.ok {
+    print("operation \(result.index) refused: \(result.code ?? "")")
+  }
+```
+
 Server function writes:
 
 ```ts
@@ -379,7 +409,7 @@ const { reads } = await tasks.batch([{ action: "create", data: { title: "c" } },
 
 `patch` (here, over HTTP and from the CLI) changes a record that exists: a missing id is refused `DB3_RECORD_NOT_FOUND` (404) and nothing is created; create with `save`. A `condition` is judged first: a `patch` or `delete` with a `condition` on a missing id is refused 409 `DB3_CONDITION_NOT_MET`, not 404, with `details.current.row` `null` (the machine-readable "no such record"). A `delete` of a missing id without a `condition` is a no-op, not an error. An `increment` of a missing id is always 404 `DB3_RECORD_NOT_FOUND`, with or without a `condition`. A trigger's `refuse` is also 409 (`DB3_TRIGGER_REFUSED`, your code in `details.reason`), so tell the 409s apart by `code`, never by status.
 
-Batch writes: `create`, `patch`, `delete`, `upsert` (`constraint`: a `unique` field's name or a constraint name, as `upsertOn` takes; any other name is refused 400 `DOCUMENT_ENTRY_INVALID`, nothing written), `increment`, each with optional `condition` and `requestId`; up to 100 operations per call, reads included; all-or-nothing unless `atomic: false`. Pass a `requestId` (a ULID) on any server write you may retry. A batch may also carry reads (`{ model, action: "query" | "count" | "aggregate", ... }`, taking what `query`, `count` and `aggregate` take): they run in order, each seeing the writes before it, and answer in `reads` at their `index`. A `requestId` retry answers the writes as first applied and the reads again.
+Batch writes: `create`, `patch`, `delete`, `upsert` (`constraint`: a `unique` field's name or a constraint name, as `upsertOn` takes; any other name is refused 400 `DOCUMENT_ENTRY_INVALID`, nothing written), `increment`, each with optional `condition` and `requestId`; up to 1,000 operations per call, reads included; all-or-nothing unless `atomic: false`. The writes are also limited to 1 MiB of JSON together (each run between two reads, or each operation with `atomic: false`), which a batch of larger records reaches first: 413 `DOCUMENT_ENTRY_TOO_LARGE` with `details.bytes` and `details.limitBytes`, nothing written; split it into smaller batches. Pass a `requestId` (a ULID) on any server write you may retry. A batch may also carry reads (`{ model, action: "query" | "count" | "aggregate", ... }`, taking what `query`, `count` and `aggregate` take): they run in order, each seeing the writes before it, and answer in `reads` at their `index`. A `requestId` retry answers the writes as first applied and the reads again.
 
 ### Reading in one request
 
@@ -406,6 +436,78 @@ Server function: `await ctx.db3(id, "workspace").batchRead([{ model: "tasks", ac
 - The whole answer is at most 8 MiB: a page that would pass it ends early with `hasMore`; a read that still can't fit (a first record, a page with `include`, aggregate rows) is refused `DB3_PAGE_TOO_LARGE` with `details.index`.
 - By default the first refused read refuses the request (its code, `details.index`, `details.model`); with `atomic: false` it is answered `{ ok: false, code, status, error }` in its place.
 - A batch of reads needs read access; a batch with writes needs write access even if it carries only reads (`records/batch` is refused 403 to a reader).
+
+### Several databases in one call
+
+`client.db3.parallel` sends 1 to 10 separate `batch` / `batch-read` requests, each on a different database, in one call. Not one batch: nothing is atomic or ordered between them; each is authorized and answered as its own call would be.
+
+```swift
+  let response = try await client.db3.parallel([
+    .batchRead(projectsDb3, [.query(model: "projects", limit: 20)]),
+    .batchRead(teamDb3, [.count(model: "tasks", filter: ["completed": false])]),
+    .batch(myDb3, [.create(model: "visits", data: ["page": "/home"])]),
+  ])
+  // One result per request, in order; a refused request is answered in its place.
+  for result in response.results {
+    if case .refused(let refusal) = result.answer { print(result.status, refusal.code ?? refusal.error) }
+  }
+```
+
+Server function: `await ctx.api.db3.parallel({ body: { requests: [{ db3Id, route: "batch-read", body: { operations } }, ...] } })`. CLI: `primitive db3 records parallel --file requests.json` (exits 1 when any request answered 400 or more; `--json`).
+
+- Each request is `{ db3Id, route: "batch" | "batch-read", body }`, `body` exactly that call's body. The answer is `results: [{ status, body }]` in request order; a refused request is answered in its place, never thrown.
+- The call itself is refused 400 only for its shape: `DB3_PARALLEL_INVALID` (no requests, more than 10, a bad item, `details.index`) and `DB3_PARALLEL_DUPLICATE_DB3` (a database named twice, `details.indexes`); nothing runs.
+- Access is per request: a reader's `batch-read` is answered, their `batch` refused 403 in its place. `names` and `userId` apply to every request.
+- With N requests each database answers within `floor(8 MiB / N)` bytes, writes included: a page ends early with `hasMore`; an answer that can't fit is refused `DB3_PAGE_TOO_LARGE` in its place.
+- Retry by resending the whole call with a `requestId` on each `batch`: each replays its first answer. A replay larger than its share is refused `DB3_PAGE_TOO_LARGE` though it applied; send it alone to read its answer.
+
+### Changing every record that matches a filter
+
+`deleteWhere` and `patchWhere` delete, or merge one `data` object into, the records of one model matching a filter, a page per call, each page one write.
+
+```swift
+  var cursor: String?
+  repeat {
+    let page = try await client.db3.deleteWhere(db3Id, model: "transactions", filter: ["accountId": .string(accountId)], cursor: cursor)
+    cursor = page.nextCursor
+  } while cursor != nil
+
+  // Patch takes the fields to merge into every matching record:
+  let patched = try await client.db3.patchWhere(db3Id, model: "transactions", filter: ["reviewed": false], data: ["reviewed": true])
+```
+
+Server function:
+
+```ts
+const txns = ctx.db3(input.db3Id, "finance").model("transactions");
+let cursor: string | undefined;
+do {
+  const page = await txns.deleteWhere({ filter: { accountId: input.accountId }, cursor });
+  cursor = page.nextCursor;
+} while (cursor);
+await txns.patchWhere({ filter: { accountId: input.accountId, reviewed: false }, data: { reviewed: true } });
+```
+
+CLI: `primitive db3 records delete-where <db3-id> <model> --filter '<json>' [--limit n] [--cursor c] [--all] [-y] [--json]` (asks first unless `-y`) and `primitive db3 records patch-where <db3-id> <model> --filter '<json>' --data '<json>' [--limit n] [--cursor c] [--all] [--json]`; `--all` follows `nextCursor` until `hasMore` is false and prints the total.
+
+| Parameter | |
+|---|---|
+| `filter` | Required; what `query` takes. `{}` is every record; an absent `filter` is refused 400. |
+| `data` | `patchWhere` only: the fields merged into each record, as `patch`'s `data`. |
+| `limit` | Records per call: 1,000 by default and at most for `deleteWhere` and `patchWhere`; larger is refused 400, never clamped. |
+| `cursor` | The previous answer's `nextCursor`. |
+| `requestId` | A ULID; a retry answers the first answer, a refusal included. |
+
+- Answers `{ changed, hasMore, nextCursor?, cutBy?, lsn }`. `hasMore: false` means nothing matching is left: stop without another call. `lsn` is `null` when nothing matched.
+- Records are taken in id order. `$search` filters but does not rank: with `limit` below the matches you get the first by id.
+- Each record meets an id-based write's rules (write access, the type's `set`/`refuse` rules and timestamps on a patch, unique keys); a change trigger gets one run per call. One refused record refuses the call with its code, `details.model` and `details.recordId` (no `index`), and nothing changes.
+- A page is cut to what fits, `hasMore: true`; continue with `nextCursor`. `cutBy: "entryBytes"`: its changes would pass 1 MiB. `cutBy: "rowBytes"`: the records it reads would pass 16 MiB stored. A first record over either alone is `DOCUMENT_ENTRY_TOO_LARGE` (413); change it by id.
+- The body takes no `condition` (put the test in `filter`), `atomic`, `sort` or `include`; each is refused 400.
+
+Gotchas:
+
+- **A patch that leaves records matching loops forever without the cursor.** `patchWhere({ filter: { accountId }, data: { reviewed: true } })` matches the same records afterwards; always pass `nextCursor` back, or filter on what the patch changes (`reviewed: false`).
+- **Signed-out runs are refused.** A function run for a signed-out request gets `FUNCTION_SIGNED_OUT_REFUSED` (403) from both.
 
 ### Bulk loading
 
@@ -449,7 +551,7 @@ To move a database: `primitive db3 export <db3-id> --output <dir>`, then `primit
 
 ### From the CLI
 
-For inspecting or fixing data by hand (admin login), not app code: `primitive db3 records query|count|aggregate|save|patch|delete|increment <db3-id> <model> …`, `primitive db3 records batch <db3-id> --data-file <file>` (at most 100 operations per call, atomic: `create` with an optional `id`, `patch`, `increment`, `delete`, `upsert`, each with an optional `condition`, and reads; a larger file is refused before sending — use `primitive db3 ingest`), `primitive db3 records batch-read <db3-id> --data-file <file>`, `primitive db3 schema <db3-id>`, `primitive db3 inspect <db3-id>`.
+For inspecting or fixing data by hand (admin login), not app code: `primitive db3 records query|count|aggregate|save|patch|delete|increment <db3-id> <model> …`, `primitive db3 records batch <db3-id> --data-file <file>` (at most 1,000 operations per call, atomic: `create` with an optional `id`, `patch`, `increment`, `delete`, `upsert`, each with an optional `condition`, and reads; a larger file is refused before sending — use `primitive db3 ingest`), `primitive db3 records batch-read <db3-id> --data-file <file>`, `primitive db3 schema <db3-id>`, `primitive db3 inspect <db3-id>`.
 
 ### Indexes
 
@@ -634,8 +736,11 @@ Watch out when searching by vector:
 | `hasMany` related rows per request | 1,000 (`DB3_PAGE_TOO_LARGE`) |
 | `$in` / `$nin` values | 1,000 (`QUERY_IN_LIST_TOO_LARGE`) |
 | Bound values per query | 100 (`QUERY_FILTER_TOO_MANY_BINDS`) |
-| Batch operations | 100 per call |
-| One write / batch | 1 MiB JSON (`DOCUMENT_ENTRY_TOO_LARGE`) |
+| Batch operations | 1,000 operations per call (`BATCH_TOO_LARGE`); a ceiling, the 1 MiB below is usually reached first |
+| Records per `deleteWhere` / `patchWhere` call | 1,000 by default and at most |
+| Stored records a `deleteWhere` / `patchWhere` call reads | 16 MiB (`cutBy: "rowBytes"`) |
+| One write / batch | 1 MiB JSON for a batch's writes together, or each run between reads (`DOCUMENT_ENTRY_TOO_LARGE`, `details.bytes`) |
+| Batch answer | 8 MiB |
 | Field names per model | 1,000 |
 
 ## Synced databases on a device
@@ -719,8 +824,34 @@ A resident copy answers reads and takes writes while unsubscribed or offline; wr
 
 | Refused | Code |
 |---|---|
-| `create` with `type`, `sync: false` or `custodian` | `LOCAL_ONLY_UNSUPPORTED_OPTION`, before anything is created |
+| `create` with `sync: false`, `custodian`, or a `type` the generated code carries no local-only declarations for | `LOCAL_ONLY_UNSUPPORTED_OPTION`, before anything is created |
 | A `client.db3` call that asks the server about it (`get`, `permissions`, `setSync`, `setType`, `blobs`, `ingests`, …) and `evict` | `DB3_LOCAL_ONLY` (`details.db3Id`), before any request |
+
+**Typed local-only databases.** `create` with `type` and `localOnly: true` takes a type whose file says `allowLocalOnly = true`: codegen embeds its declarations, and the device judges every write by them at the commit (`DB3_MODEL_NOT_DECLARED`, `DOCUMENT_ENTRY_INVALID`, `DB3_VALUE_NOT_IN_ENUM`, `DB3_VECTOR_INVALID`, unique keys; `details.scope: "local"`). Its constraints and declared indexes come from the type with the server's names, and `stored()` lists its `type`. With `--known-types-only`, a type the build doesn't know is refused `INVALID_ARGUMENT` (`unknown-type`) first.
+
+```swift
+  let db = try await client.db3.create(title: "Journal", type: "journal", localOnly: true)
+
+  // Checked on the device against the type's fields, enums and unique keys.
+  _ = try Task(title: "Write the intro").save(in: db.id)
+
+  let state = try await client.db3.state(db.id)
+  if let error = state.error, error.code == JsBaoErrorCode.db3TypeRefused.rawValue {
+    ui.warn(error.message)
+  }
+```
+
+On open, the device compares this build's declarations with the ones the copy holds:
+
+| Build's declarations | Result |
+|---|---|
+| Same hash | Nothing read or written |
+| Only additions | Installed in one transaction once the records pass them; otherwise nothing installed, the copy works under its declarations, and `state(id).error` is `DB3_TYPE_REFUSED` with `reasons` (`path`, `reason`, `rows`/`duplicates`, `samples`), retried at each open |
+| An older build's | The installed declarations stay and judge this build's writes; nothing reported |
+| Neither contains the other | Reads work; every write is refused `DB3_TYPE_REFUSED` (`details.diverged`), and the state says so |
+| None for the type | Opens under the installed declarations |
+
+Copy whose declarations can't be read: writes are refused `DB3_TYPE_REFUSED` (`details.unreadable`) until a build that declares the type opens it, checks the records and installs its declarations.
 
 Only `client.db3.delete(id)` (nothing sent) and `logout(wipeLocal: true)` remove it. `evictAllLocal` and the retention policy keep it, and it counts toward no `maxDocs` cap. Another user signing in on the device does not see it; its own user sees it again.
 

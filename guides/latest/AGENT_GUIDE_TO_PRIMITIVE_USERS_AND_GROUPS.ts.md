@@ -216,7 +216,7 @@ It returns `{ items, nextCursor }`, where each row is `{ userId, email, name, av
 Every user has one of three built-in roles: `"owner"`, `"admin"`, or `"member"` (default). **Prefer groups over app roles** for application-level role modeling — groups are multi-tenant by context (a user can be `editor` in one project, `viewer` in another) while app roles are global per-app.
 
 Behavior:
-- **`owner`** and **`admin`** users **bypass all rule-set evaluation** for groups and collections, and can read and write every database in the app. Do not try to restrict them via rules.
+- **`owner`** and **`admin`** users **bypass the roles** of every group and collection, and can read and write every database in the app. Do not try to restrict them with roles.
 - **`member`** is the default — access is determined by direct permissions and group memberships.
 - In CEL rule contexts the field is `user.role` (NOT `user.appRole`). See the [Access Control guide's identity context](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#identity-context).
 

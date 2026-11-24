@@ -322,7 +322,8 @@ export default defineFunction({
 ## Turn context and events
 
 `turnContext.function` runs as the turn's initiator (`ctx.trigger.kind === "context"`) with
-the session's variables, timezone and language on `input`; its return, validated against
+input `{}`: after `assertTrigger(ctx, "context")` it reads `ctx.trigger.variables`,
+`timezone`, `locale` and `messageIds` — write `input: []` and no `inputSchema`. Its return, validated against
 `turnContext.schema`, renders as `turn.*` in the system prompt for every model call of that
 turn, and never enters the conversation. With no `function`, a send's own `context` is
 validated against the schema instead — declaring both on one agent is a contradiction a send
@@ -333,25 +334,18 @@ with a client `context` is refused for.
 [function]
 key = "advisor-snapshot"
 entry = "functions/advisor-snapshot/index.ts"
-
-[function.inputSchema]
-type = "object"
-additionalProperties = true   # the turn also sends turnId, timezone, locale and more
-
-[function.inputSchema.properties.variables]
-type = "object"
 ```
 
 ```ts
 // functions/advisor-snapshot/index.ts
-import { allowCallers, defineFunction, requireSignedIn } from "primitive-functions";
+import { allowCallers, assertTrigger, defineFunction, requireSignedIn } from "primitive-functions";
 
 export default defineFunction({
-  input: ["variables"],
+  input: [],
   authorize: allowCallers({ agents: true, users: requireSignedIn() }),
-  handler: async (input: { variables: { householdId: string } }, ctx) => {
-    if (ctx.trigger.kind !== "context") throw new Error("advisor-snapshot only runs as turn context");
-    const { householdId } = input.variables;
+  handler: async (_input, ctx) => {
+    assertTrigger(ctx, "context"); // refuses any other trigger
+    const householdId = String(ctx.trigger.variables.householdId);
     return { plan: await currentPlan(householdId) };
   },
 });
@@ -386,8 +380,9 @@ function = "advisor-history"
 ```
 
 The history function is a hook like `turnContext.function`, run as the turn's initiator
-before every model call with `input.variables`, `input.timezone`, `input.locale` and the
-candidate `input.messages`. Return `{ messages: [...] }`: each entry is `{ messageId }` for
+before every model call with input `{}`; after `assertTrigger(ctx, "history")` it reads
+`ctx.trigger.variables`, `timezone`, `locale`, `round`, the candidate `ctx.trigger.messages`
+and their `estimate`. Return `{ messages: [...] }`: each entry is `{ messageId }` for
 a message you were given (sent in the order you list them) or `{ text }` for text of your
 own, such as a summary of what you dropped. An empty list, an unknown `messageId` or any
 other shape fails the turn `AGENT_TURN_HISTORY_INVALID`; a thrown error fails it
@@ -551,7 +546,7 @@ The message is a `pending` entry in `messages` until its row syncs; the row then
 the same change, before `send` returns if need be, so each message appears once.
 
 A send's `timezone` and `locale` render as `turn.timezone` and `turn.locale` for its turn and
-reach the context function's `input`. With no `turnContext.function`, the send also carries
+reach the context function's `ctx.trigger`. With no `turnContext.function`, the send also carries
 `context`, validated against the schema (`AGENT_SESSION_CONTEXT_NOT_ALLOWED`,
 `AGENT_SESSION_CONTEXT_INVALID`); a failed message keeps it for a retry.
 

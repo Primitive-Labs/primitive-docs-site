@@ -610,7 +610,7 @@ ref = "workspace.tasks"            # row: a stored record, with its id
 | Projection | Shape |
 | --- | --- |
 | `declared` | The declared fields only (closed); storage keys `indexed`, `unique`, `auto_assign`, `auto_stamp`, `dims`, `element` are left out of the declared shape; auto-assigned, stamped and defaulted fields are optional |
-| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned and stamped fields are required, defaulted fields optional (a stored record can lack one), so a record read with `ctx.db3` can be returned as is |
+| `row` | The declared fields plus `id` and the type's timestamps and auto-populated fields (open); auto-assigned and stamped fields are required, and so is a scalar field with a literal default (every read fills it); a string-set or generator default stays optional, so a record read with `ctx.db3` can be returned as is, and a hand-built row that omits a defaulted field fails `FUNCTION_OUTPUT_INVALID` |
 
 - An `outputSchema` gets the `row`; every other schema gets the `declared`
   shape. `#row` or `#declared` chooses: `ref = "workspace.tasks#declared"`.
@@ -765,9 +765,9 @@ stop a run by its run key.
 
 `ctx.users.forEachBatch({ function, key, filter?, sort?, input?, batchSize?, concurrency?, snapshot? })` hands every user a filter matches to a batch function, a batch at a time — no hand-rolled paging loop. `key` scopes the walk to this app and batch function: a repeat call with the same `function`/`key` finds the existing walk (`existing: true`) instead of starting a second. `filter`/`sort` take the same grammar as [`ctx.users.query`](#querying-users); `sort` needs `snapshot: true`. `batchSize` (≤100, default 100) and `concurrency` (≤16, default 4) bound each batch and how many run at once, each over a disjoint partition of the matches. `snapshot` captures every matching id before the first batch, so membership is fixed as of that capture; without it the walk reads live and its match count is provisional until enumeration ends.
 
-Each batch reaches the named function as `{ userIds, input }` under `ctx.trigger.kind === "users-batch"` (`ctx.user` is `null`). Admit it with `authorize: allowCallers({ usersBatch: true })` (or a list of function keys, to admit only that function's own `forEachBatch` starts and refuse admin-started walks) — see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance). A batch can run twice (a retried attempt, a platform restart): make it idempotent. A failed batch retries alone, same number and ids, 3 attempts, 5 s doubling, before the walk gives up on it. `ctx.trigger.walkRunId`/`batch`/`attempt`/`startedByFunctionKey` identify the attempt.
+Each batch runs the named function under `ctx.trigger.kind === "users-batch"` with `ctx.trigger.userIds` (at most `batchSize` ids, the same on every attempt) and `ctx.trigger.input` (the walk's `input`, or `null`); the function's own input is `{}` — write `input: []` — and `ctx.user` is `null`. After `assertTrigger(ctx, "users-batch")` both read with no cast. Admit it with `authorize: allowCallers({ usersBatch: true })` (or a list of function keys, to admit only that function's own `forEachBatch` starts and refuse admin-started walks) — see [Doors at a glance](AGENT_GUIDE_TO_PRIMITIVE_ACCESS_CONTROL.md#doors-at-a-glance). A batch can run twice (a retried attempt, a platform restart): make it idempotent. A failed batch retries alone, same number and ids, 3 attempts, 5 s doubling, before the walk gives up on it. `ctx.trigger.walkRunId`/`batch`/`attempt`/`startedByFunctionKey` identify the attempt.
 
-The walk's own run — not a batch's — fails with one of: `USER_WALK_DENIED` (the door refused it), `USER_WALK_INPUT_REFUSED` (the batch function's `inputSchema` refused `{ userIds, input }`), `USER_WALK_FUNCTION_UNAVAILABLE` (disabled, archived, missing, or no pushed version), `USER_WALK_BATCHES_FAILED` (a batch exhausted its retries), `USER_WALK_ORPHANED` (its coordinator held no state), or `USER_INDEX_SHARD_UNAVAILABLE` (a shard it reads was unreachable). The first three fail it before any batch runs.
+The walk's own run — not a batch's — fails with one of: `USER_WALK_DENIED` (the door refused it), `USER_WALK_INPUT_REFUSED` (the batch function's `inputSchema` refused the input `{}`), `USER_WALK_FUNCTION_UNAVAILABLE` (disabled, archived, missing, or no pushed version), `USER_WALK_BATCHES_FAILED` (a batch exhausted its retries), `USER_WALK_ORPHANED` (its coordinator held no state), or `USER_INDEX_SHARD_UNAVAILABLE` (a shard it reads was unreachable). The first three fail it before any batch runs.
 
 A start on an app with no user index is refused before any of this: `forEachBatch` itself throws `409 USER_INDEX_NOT_READY`, and no run is created. Build the index with `primitive users index rebuild`, which needs an `admin` step-up (see [Admin access](AGENT_GUIDE_TO_PRIMITIVE_CONFIGURATION.md#admin-access-scopes-step-ups-and-ci-sessions)).
 
@@ -1014,8 +1014,9 @@ Naming a user other than the caller, with an optional or a required `userId`:
 
 The role is read at each call, so a task sees a role change made while it
 slept. A named user who is not a member throws `SUBJECT_USER_NOT_FOUND` (404)
-on the optional-`userId` calls; the required-`userId` reads keep their own
-not-found answers.
+on the optional-`userId` calls and on `ctx.usage.forUser`. Of the other
+required-`userId` reads, `groups.listUserMemberships` answers an empty list and
+the rest a plain 404 with no code.
 
 Gotchas:
 
@@ -1306,9 +1307,9 @@ The handle's contract:
 
 - **App authority.** Any database in the app, synced or sync-off, whoever holds it. No grant, no capability. Check the caller in `authorize` when the caller chose the database (see [Checking a user's access](#checking-a-user-s-access)).
 - **Typed from `db3-types/`.** `config push` (or `primitive functions codegen`) types the `Db3` namespace of `functions/primitive.d.ts`; the type argument accepts only declared types, `.model()` only that type's models, and rows come back typed with `id: string` and the type's timestamps as required numbers on the models it stamps (writes leave them out). A write's `data` takes `null` on any field the model leaves optional (`patch(id, { data: { note: null } })`), with no cast: it stores `null` and does not remove the field; on a string set it empties the set. A required field refuses `null`. The type argument is compile-time only; the server enforces the database's actual type (`DB3_MODEL_NOT_DECLARED`).
-- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name is written with the types `primitive-functions` exports keyed by the database type: `Db3TypeModelName<"orders">` bounds `M`, `Db3TypeRow<"orders", M>` is a row, `Db3TypeFilter<"orders", M>` and `Db3TypeSort<"orders", M>` type a filter and sort the caller passes, and `Db3TypeBatchOp<"orders", M>` is one `batch` write (any model's when `M` is left out), its `data` checked against the model its `model` names: `async function readAll<M extends Db3TypeModelName<"orders">>(ctx: FunctionContext, id: string, model: M, filter: Db3TypeFilter<"orders", M>): Promise<Array<Db3TypeRow<"orders", M>>>` loops `ctx.db3(id, "orders").model(model).query({ filter, sort: { id: 1 }, cursor })`, and a chunked writer takes `ops: Array<Db3TypeBatchOp<"orders">>` and calls `ctx.db3(id, "orders").batch(ops.slice(at, at + 100))`. At the call site the rows and the filter are the named model's. Gotcha: a literal filter or sort inside the helper is checked against every model `M` may be, so a field another candidate types differently is a mismatch (take the filter as a `Db3TypeFilter` parameter instead), and a literal `upsertOn` there is refused (pass a `string`).
+- **Helpers over any model.** A helper that pages any model takes the handle as `Db3ModelHandle<T>` (exported by `primitive-functions`), and `T` follows the model passed: `async function readAllRows<T>(model: Db3ModelHandle<T>, filter: Record<string, unknown>): Promise<T[]>`, looping `model.query({ filter, cursor })` on `hasMore`. A helper generic over the model name is written with the types `primitive-functions` exports keyed by the database type: `Db3TypeModelName<"orders">` bounds `M`, `Db3TypeRow<"orders", M>` is a row, `Db3TypeFilter<"orders", M>` and `Db3TypeSort<"orders", M>` type a filter and sort the caller passes, and `Db3TypeBatchOp<"orders", M>` is one `batch` write (any model's when `M` is left out), its `data` checked against the model its `model` names: `async function readAll<M extends Db3TypeModelName<"orders">>(ctx: FunctionContext, id: string, model: M, filter: Db3TypeFilter<"orders", M>): Promise<Array<Db3TypeRow<"orders", M>>>` loops `ctx.db3(id, "orders").model(model).query({ filter, sort: { id: 1 }, cursor })`, and a chunked writer takes `ops: Array<Db3TypeBatchOp<"orders">>` and calls `ctx.db3(id, "orders").batch(ops.slice(at, at + 100))`. At the call site the rows and the filter are the named model's. Gotcha: a literal filter or sort inside the helper is checked against every model `M` may be, so a field another candidate types differently is a mismatch (take the filter as a `Db3TypeFilter` parameter instead), and a literal `upsertOn` there is refused (pass a `string`). `Db3TypeBatchOp<"orders", M>` with `M` a type parameter is refused by the database handle's `batch` (`ctx.db3(id, "orders").batch(ops)`): build the op with a literal model name, take already-built ops as a parameter typed `Db3TypeBatchOp<"orders">` with no model parameter, or pass the `M`-typed ops to `.model(model).batch(ops)` instead.
 - **Untyped and as a member.** `ctx.db3(id)` with no type opens a database created without one (`.model("<key>")` over untyped rows); `ctx.db3(id, type, { asUser: userId })` judges every call by that member's grant instead of the app's authority (a sync-off database refuses them; naming anyone but the caller needs `users:actAsAny`).
-- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`. `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database. Each result of `batchRead`, and of a batch's `reads` (in op order, writes skipped), is typed by the read at its position: after `if (r.ok)` a `query` read's `items` are that model's rows, a `count` read has `count`, an `aggregate` read `result`. Read rows without a cast; a field the model doesn't declare, or a cast to an unrelated row type, fails the push typecheck.
+- **Verbs:** `get`, `query`, `count`, `aggregate`, `save`, `patch`, `delete`, `increment`, `batch`, `batchRead`, `deleteWhere`, `patchWhere`. `deleteWhere({ filter, limit?, cursor?, requestId? })` and `patchWhere({ filter, data, ... })` change up to 1,000 records matching a filter per call as one write, answering `{ changed, hasMore, nextCursor?, cutBy?, lsn }`; loop passing `nextCursor` back as `cursor` until `hasMore` is false ([Databases guide](AGENT_GUIDE_TO_PRIMITIVE_DATABASES.md#changing-every-record-that-matches-a-filter)). `ctx.db3(id, type).batch([...])` spans models, each op naming its `model`, and may carry reads among its writes; `batchRead([...])` answers several reads from one state of the database. Each result of `batchRead`, and of a batch's `reads` (in op order, writes skipped), is typed by the read at its position: after `if (r.ok)` a `query` read's `items` are that model's rows, a `count` read has `count`, an `aggregate` read `result`. Read rows without a cast; a field the model doesn't declare, or a cast to an unrelated row type, fails the push typecheck.
 - **Refusals reject:** `DB3_NOT_FOUND` (404, `db3Id` names no database in the app, or one that was deleted — `get` on a missing record answers `null` instead), `DB3_CONDITION_NOT_MET` (409, a failed `condition`; the condition is judged first, so a `patch` or `delete` with a `condition` on a missing record is this 409, with `details.current.row` `null`), `DB3_RECORD_NOT_FOUND` (404, a `patch` without a `condition` on a missing record, or an `increment` on a missing record with or without one; nothing is created), `DB3_TRIGGER_REFUSED` (409, a type rule's `refuse`; its code in `details.reason`), `DB3_MODEL_NOT_DECLARED` (400, a model the type does not declare). A `delete` of a missing record without a `condition` is a no-op, not a refusal. Two refusals answer 409, so branch on `code`, never on status.
 - **Retries:** a write that timed out may have applied; resend it with the same `requestId` and it applies once.
 - **Paging:** `query` answers 100 records when `limit` is omitted and takes a `limit` up to 10,000 (larger is refused, never clamped); a page stops before 8 MiB of records. Loop on `hasMore`, passing `nextCursor` back as `cursor` with the same `sort`.
@@ -1492,11 +1493,36 @@ cron entry's name):
 ```toml
 [[function.triggers.db3]]
 type = "orders"                        # the db3 type to watch; at most ten per function, each named once
+models = ["Order"]                     # optional: a batch must change at least one listed model
+writers = ["user", "function"]         # optional: the batch's writer kind must be listed
 ```
 
-Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. A bulk load starts none. The input is `{ db3Id, type, from, to, principal, changes: [{ l, model, id, kind }] }` (`l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(input.db3Id, input.type)`. `ctx.trigger` is `{ kind: "db3", db3Id, type, triggerId, from, to }`; the run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`. A handler whose input schema closes `changes`' object shape must allow `l`, or the whole batch is refused.
+Each batch of writes a database of that type accepts — a device's synced writes, a function's or the CLI's records call — starts one task run. A bulk load starts none. The batch is the `db3` arm of `ctx.trigger`: `{ kind: "db3", db3Id, type, triggerId, from, to, principal, writer, changes: [{ l, model, id, kind }] }` (`principal` is the writer or `null`; `l` is that change's log number, within `from`..`to`; `kind` is `create`, `update` or `delete`): keys, not values — read records through `ctx.db3(ctx.trigger.db3Id, ctx.trigger.type)`.
 
-- **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Inspect `input.changes` and skip what your own writes produced.
+`ctx.trigger.writer` is the batch's writer kind, as hook rules read `user.writer`: `"user"` (a device, a records call with a member's or admin's token, a function acting `asUser`), `"function"` (a function a signed-in user invoked, and its nested starts), `"system"` (a cron fire, a webhook, a db3 trigger run, `--as system`).
+
+`models` and `writers` are optional, each a non-empty list (`models` at most 50, names matched exactly); with both, a batch must pass both, and with neither every batch starts a run. A batch that passes starts one run with all of its changes; one an entry leaves out starts nothing — no run, no `trigger.fire` usage, no rate slot. `config push` refuses an unknown writer kind and a model the type does not declare (`[type] models` shared models count; a model the same push adds to the type is accepted; a type the app does not hold is not checked). `functions get` shows `models` and `writers` (`all` when absent). A changed filter takes effect within 30 seconds. The run's input is `{}`: write `input: []` and no `inputSchema`. The run is keyed under the database id and has no caller. Admit the door in `authorize` with `allowCallers({ db3: true })`; `auth.trigger` carries the same changes.
+
+```ts
+import { allowCallers, assertTrigger, defineFunction } from "primitive-functions";
+
+export default defineFunction("order-placed", {
+  input: [],
+  authorize: allowCallers({ db3: true }),
+  handler: async (_input, ctx) => {
+    assertTrigger(ctx, "db3");
+    for (const change of ctx.trigger.changes) {
+      if (change.model === "Order" && change.kind === "create") {
+        await ctx.channels.publish(`orders:${change.id}`, { status: "placed" });
+      }
+    }
+  },
+});
+```
+
+In a keyed `defineFunction`, `change.model` is the watched types' model names (`Db3Trigger<K>`, `Db3Change`, `Db3ChangeKind`); with two watched types, check `ctx.trigger.type` first. A change to a type the active version no longer watches is dropped `DB3_TYPE_NOT_WATCHED`.
+
+- **A watcher that writes the database it watches re-triggers itself**, bounded only by `ratePerMinute`. Its own writes are `"system"`: declare `writers = ["user", "function"]` to skip them.
 
 ### Webhook verification schemes
 
@@ -1598,10 +1624,16 @@ console.log(result.record.id); // "o1"
 
 | Member | Not overridden |
 | --- | --- |
-| Function (`ctx.configVar`, `ctx.users.send`, `ctx.api.<ns>.<op>`, `step.sleep`) | Throws `TEST_MEMBER_NOT_PROVIDED` when called; `error.member` is the path. |
+| Function (`ctx.configVar`, `ctx.users.send`, `ctx.api.<ns>.<op>`, `ctx.reauthorize`, `step.sleep`) | Throws `TEST_MEMBER_NOT_PROVIDED` when called; `error.member` is the path. |
 | `ctx.user`, `trigger`, `runtime`, `runId`, `sliceId`, `auth` | Throws the same error when read. Set `null` or a value to read it. |
 | `ctx.tool` | Reads `undefined`. |
 | `step.do` | Runs the body once and resolves to its result, for both call forms. |
+
+For an object-form handler, pass `auth` and, when the logic checks the caller
+again, `reauthorize` (`reauthorize: async () => ({ userId: "u1" })`; a deny fake
+rejects). Either one types the result as the handler's
+`FunctionContext & FunctionAuthorizedContext`. With `auth` given, the
+`reauthorize` fake must resolve the type of `auth`.
 
 Gotchas:
 

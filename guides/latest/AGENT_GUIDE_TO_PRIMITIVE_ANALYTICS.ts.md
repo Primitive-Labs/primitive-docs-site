@@ -344,8 +344,9 @@ GET /app/{appId}/api/analytics/users/search?signupStartDay=2026-09-01&signupEndD
 GET /app/{appId}/api/analytics/users/{userUlid}/detail
 GET /app/{appId}/api/analytics/users/{userUlid}/snapshot
 
-# Events
-GET /app/{appId}/api/analytics/events?windowDays=7&page=0
+# Events — the feed pages by cursor (see Paging the event feed)
+GET /app/{appId}/api/analytics/events?windowDays=7&limit=50
+GET /app/{appId}/api/analytics/events?windowDays=7&limit=50&cursor=<nextCursor>
 GET /app/{appId}/api/analytics/events/grouped?windowDays=7&groupBy=action
 
 # Error groups — failures grouped by fingerprint, per-day count buckets
@@ -385,7 +386,7 @@ Every endpoint returns a JSON object, and `ctx.api.analytics` in a server functi
 | `users.search` — `/users/search` | `{ query, limit, offset, truncated, signupStartDay, signupEndDay, testUsers, results }` — rows have the `users.top` shape minus `firstSeenInWindow` (it searches the full retained range, so its `firstSeen` is already the all-time value) plus `signedUpAt` / `signupDay`. Optional params: `signupDay`, or `signupStartDay` + `signupEndDay` (≤ 90 days), and `offset` |
 | `users.detail` — `/users/{userUlid}/detail` | `{ user: { user_ulid, email, name }, stats: { first_seen, last_active, total_events, days_active }, events_by_action: [{ action, event_count, last_occurred }], events_by_feature: [{ feature, event_count, pct }] }` |
 | `users.snapshot` — `/users/{userUlid}/snapshot` | `{ snapshot: { timestamp, values } }`, or `{ snapshot: null }` when the user has none |
-| `events` — `/events` | `{ page, page_size, total_rows, testUsers, rows }` — row fields under [Event row shape](#event-row-shape) |
+| `events` — `/events` | `{ items, hasMore, nextCursor?, testUsers }` — row fields under [Event row shape](#event-row-shape); also the deprecated `rows`, `page`, `page_size`, `total_rows` and `_timing` (see [Paging the event feed](#paging-the-event-feed)) |
 | `events.grouped` — `/events/grouped` | `{ group_by, testUsers, rows: [{ group_value, raw_group_value, events, unique_users }] }` |
 | `errors.groups` — `/errors/groups` | `{ window_days, rows: [{ fingerprint, normalized_title, source, status_class, total, daily: [{ day, count }], first_seen, last_seen, exemplar: { message, action, scope_key, step_id, run_id, at } \| null }] }` |
 | `prompts.top` — `/prompts/top` | `{ windowDays, limit, prompts: [{ promptKey, executions, medianDurationMs, p95DurationMs, p10, p50, p95, avgInputTokens, avgOutputTokens, totalTokens, executionsWithCost, totalCost, avgCost }] }` — `totalCost` / `avgCost` are `null` when no execution in the window reported a cost |
@@ -405,6 +406,27 @@ Every endpoint returns a JSON object, and `ctx.api.analytics` in a server functi
 - **Page signup searches.** While `truncated` is true, increment `offset` by the returned `limit` (1–100). Re-read a completed day if new signups could have shifted pages during the search.
 - **Retention uses percentages.** Values range from 0–100; `null` means the cohort has not reached that week. A rejoining member belongs to their latest cohort.
 - **Error day buckets are sparse.** Divide totals by `window_days`, not by the number of returned buckets.
+
+### Paging the event feed
+
+`/analytics/events` answers the standard list envelope, newest first: rows in `items`, the next page by `nextCursor`, the end at `hasMore: false`. `limit` defaults to 50 and is capped at 100. A server function pages it the same way:
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await ctx.api.analytics.listEvents({ windowDays: 1, limit: 100, cursor });
+  for (const event of page.items) handle(event);
+  cursor = page.nextCursor;
+} while (cursor);
+```
+
+Send each `nextCursor` with the same `windowDays`, filters and `testUsers` as the page that returned it; a cursor sent with any other returns `400`. A walk covers the window as it stood at its first page, so events recorded after the first page are not returned by that walk.
+
+### Gotchas when paging events
+
+- **A page can be shorter than `limit` while `hasMore` is true.** A page ends on a whole second. Stop on `hasMore: false`, not on a short page.
+- **A busy second can repeat one event.** Paging returns each event at most once, except within a single second that holds more than `limit` events, where an event that arrives during the walk can repeat. Events have no id and one-second timestamps. Raise `limit` to 100 to make this rarer, and deduplicate if a repeat matters.
+- **`page` is deprecated.** `page`, and the `rows`, `page`, `page_size`, `total_rows` and `_timing` keys, are removed in the first breaking release after 2027-02-15. Read `items` and page with `cursor`. `page` cannot be combined with `limit` or `cursor` (`400`).
 
 ### Filtering events / events-grouped
 

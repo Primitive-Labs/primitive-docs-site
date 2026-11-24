@@ -528,7 +528,8 @@ To read or manually set the token:
 
 ```swift
   // Manually set a token (e.g. obtained out-of-band). Triggers authSuccess
-  // and pushes through the normal apply-token pipeline.
+  // and pushes through the normal apply-token pipeline. Local storage
+  // switches to the token's user, so a database subscribed next is theirs.
   client.updateToken(jwt, cause: "external")
 
   // Read the current token via the decoded JWT payload, or track it from the

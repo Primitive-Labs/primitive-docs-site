@@ -46,7 +46,8 @@ primitive sessions list --user-id <id>                 # auth sessions
 # Databases and their records
 primitive db3 list --custodian user:<user-id>          # databases one user holds
 primitive db3 list --user-id <user-id> [--via held,shared,app]  # every database a user can open, sync-off included
-primitive db3 get <db3-id>                             # title, type, sync and who holds it
+primitive db3 list --custodian app --tag <tag>         # the databases carrying a tag (also with --user-id)
+primitive db3 get <db3-id>                             # title, type, sync, tags and who holds it
 primitive db3 records query <db3-id> <model-name> [--filter '{...}'] [--sort '{"field":-1}']
 primitive db3 records count <db3-id> <model-name> [--filter '{...}']
 primitive db3 records aggregate <db3-id> <model-name> --op <count|sum|avg|min|max> [--field <f>] [--group-by <f>]

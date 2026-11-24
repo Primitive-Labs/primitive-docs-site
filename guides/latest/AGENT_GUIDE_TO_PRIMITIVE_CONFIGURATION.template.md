@@ -395,53 +395,16 @@ databases guide's "Who creates a type"). `"members"` or no line is every member;
 set, and a file without the line clears it.
 
 `[clients.<platform>]` declares which versions of the app are current on a
-platform; anyone reads it from `GET settings/client-versions`
-(`client.getClientVersions()` in JavaScript):
-
-```toml
-[clients.ios]
-latest = "2.4.0"
-minRecommended = "2.2"
-minRequired = "2.0"
-updateUrl = "itms-apps://apps.apple.com/app/id1234567890"
-```
-
-Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`, `enforce`, at least one. A
-platform name matches `[a-z][a-z0-9-]{0,31}`; a version is one to three
-dot-separated numbers of up to six digits, compared numerically; `minRequired`
-≤ `minRecommended` ≤ `latest` where set; `updateUrl` is `https:`,
-`itms-apps:`, `itms-beta:`, `macappstore:` or `market:`. Push and
-`PUT settings` refuse anything else with `INVALID_CLIENT_VERSIONS`, naming
-`[clients.<platform>].<key>`.
-
-`enforce = true` (a boolean, only beside `minRequired`) makes the server
-refuse a caller that reports the platform and a lower version in
-`X-Primitive-App-Version` / `X-Primitive-App-Platform`: HTTP 426
-`CLIENT_UPDATE_REQUIRED` with `details: { platform, version, minRequired }`,
-and a socket closed with 4426. `settings/client-versions`, `settings/sign-in`,
-`oauth-config`, `auth/refresh` and `auth/logout` always answer; a caller
-reporting no version, another platform or an unparseable version is
-admitted. Each refusal adds one point to the `client.update_refused` usage
-meter.
+platform. Keys: `latest`, `minRecommended`, `minRequired`, `updateUrl`,
+`enforce`, and `[[clients.<platform>.backendOverrides]]` tables. See
+[Client Versions](AGENT_GUIDE_TO_PRIMITIVE_CLIENT_VERSIONS.md) for the grammar,
+`enforce`, the confirmations a push asks for, and overrides.
 
 Removing a managed setting clears it or restores its default. Keep explicit
 values when a feature must stay disabled, especially
 `emailSignInEnabled = false`.
 
 ## Gotchas
-
-### Client versions
-
-- Quote versions: an unquoted `latest = 1.10` is the TOML number `1.1`, and
-  push refuses it.
-- Lowering or removing a stored `minRequired` or `minRecommended` (removing
-  its table included) needs confirmation: pass `--yes` in a non-interactive
-  run, or the push fails and `app.toml` is not applied.
-- `CLIENT_VERSIONS_CHANGED` means the stored policy changed after the push
-  compared it; nothing was written. Run the push again.
-- `enforce` without `minRequired`, at either value, is refused. Turning it on
-  refuses every older build at once; ship the build that meets `minRequired`
-  first.
 
 ### Push failures
 

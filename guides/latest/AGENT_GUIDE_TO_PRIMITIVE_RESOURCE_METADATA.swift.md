@@ -318,7 +318,7 @@ primitive users walk start --function copy-user-metadata --key copy-billing-1 --
 
 ### Copy one property into a new one
 
-To change a field's type or uniqueness, declare the new field and run the same function with two changes. Read the source from the user instead of the category: `const row = (await ctx.users.get(userId))?.properties ?? {}`. And convert in `valueFor`, because a field keeps its type and a copy without conversion refuses every user. For example, use `Number(raw)` for text into a number when `Number.isFinite` holds for the result (a non-finite number would be written as `null` and clear the field), or `[raw]` for a scalar into a stringset. Return what you can't convert unchanged, so the write refuses it into `refused`. A unique target lists each conflicting user under `refused`; the walk still completes.
+To change a field's type or make it unique, declare the new field and run the same function with two changes. Read the source from the user instead of the category: `const row = (await ctx.users.get(userId))?.properties ?? {}`. And convert in `valueFor`, because a field keeps its type and a copy without conversion refuses every user. For example, use `Number(raw)` for text into a number when `Number.isFinite` holds for the result (a non-finite number would be written as `null` and clear the field), or `[raw]` for a scalar into a stringset. Return what you can't convert unchanged, so the write refuses it into `refused`. A unique target lists each conflicting user under `refused`; the walk still completes.
 
 ## Metadata lifecycle
 
